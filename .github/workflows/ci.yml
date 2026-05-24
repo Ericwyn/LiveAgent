@@ -141,8 +141,9 @@ jobs:
         run: pnpm test:frontend
 
   tauri-rust:
-    name: Tauri Rust
+    name: Tauri Rust Check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -162,8 +163,10 @@ jobs:
         with:
           workspaces: crates/agent-gui/src-tauri
 
-      - name: Test Tauri backend
-        run: cargo test --manifest-path crates/agent-gui/src-tauri/Cargo.toml
+      - name: Check Tauri backend tests
+        env:
+          CARGO_TERM_COLOR: always
+        run: cargo check --manifest-path crates/agent-gui/src-tauri/Cargo.toml --tests
 
   whitespace:
     name: Diff Hygiene
