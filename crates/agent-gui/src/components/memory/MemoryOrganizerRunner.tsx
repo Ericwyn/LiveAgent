@@ -114,7 +114,7 @@ type OrganizerStats = {
 };
 
 const MEMORY_ORGANIZER_EVENT = "liveagent:memory-organizer-poke";
-const ORGANIZER_POLL_INTERVAL_MS = 15_000;
+const ORGANIZER_MAX_WAKE_DELAY_MS = 60 * 60_000;
 const ORGANIZER_BODY_EXCERPT_CHARS = 3_000;
 const ORGANIZER_META_BODY_EXCERPT_CHARS = 600;
 const ORGANIZER_CLUSTER_SIZE = 8;
@@ -1470,7 +1470,7 @@ export function pokeMemoryOrganizerRunner() {
   if (typeof window === "undefined") {
     return false;
   }
-  window.dispatchEvent(new CustomEvent(MEMORY_ORGANIZER_EVENT));
+  window.dispatchEvent(new CustomEvent(MEMORY_ORGANIZER_EVENT, { detail: { force: true } }));
   return true;
 }
 
@@ -1484,11 +1484,53 @@ export function MemoryOrganizerRunner({ settings, setSettings }: MemoryOrganizer
 
   useEffect(() => {
     let cancelled = false;
+    let wakeTimeout: number | null = null;
 
-    async function tick() {
+    function clearWakeTimeout() {
+      if (wakeTimeout === null) return;
+      window.clearTimeout(wakeTimeout);
+      wakeTimeout = null;
+    }
+
+    function scheduledOrganizerDelayMs() {
+      const current = settingsRef.current;
+      if (
+        !current.memory.organizerEnabled ||
+        current.memory.organizerSchedule.frequency === "none"
+      ) {
+        return null;
+      }
+      const dueAt = current.memory.organizerNextRunAt;
+      if (typeof dueAt !== "number" || !Number.isFinite(dueAt) || dueAt <= 0) {
+        return null;
+      }
+      return Math.max(0, dueAt - Date.now());
+    }
+
+    function scheduleNextWake() {
+      clearWakeTimeout();
+      if (cancelled) return;
+      const delay = scheduledOrganizerDelayMs();
+      if (delay === null) return;
+      wakeTimeout = window.setTimeout(
+        () => void tick(false),
+        Math.min(delay, ORGANIZER_MAX_WAKE_DELAY_MS),
+      );
+    }
+
+    async function tick(forceClaim: boolean) {
       if (cancelled || runningRef.current) return;
       const current = settingsRef.current;
       const model = current.memory.organizerModel;
+      const delay = scheduledOrganizerDelayMs();
+      const shouldClaim =
+        forceClaim ||
+        delay === 0 ||
+        (delay === null && current.memory.organizerEnabled && Boolean(model));
+      if (!shouldClaim) {
+        scheduleNextWake();
+        return;
+      }
       runningRef.current = true;
       try {
         const claim = await memoryOrganizeDueClaim({
@@ -1510,19 +1552,35 @@ export function MemoryOrganizerRunner({ settings, setSettings }: MemoryOrganizer
         console.error("memory organizer runner failed", error);
       } finally {
         runningRef.current = false;
+        scheduleNextWake();
       }
     }
 
-    const interval = window.setInterval(() => void tick(), ORGANIZER_POLL_INTERVAL_MS);
-    const onPoke = () => void tick();
+    const onPoke = (event: Event) => {
+      const force =
+        !(event instanceof CustomEvent) || event.detail?.force !== false;
+      void tick(force);
+    };
     window.addEventListener(MEMORY_ORGANIZER_EVENT, onPoke);
-    void tick();
+    scheduleNextWake();
+    void tick(true);
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      clearWakeTimeout();
       window.removeEventListener(MEMORY_ORGANIZER_EVENT, onPoke);
     };
   }, [setSettings]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent(MEMORY_ORGANIZER_EVENT, { detail: { force: false } }));
+  }, [
+    settings.memory.organizerEnabled,
+    settings.memory.organizerSchedule.frequency,
+    settings.memory.organizerNextRunAt,
+    settings.memory.organizerModel,
+    settings.memory.organizerScope,
+    settings.memory.organizerMode,
+  ]);
 
   return null;
 }

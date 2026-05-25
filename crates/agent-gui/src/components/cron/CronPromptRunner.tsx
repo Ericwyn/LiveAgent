@@ -67,6 +67,8 @@ const executionTimeoutHandles = new Map<string, number>();
 const localTimedOutExecutionIds = new Set<string>();
 const serverExpiredExecutionIds = new Set<string>();
 let completionFlushChain: Promise<void> = Promise.resolve();
+let mountedRunnerCount = 0;
+let deferredGlobalCleanupTimer: number | null = null;
 
 function buildPromptTimeoutMessage() {
   return "Auto Prompt run timed out before the front-end completed it.";
@@ -295,6 +297,21 @@ function clearExecutionTimeout(executionId: string) {
   }
 }
 
+function cleanupGlobalPromptRunnerState() {
+  for (const timer of executionTimeoutHandles.values()) {
+    window.clearTimeout(timer);
+  }
+  executionTimeoutHandles.clear();
+  for (const controller of executionAbortControllers.values()) {
+    controller.abort();
+  }
+  executionAbortControllers.clear();
+  runningExecutionIds.clear();
+  runningTaskIds.clear();
+  localTimedOutExecutionIds.clear();
+  serverExpiredExecutionIds.clear();
+}
+
 function remainingPromptRunTimeoutMs(startedAt: number) {
   const normalizedStartedAt = Number.isFinite(startedAt) ? startedAt : Date.now();
   const elapsed = Math.max(0, Date.now() - normalizedStartedAt);
@@ -466,8 +483,17 @@ export function CronPromptRunner({ settings }: CronPromptRunnerProps) {
   }, [settings]);
 
   useEffect(() => {
+    mountedRunnerCount += 1;
+    if (deferredGlobalCleanupTimer !== null) {
+      window.clearTimeout(deferredGlobalCleanupTimer);
+      deferredGlobalCleanupTimer = null;
+    }
+    let stoppedTakingRuns = false;
+
     async function takePendingRuns() {
+      if (stoppedTakingRuns) return;
       await flushQueuedPromptCompletions();
+      if (stoppedTakingRuns) return;
 
       let pendingRuns: CronPromptRunRequest[] = [];
       try {
@@ -479,6 +505,9 @@ export function CronPromptRunner({ settings }: CronPromptRunnerProps) {
 
       const queuedCompletionIds = getQueuedPromptCompletionIds();
       for (const request of pendingRuns) {
+        if (stoppedTakingRuns) {
+          break;
+        }
         const executionId = normalizeExecutionId(request.executionId);
         const taskId = normalizeTaskId(request.taskId);
         if (!executionId || !taskId) {
@@ -495,6 +524,7 @@ export function CronPromptRunner({ settings }: CronPromptRunnerProps) {
     }
 
     async function startRun(request: CronPromptRunRequest) {
+      if (stoppedTakingRuns) return;
       const executionId = normalizeExecutionId(request.executionId);
       const taskId = normalizeTaskId(request.taskId);
       if (
@@ -549,7 +579,9 @@ export function CronPromptRunner({ settings }: CronPromptRunnerProps) {
         serverExpiredExecutionIds.delete(executionId);
         runningExecutionIds.delete(executionId);
         runningTaskIds.delete(taskId);
-        void takePendingRuns();
+        if (!stoppedTakingRuns) {
+          void takePendingRuns();
+        }
       }
     }
 
@@ -570,8 +602,16 @@ export function CronPromptRunner({ settings }: CronPromptRunnerProps) {
     );
 
     return () => {
+      stoppedTakingRuns = true;
       void unlistenPendingPromise.then((unlisten) => unlisten());
       void unlistenExpiredPromise.then((unlisten) => unlisten());
+      mountedRunnerCount = Math.max(0, mountedRunnerCount - 1);
+      deferredGlobalCleanupTimer = window.setTimeout(() => {
+        deferredGlobalCleanupTimer = null;
+        if (mountedRunnerCount === 0) {
+          cleanupGlobalPromptRunnerState();
+        }
+      }, 0);
     };
   }, []);
 

@@ -1545,9 +1545,10 @@ pub async fn system_append_debug_jsonl(
 pub fn system_begin_power_activity(
     activity_id: String,
     reason: String,
+    ttl_ms: Option<u64>,
     power_activity: tauri::State<'_, Arc<PowerActivityManager>>,
 ) -> Result<(), String> {
-    power_activity.begin(activity_id, reason);
+    power_activity.begin(activity_id, reason, ttl_ms);
     Ok(())
 }
 

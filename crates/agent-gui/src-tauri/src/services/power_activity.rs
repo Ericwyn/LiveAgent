@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[cfg(all(target_os = "macos", not(test)))]
 use std::process::{Child, Command, Stdio};
@@ -7,36 +9,67 @@ use std::process::{Child, Command, Stdio};
 use std::{
     io,
     sync::mpsc,
-    thread::{self, JoinHandle},
-    time::Duration,
+    thread::JoinHandle,
 };
 
 #[derive(Default)]
 pub struct PowerActivityManager {
-    state: Mutex<PowerActivityState>,
+    state: Arc<Mutex<PowerActivityState>>,
 }
 
 #[derive(Default)]
 struct PowerActivityState {
-    requests: HashMap<String, String>,
+    requests: HashMap<String, PowerActivityRequest>,
     keep_awake: Option<KeepAwakeHandle>,
+    watchdog_running: bool,
+}
+
+struct PowerActivityRequest {
+    #[cfg_attr(not(test), allow(dead_code))]
+    reason: String,
+    expires_at: Instant,
 }
 
 impl PowerActivityManager {
-    pub fn begin(&self, activity_id: impl Into<String>, reason: impl Into<String>) {
+    pub fn begin(
+        &self,
+        activity_id: impl Into<String>,
+        reason: impl Into<String>,
+        ttl_ms: Option<u64>,
+    ) {
         let activity_id = activity_id.into().trim().to_string();
         if activity_id.is_empty() {
             return;
         }
 
         let reason = reason.into().trim().to_string();
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            Err(_) => return,
-        };
+        let mut should_spawn_watchdog = false;
+        {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(_) => return,
+            };
 
-        state.requests.insert(activity_id, reason);
-        sync_keep_awake(&mut state);
+            prune_expired_requests(&mut state);
+            state.requests.insert(
+                activity_id,
+                PowerActivityRequest {
+                    reason,
+                    expires_at: Instant::now() + normalize_ttl(ttl_ms),
+                },
+            );
+            sync_keep_awake(&mut state);
+            if state.keep_awake.is_some() && !state.watchdog_running {
+                state.watchdog_running = true;
+                should_spawn_watchdog = true;
+            }
+        }
+
+        if should_spawn_watchdog && !spawn_watchdog(Arc::clone(&self.state)) {
+            if let Ok(mut state) = self.state.lock() {
+                state.watchdog_running = false;
+            }
+        }
     }
 
     pub fn end(&self, activity_id: impl AsRef<str>) {
@@ -54,13 +87,79 @@ impl PowerActivityManager {
         sync_keep_awake(&mut state);
     }
 
+    pub fn clear_all(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+        state.requests.clear();
+        sync_keep_awake(&mut state);
+    }
+
     #[cfg(test)]
     fn snapshot(&self) -> HashMap<String, String> {
         self.state
             .lock()
-            .map(|state| state.requests.clone())
+            .map(|state| {
+                state
+                    .requests
+                    .iter()
+                    .map(|(id, request)| (id.clone(), request.reason.clone()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
+}
+
+impl Drop for PowerActivityManager {
+    fn drop(&mut self) {
+        self.clear_all();
+    }
+}
+
+const POWER_ACTIVITY_DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
+const POWER_ACTIVITY_MIN_TTL: Duration = Duration::from_secs(60);
+const POWER_ACTIVITY_MAX_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const POWER_ACTIVITY_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
+
+fn normalize_ttl(ttl_ms: Option<u64>) -> Duration {
+    let ttl = ttl_ms
+        .map(Duration::from_millis)
+        .unwrap_or(POWER_ACTIVITY_DEFAULT_TTL);
+    ttl.clamp(POWER_ACTIVITY_MIN_TTL, POWER_ACTIVITY_MAX_TTL)
+}
+
+fn prune_expired_requests(state: &mut PowerActivityState) {
+    let now = Instant::now();
+    state
+        .requests
+        .retain(|_, request| request.expires_at > now);
+}
+
+fn spawn_watchdog(state: Arc<Mutex<PowerActivityState>>) -> bool {
+    thread::Builder::new()
+        .name("liveagent-power-activity-watchdog".to_string())
+        .spawn(move || loop {
+            thread::sleep(POWER_ACTIVITY_WATCHDOG_INTERVAL);
+            let should_continue = match state.lock() {
+                Ok(mut state) => {
+                    prune_expired_requests(&mut state);
+                    sync_keep_awake(&mut state);
+                    if state.requests.is_empty() {
+                        state.watchdog_running = false;
+                        false
+                    } else {
+                        true
+                    }
+                }
+                Err(_) => false,
+            };
+            if !should_continue {
+                break;
+            }
+        })
+        .map(|_| true)
+        .unwrap_or(false)
 }
 
 fn sync_keep_awake(state: &mut PowerActivityState) {
@@ -210,8 +309,8 @@ mod tests {
     fn tracks_request_lifecycle() {
         let activity = PowerActivityManager::default();
 
-        activity.begin("req-a", "conversation");
-        activity.begin("req-b", "cron");
+        activity.begin("req-a", "conversation", None);
+        activity.begin("req-b", "cron", None);
 
         assert_eq!(
             activity.snapshot(),
@@ -233,7 +332,7 @@ mod tests {
     fn ignores_empty_activity_id() {
         let activity = PowerActivityManager::default();
 
-        activity.begin("", "noop");
+        activity.begin("", "noop", None);
         activity.end("");
 
         assert!(activity.snapshot().is_empty());

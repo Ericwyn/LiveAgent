@@ -5,6 +5,7 @@ import { memoryApplyBatch, memoryTodayLocalDate } from "../../memory/api";
 import type { ConversationViewState } from "../conversation/conversationState";
 
 const EXTRACTOR_THROTTLE_MS = 5 * 60_000;
+const EXTRACTOR_STATE_CONVERSATION_LIMIT = 128;
 const extractorStateByConversation = new Map<
   string,
   { lastRunAt: number; lastMessageCount: number; pending: boolean }
@@ -50,6 +51,25 @@ function flattenMessages(state: ConversationViewState) {
 
 function countRuntimeMessages(state: ConversationViewState) {
   return state.segments.reduce((count, segment) => count + segment.messages.length, 0);
+}
+
+function pruneExtractorState() {
+  if (extractorStateByConversation.size <= EXTRACTOR_STATE_CONVERSATION_LIMIT) return;
+  const entries = Array.from(extractorStateByConversation.entries()).sort(
+    (a, b) => a[1].lastRunAt - b[1].lastRunAt,
+  );
+  for (const [conversationId] of entries.slice(
+    0,
+    extractorStateByConversation.size - EXTRACTOR_STATE_CONVERSATION_LIMIT,
+  )) {
+    extractorStateByConversation.delete(conversationId);
+  }
+}
+
+export function clearMemoryExtractorState(conversationId: string): void {
+  const key = conversationId.trim();
+  if (!key) return;
+  extractorStateByConversation.delete(key);
 }
 
 function slugify(input: string, fallback: string) {
@@ -265,6 +285,7 @@ export async function runMemoryExtractor(params: {
       ...previous,
       pending: true,
     });
+    pruneExtractorState();
     return;
   }
 
@@ -293,6 +314,7 @@ export async function runMemoryExtractor(params: {
       lastMessageCount: messageCount,
       pending: false,
     });
+    pruneExtractorState();
     return;
   }
 
@@ -311,4 +333,5 @@ export async function runMemoryExtractor(params: {
     lastMessageCount: messageCount,
     pending: false,
   });
+  pruneExtractorState();
 }

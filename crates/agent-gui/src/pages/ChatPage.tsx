@@ -72,6 +72,8 @@ import { createConversationHookDispatcher } from "../lib/hooks/conversationHooks
 import { createStreamDebugLogger } from "../lib/debug/agentDebug";
 import { createSubagentRuntimeManager } from "../lib/chat/subagent/subagentRuntimeManager";
 import { buildMemoryOverviewSection } from "../lib/chat/memory/memoryPrompt";
+import { clearMemoryExtractorState } from "../lib/chat/memory/memoryExtractor";
+import { clearSilentMemoryDecisions } from "../lib/chat/memory/memoryDecisionLog";
 import {
   buildModelOptions,
   buildFallbackConversationTitle,
@@ -127,6 +129,7 @@ import { startConversationTitleJob } from "./chat/conversationTitleJob";
 import { buildPreCompactionStatus } from "./chat/compactionStatusText";
 import { runAgentConversationTurn } from "./chat/runAgentConversationTurn";
 import { runTextConversationTurn } from "./chat/runTextConversationTurn";
+import { clearSilentMemoryExtractionState } from "./chat/silentMemoryExtraction";
 import type { SkillAccessPolicy } from "../lib/tools/skillAccessPolicy";
 import {
   createConversationHookLifecycle,
@@ -789,6 +792,22 @@ export function ChatPage(props: ChatPageProps) {
   });
   const [isFileDropActive, setIsFileDropActive] = useState(false);
 
+  const deleteConversationLocalCaches = useCallback(
+    (conversationId: string) => {
+      const key = conversationId.trim();
+      if (!key) return;
+      composerDraftCacheRef.current.delete(key);
+      locallySyncedHistoryUpdatedAtRef.current.delete(key);
+      appliedGatewayHistoryTruncationsRef.current.delete(key);
+      pendingUploadsByConversationRef.current.delete(key);
+      clearMemoryExtractorState(key);
+      clearSilentMemoryExtractionState(key);
+      clearSilentMemoryDecisions(key);
+      deleteConversationArtifacts(key);
+    },
+    [deleteConversationArtifacts, pendingUploadsByConversationRef],
+  );
+
   function resetVisibleTransientState(targetConversationId = currentConversationIdRef.current) {
     if (currentConversationIdRef.current !== targetConversationId) {
       return;
@@ -860,7 +879,7 @@ export function ChatPage(props: ChatPageProps) {
         keepConversationIds: [currentConversationIdRef.current, ...extraKeepIds],
         isConversationRunning,
         onPruneConversation: (conversationId) => {
-          deleteConversationArtifacts(conversationId);
+          deleteConversationLocalCaches(conversationId);
           subagentRuntimeManagerRef.current.disposeConversation(conversationId);
         },
       });
@@ -868,7 +887,7 @@ export function ChatPage(props: ChatPageProps) {
     [
       conversationRuntimeCacheRef,
       currentConversationIdRef,
-      deleteConversationArtifacts,
+      deleteConversationLocalCaches,
       isConversationRunning,
       persistedConversationStateRef,
     ],
@@ -1019,7 +1038,7 @@ export function ChatPage(props: ChatPageProps) {
     updateConversationRuntimeEntry,
     cancelConversationHydration,
     resetVisibleTransientState,
-    deleteConversationArtifacts,
+    deleteConversationArtifacts: deleteConversationLocalCaches,
     disposeSubagentsForConversation: (conversationId) => {
       subagentRuntimeManagerRef.current.disposeConversation(conversationId);
     },

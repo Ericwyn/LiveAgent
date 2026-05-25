@@ -31,6 +31,7 @@ export type SilentMemoryDecisionEntry = {
 
 const RING_BUFFER_LIMIT_PER_CONVERSATION = 32;
 const GLOBAL_BUFFER_LIMIT = 256;
+const CONVERSATION_LOG_LIMIT = 128;
 
 const perConversationLog = new Map<string, SilentMemoryDecisionEntry[]>();
 const globalLog: SilentMemoryDecisionEntry[] = [];
@@ -45,6 +46,7 @@ function pushEntry(entry: SilentMemoryDecisionEntry) {
     bucket.splice(0, bucket.length - RING_BUFFER_LIMIT_PER_CONVERSATION);
   }
   perConversationLog.set(entry.conversationId, bucket);
+  pruneConversationLogs();
 
   globalLog.push(entry);
   if (globalLog.length > GLOBAL_BUFFER_LIMIT) {
@@ -57,6 +59,21 @@ function pushEntry(entry: SilentMemoryDecisionEntry) {
     } catch (error) {
       console.warn("silent-memory decision listener threw:", error);
     }
+  }
+}
+
+function pruneConversationLogs() {
+  if (perConversationLog.size <= CONVERSATION_LOG_LIMIT) return;
+  const entries = Array.from(perConversationLog.entries()).sort((a, b) => {
+    const aLast = a[1][a[1].length - 1]?.recordedAt ?? 0;
+    const bLast = b[1][b[1].length - 1]?.recordedAt ?? 0;
+    return aLast - bLast;
+  });
+  for (const [conversationId] of entries.slice(
+    0,
+    perConversationLog.size - CONVERSATION_LOG_LIMIT,
+  )) {
+    perConversationLog.delete(conversationId);
   }
 }
 

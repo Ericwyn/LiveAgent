@@ -24,6 +24,8 @@ const STREAM_AUTO_SCROLL_INTERVAL_MS = 80;
 const STREAM_INPUT_BUSY_INTERVAL_MS = 160;
 const USER_SCROLL_INTENT_WINDOW_MS = 500;
 const BOTTOM_LOCK_DURATION_MS = 700;
+const VIEWPORT_ATTACH_RETRY_MS = 80;
+const VIEWPORT_ATTACH_MAX_ATTEMPTS = 75;
 
 function resolveScrollViewport(root: HTMLDivElement | null) {
   return root?.querySelector("[data-radix-scroll-area-viewport]") as HTMLDivElement | null;
@@ -519,16 +521,38 @@ export function useLiveTranscriptController(params: UseLiveTranscriptControllerP
     const root = scrollAreaRef.current;
     if (!root) return;
 
-    let attachRafId: number | null = null;
+    let attachTimeoutId: number | null = null;
+    let attachAttempts = 0;
     let cleanup: (() => void) | null = null;
+    let mutationObserver: MutationObserver | null = null;
+
+    const clearAttachTimeout = () => {
+      if (attachTimeoutId === null) return;
+      window.clearTimeout(attachTimeoutId);
+      attachTimeoutId = null;
+    };
+
+    const scheduleAttachRetry = () => {
+      if (attachTimeoutId !== null || cleanup !== null) return;
+      if (attachAttempts >= VIEWPORT_ATTACH_MAX_ATTEMPTS) return;
+      attachAttempts += 1;
+      attachTimeoutId = window.setTimeout(() => {
+        attachTimeoutId = null;
+        attachViewport();
+      }, VIEWPORT_ATTACH_RETRY_MS);
+    };
 
     const attachViewport = () => {
+      if (cleanup !== null) return;
       const viewport = resolveScrollViewport(root);
       if (!viewport) {
-        attachRafId = requestAnimationFrame(attachViewport);
+        scheduleAttachRetry();
         return;
       }
 
+      clearAttachTimeout();
+      mutationObserver?.disconnect();
+      mutationObserver = null;
       viewportRef.current = viewport;
 
       const syncAutoScrollState = () => {
@@ -627,12 +651,19 @@ export function useLiveTranscriptController(params: UseLiveTranscriptControllerP
       };
     };
 
+    if (typeof MutationObserver !== "undefined") {
+      mutationObserver = new MutationObserver(() => {
+        if (cleanup === null) {
+          attachViewport();
+        }
+      });
+      mutationObserver.observe(root, { childList: true, subtree: true });
+    }
     attachViewport();
 
     return () => {
-      if (attachRafId !== null) {
-        cancelAnimationFrame(attachRafId);
-      }
+      clearAttachTimeout();
+      mutationObserver?.disconnect();
       cleanup?.();
       viewportRef.current = null;
     };

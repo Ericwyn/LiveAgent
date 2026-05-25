@@ -732,6 +732,7 @@ const TranscriptHistory = memo(function TranscriptHistory(props: TranscriptHisto
   } = props;
   const { locale, t } = useLocale();
   const [editingMessageKey, setEditingMessageKey] = useState<string | null>(null);
+  const copiedResetTimerRef = useRef<number | null>(null);
   const segmentIndices = useMemo(
     () => getUniqueSegmentIndices(historyItems),
     [historyItems],
@@ -772,6 +773,15 @@ const TranscriptHistory = memo(function TranscriptHistory(props: TranscriptHisto
   useEffect(() => {
     setEditingMessageKey(null);
   }, [conversationId]);
+
+  useEffect(
+    () => () => {
+      if (copiedResetTimerRef.current !== null) {
+        window.clearTimeout(copiedResetTimerRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!editingMessageKey) {
@@ -906,7 +916,13 @@ const TranscriptHistory = memo(function TranscriptHistory(props: TranscriptHisto
                       onClick={() => {
                         navigator.clipboard.writeText(item.text);
                         setCopiedMessageKey(item.key);
-                        setTimeout(() => setCopiedMessageKey(null), 1500);
+                        if (copiedResetTimerRef.current !== null) {
+                          window.clearTimeout(copiedResetTimerRef.current);
+                        }
+                        copiedResetTimerRef.current = window.setTimeout(() => {
+                          copiedResetTimerRef.current = null;
+                          setCopiedMessageKey(null);
+                        }, 1500);
                       }}
                     >
                       {isCopied ? (

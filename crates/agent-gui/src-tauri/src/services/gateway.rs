@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, Once};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::Url;
 use serde::Serialize;
@@ -36,6 +36,9 @@ const UI_ONLY_SETTINGS_SYNC_FIELDS: &[&str] = &[
     "locale",
 ];
 const GATEWAY_GRPC_MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const GATEWAY_RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(5);
+const GATEWAY_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(5 * 60);
+const GATEWAY_RECONNECT_STABLE_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -323,9 +326,11 @@ impl GatewayController {
     }
 
     async fn run(self: Arc<Self>, mut config_rx: watch::Receiver<RemoteSettingsPayload>) {
+        let mut reconnect_delay = GATEWAY_RECONNECT_INITIAL_DELAY;
         loop {
             let config = config_rx.borrow().clone();
             if !config.enabled || !is_remote_configured(&config) {
+                reconnect_delay = GATEWAY_RECONNECT_INITIAL_DELAY;
                 self.set_outbound_sender(None);
                 self.publish_status(|status| {
                     set_disconnected_status(status, &config, None);
@@ -337,14 +342,17 @@ impl GatewayController {
             }
 
             let current_config = config.clone();
+            let attempt_started_at = Instant::now();
             let connect_result = self
                 .connect_and_serve(current_config.clone(), &mut config_rx)
                 .await;
+            let attempt_duration = attempt_started_at.elapsed();
             let latest_config = config_rx.borrow().clone();
             let reconfigured = latest_config != current_config;
 
             self.set_outbound_sender(None);
             if reconfigured {
+                reconnect_delay = GATEWAY_RECONNECT_INITIAL_DELAY;
                 self.publish_status(|status| {
                     set_disconnected_status(status, &latest_config, None);
                 });
@@ -364,7 +372,16 @@ impl GatewayController {
                 if config_rx.changed().await.is_err() {
                     break;
                 }
+                reconnect_delay = GATEWAY_RECONNECT_INITIAL_DELAY;
                 continue;
+            }
+
+            let sleep_duration = reconnect_delay;
+            if connect_result.is_ok() || attempt_duration >= GATEWAY_RECONNECT_STABLE_AFTER {
+                reconnect_delay = GATEWAY_RECONNECT_INITIAL_DELAY;
+            } else {
+                reconnect_delay =
+                    std::cmp::min(reconnect_delay.saturating_mul(2), GATEWAY_RECONNECT_MAX_DELAY);
             }
 
             tokio::select! {
@@ -373,7 +390,7 @@ impl GatewayController {
                         break;
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                _ = tokio::time::sleep(sleep_duration) => {}
             }
         }
     }

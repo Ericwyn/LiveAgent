@@ -180,6 +180,7 @@ function createTimeoutSignal(parent: AbortSignal | undefined, timeoutMs: number)
 // re-writing. Cleared by recordSilentMemoryTurnBoundary when a new user turn
 // begins (caller's responsibility); each conversation's list is capped.
 const SILENT_MEMORY_WRITTEN_SLUG_LIMIT = 16;
+const SILENT_MEMORY_CONVERSATION_STATE_LIMIT = 128;
 const silentMemoryWrittenSlugs = new Map<string, string[]>();
 
 // Per-conversation timestamp of the last completed silent extraction. Used by
@@ -187,9 +188,35 @@ const silentMemoryWrittenSlugs = new Map<string, string[]>();
 const SILENT_MEMORY_MIN_INTERVAL_MS = 30_000;
 const silentMemoryLastRunAt = new Map<string, number>();
 
+function pruneSilentMemoryConversationState() {
+  const conversationIds = new Set<string>([
+    ...silentMemoryWrittenSlugs.keys(),
+    ...silentMemoryLastRunAt.keys(),
+  ]);
+  if (conversationIds.size <= SILENT_MEMORY_CONVERSATION_STATE_LIMIT) return;
+
+  const sortedIds = Array.from(conversationIds).sort(
+    (a, b) =>
+      (silentMemoryLastRunAt.get(a) ?? 0) - (silentMemoryLastRunAt.get(b) ?? 0),
+  );
+  for (const conversationId of sortedIds.slice(
+    0,
+    conversationIds.size - SILENT_MEMORY_CONVERSATION_STATE_LIMIT,
+  )) {
+    silentMemoryWrittenSlugs.delete(conversationId);
+    silentMemoryLastRunAt.delete(conversationId);
+  }
+}
+
 export function recordSilentMemoryTurnBoundary(conversationId: string) {
-  silentMemoryWrittenSlugs.delete(conversationId);
-  silentMemoryLastRunAt.delete(conversationId);
+  clearSilentMemoryExtractionState(conversationId);
+}
+
+export function clearSilentMemoryExtractionState(conversationId: string) {
+  const key = conversationId.trim();
+  if (!key) return;
+  silentMemoryWrittenSlugs.delete(key);
+  silentMemoryLastRunAt.delete(key);
 }
 
 // Heuristics that decide whether a silent extraction pass is worth starting.
@@ -266,6 +293,7 @@ function noteSilentMemoryWrittenSlug(conversationId: string, slug: string) {
     next.splice(0, next.length - SILENT_MEMORY_WRITTEN_SLUG_LIMIT);
   }
   silentMemoryWrittenSlugs.set(conversationId, next);
+  pruneSilentMemoryConversationState();
 }
 
 async function loadSilentMemoryCandidates(workdir: string) {
@@ -640,6 +668,7 @@ export async function runSilentMemoryExtraction(
     }
   }
   silentMemoryLastRunAt.set(params.conversationId, Date.now());
+  pruneSilentMemoryConversationState();
 
   const writtenSlugs = silentMemoryWrittenSlugs.get(params.conversationId) ?? [];
   const heuristics = collectHeuristicSuggestions(latestUserText);

@@ -259,6 +259,7 @@ pub fn run() {
     let memory_store = Arc::new(
         services::memory::MemoryStore::open().expect("failed to initialize LiveAgent memory store"),
     );
+    let power_activity = Arc::new(services::power_activity::PowerActivityManager::default());
     let allow_exit = Arc::new(AtomicBool::new(false));
 
     let app = tauri::Builder::default()
@@ -266,9 +267,7 @@ pub fn run() {
         .plugin(tauri_plugin_mcp_bridge::init())
         .manage(Arc::new(commands::mcp::McpRuntimeManager::default()))
         .manage(Arc::clone(&memory_store))
-        .manage(Arc::new(
-            services::power_activity::PowerActivityManager::default(),
-        ))
+        .manage(Arc::clone(&power_activity))
         .manage(Arc::new(runtime::shell_runner::ShellRunRegistry::default()))
         .manage(Arc::new(
             runtime::managed_process::ManagedProcessRegistry::default(),
@@ -335,6 +334,8 @@ pub fn run() {
         tauri::RunEvent::ExitRequested { api, .. } => {
             if !allow_exit.load(Ordering::SeqCst) {
                 api.prevent_exit();
+            } else {
+                power_activity.clear_all();
             }
         }
         _ => {}
