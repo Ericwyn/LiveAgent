@@ -325,10 +325,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(move |app, event| match event {
+    app.run(move |_app, event| match event {
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => {
-            if let Err(error) = show_main_window(app) {
+            if let Err(error) = show_main_window(_app) {
                 eprintln!("failed to show LiveAgent window from dock reopen: {error}");
             }
         }
