@@ -5,9 +5,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode,
-  type UIEvent as ReactUIEvent,
 } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import iconSimpleUrl from "../../../src-tauri/icons/icon-simple.png";
 import { useLocale } from "../../i18n";
 import {
@@ -43,6 +42,9 @@ type ChatHistorySidebarProps = {
   isBusy: boolean;
   runningConversationIds: ReadonlySet<string>;
   isLoading: boolean;
+  totalItems: number;
+  hasMore: boolean;
+  isLoadingMore: boolean;
   errorMessage: string | null;
   renamingId: string | null;
   renameDraft: string;
@@ -59,20 +61,16 @@ type ChatHistorySidebarProps = {
   onShareConversation: (item: ChatHistorySummary) => void;
   onOpenSharedConversations: () => void;
   onDeleteConversation: (id: string) => void;
+  onLoadMore: () => void;
   onCloseSidebar: () => void;
   onOpenSkillsHub?: () => void;
   onOpenMcpHub?: () => void;
 };
 
-const HISTORY_VIRTUALIZATION_MIN_ITEMS = 80;
 const HISTORY_ROW_ESTIMATED_HEIGHT = 44;
 const HISTORY_ROW_GAP = 6;
-const HISTORY_ROW_OVERSCAN_PX = HISTORY_ROW_ESTIMATED_HEIGHT * 8;
-
-type VirtualHistoryRow<T> = {
-  item: T;
-  start: number;
-};
+const HISTORY_ROW_OVERSCAN_COUNT = 8;
+const HISTORY_LOAD_MORE_THRESHOLD = 12;
 
 function useStableEvent<Args extends unknown[], Return>(
   handler: (...args: Args) => Return,
@@ -82,203 +80,6 @@ function useStableEvent<Args extends unknown[], Return>(
 
   return useCallback((...args: Args) => handlerRef.current(...args), []);
 }
-
-function findFirstVisibleIndex(starts: number[], sizes: number[], offset: number) {
-  let low = 0;
-  let high = starts.length - 1;
-  let result = starts.length - 1;
-
-  while (low <= high) {
-    const mid = Math.floor((low + high) / 2);
-    const rowEnd = starts[mid] + sizes[mid];
-    if (rowEnd < offset) {
-      low = mid + 1;
-    } else {
-      result = mid;
-      high = mid - 1;
-    }
-  }
-
-  return Math.max(0, result);
-}
-
-function findLastVisibleIndex(starts: number[], offset: number) {
-  let low = 0;
-  let high = starts.length - 1;
-  let result = 0;
-
-  while (low <= high) {
-    const mid = Math.floor((low + high) / 2);
-    if (starts[mid] <= offset) {
-      result = mid;
-      low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
-  }
-
-  return Math.min(starts.length - 1, result);
-}
-
-function useVirtualHistoryRows<T extends { id: string }>(items: T[], enabled: boolean) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const measuredHeightsRef = useRef<Map<string, number>>(new Map());
-  const pendingScrollTopRef = useRef(0);
-  const scrollFrameRef = useRef<number | null>(null);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [viewportHeight, setViewportHeight] = useState(0);
-  const [measurementVersion, setMeasurementVersion] = useState(0);
-
-  useEffect(() => {
-    return () => {
-      if (scrollFrameRef.current !== null) {
-        window.cancelAnimationFrame(scrollFrameRef.current);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!enabled) return;
-    const node = scrollRef.current;
-    if (!node) return;
-
-    const updateViewportHeight = () => {
-      setViewportHeight(node.clientHeight);
-    };
-
-    updateViewportHeight();
-    if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", updateViewportHeight);
-      return () => window.removeEventListener("resize", updateViewportHeight);
-    }
-
-    const observer = new ResizeObserver(updateViewportHeight);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [enabled]);
-
-  useEffect(() => {
-    if (!enabled) return;
-    const ids = new Set(items.map((item) => item.id));
-    let changed = false;
-
-    for (const id of measuredHeightsRef.current.keys()) {
-      if (!ids.has(id)) {
-        measuredHeightsRef.current.delete(id);
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      setMeasurementVersion((version) => version + 1);
-    }
-  }, [enabled, items]);
-
-  const handleScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
-    pendingScrollTopRef.current = event.currentTarget.scrollTop;
-    if (scrollFrameRef.current !== null) return;
-
-    scrollFrameRef.current = window.requestAnimationFrame(() => {
-      scrollFrameRef.current = null;
-      setScrollTop(pendingScrollTopRef.current);
-    });
-  }, []);
-
-  const measureElement = useCallback((id: string, node: HTMLElement) => {
-    const updateHeight = () => {
-      const nextHeight = Math.ceil(node.getBoundingClientRect().height);
-      if (nextHeight <= 0) return;
-
-      const previousHeight = measuredHeightsRef.current.get(id);
-      if (previousHeight === nextHeight) return;
-
-      measuredHeightsRef.current.set(id, nextHeight);
-      setMeasurementVersion((version) => version + 1);
-    };
-
-    updateHeight();
-    if (typeof ResizeObserver === "undefined") {
-      return () => undefined;
-    }
-
-    const observer = new ResizeObserver(updateHeight);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
-  const layout = useMemo(() => {
-    const starts: number[] = [];
-    const sizes: number[] = [];
-    let cursor = 0;
-
-    for (const item of items) {
-      starts.push(cursor);
-      const size = measuredHeightsRef.current.get(item.id) ?? HISTORY_ROW_ESTIMATED_HEIGHT;
-      sizes.push(size);
-      cursor += size + HISTORY_ROW_GAP;
-    }
-
-    return {
-      starts,
-      sizes,
-      totalSize: items.length === 0 ? 0 : Math.max(0, cursor - HISTORY_ROW_GAP),
-    };
-  }, [items, measurementVersion]);
-
-  const virtualRows = useMemo<VirtualHistoryRow<T>[]>(() => {
-    if (!enabled || items.length === 0) return [];
-
-    const startOffset = Math.max(0, scrollTop - HISTORY_ROW_OVERSCAN_PX);
-    const endOffset =
-      scrollTop + Math.max(viewportHeight, HISTORY_ROW_ESTIMATED_HEIGHT) + HISTORY_ROW_OVERSCAN_PX;
-    const startIndex = findFirstVisibleIndex(layout.starts, layout.sizes, startOffset);
-    const endIndex = findLastVisibleIndex(layout.starts, endOffset);
-    const rows: VirtualHistoryRow<T>[] = [];
-
-    for (let index = startIndex; index <= endIndex; index += 1) {
-      rows.push({
-        item: items[index],
-        start: layout.starts[index],
-      });
-    }
-
-    return rows;
-  }, [enabled, items, layout, scrollTop, viewportHeight]);
-
-  return {
-    scrollRef,
-    handleScroll,
-    measureElement,
-    totalSize: layout.totalSize,
-    virtualRows,
-  };
-}
-
-const MeasuredVirtualRow = memo(function MeasuredVirtualRow(props: {
-  id: string;
-  start: number;
-  onMeasure: (id: string, node: HTMLElement) => () => void;
-  children: ReactNode;
-}) {
-  const { id, start, onMeasure, children } = props;
-  const rowRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const node = rowRef.current;
-    if (!node) return;
-    return onMeasure(id, node);
-  }, [id, onMeasure]);
-
-  return (
-    <div
-      ref={rowRef}
-      className="absolute left-0 right-1 top-0"
-      style={{ transform: `translateY(${start}px)` }}
-    >
-      {children}
-    </div>
-  );
-});
 
 const HistoryRow = memo(function HistoryRow(props: {
   item: ChatHistorySummary;
@@ -570,6 +371,9 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     isBusy,
     runningConversationIds,
     isLoading,
+    totalItems,
+    hasMore,
+    isLoadingMore,
     errorMessage,
     renamingId,
     renameDraft,
@@ -586,6 +390,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     onShareConversation,
     onOpenSharedConversations,
     onDeleteConversation,
+    onLoadMore,
     onCloseSidebar,
     onOpenSkillsHub,
     onOpenMcpHub,
@@ -606,31 +411,60 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     () => items.filter((item) => item.isShared === true).length,
     [items],
   );
-  const shouldVirtualizeHistory = items.length >= HISTORY_VIRTUALIZATION_MIN_ITEMS;
-  const historyVirtualizer = useVirtualHistoryRows(items, shouldVirtualizeHistory);
+  const historyScrollRef = useRef<HTMLDivElement | null>(null);
+  const getHistoryItemKey = useCallback(
+    (index: number) => items[index]?.id ?? index,
+    [items],
+  );
+  const historyVirtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => historyScrollRef.current,
+    estimateSize: () => HISTORY_ROW_ESTIMATED_HEIGHT + HISTORY_ROW_GAP,
+    getItemKey: getHistoryItemKey,
+    overscan: HISTORY_ROW_OVERSCAN_COUNT,
+  });
+  const virtualHistoryRows = historyVirtualizer.getVirtualItems();
+  const lastVirtualHistoryIndex =
+    virtualHistoryRows.length > 0
+      ? virtualHistoryRows[virtualHistoryRows.length - 1].index
+      : -1;
+
+  useEffect(() => {
+    if (
+      !hasMore ||
+      isLoading ||
+      isLoadingMore ||
+      items.length === 0 ||
+      lastVirtualHistoryIndex < items.length - HISTORY_LOAD_MORE_THRESHOLD
+    ) {
+      return;
+    }
+    onLoadMore();
+  }, [hasMore, isLoading, isLoadingMore, items.length, lastVirtualHistoryIndex, onLoadMore]);
+
   const renderHistoryRow = useCallback(
     (item: ChatHistorySummary) => (
-        <HistoryRow
-          key={item.id}
-          item={item}
-          isActive={currentConversationId === item.id}
-          isBusy={isBusy}
-          isRunning={runningConversationIds.has(item.id)}
-          isDeleteDisabled={runningConversationIds.has(item.id)}
-          canShareConversation={canShareConversations}
-          isRenaming={renamingId === item.id}
-          isPendingDelete={pendingDeleteId === item.id}
-          renameDraft={renamingId === item.id ? renameDraft : ""}
-          onSelectConversation={handleSelectConversation}
-          onStartRenaming={handleStartRenaming}
-          onRenameDraftChange={handleRenameDraftChange}
-          onCommitRename={handleCommitRename}
-          onCancelRename={handleCancelRename}
-          onSetPinned={handleSetPinned}
-          onShareConversation={handleShareConversation}
-          onDeleteConversation={handleDeleteConversation}
-          onSetPendingDelete={setPendingDeleteId}
-        />
+      <HistoryRow
+        key={item.id}
+        item={item}
+        isActive={currentConversationId === item.id}
+        isBusy={isBusy}
+        isRunning={runningConversationIds.has(item.id)}
+        isDeleteDisabled={runningConversationIds.has(item.id)}
+        canShareConversation={canShareConversations}
+        isRenaming={renamingId === item.id}
+        isPendingDelete={pendingDeleteId === item.id}
+        renameDraft={renamingId === item.id ? renameDraft : ""}
+        onSelectConversation={handleSelectConversation}
+        onStartRenaming={handleStartRenaming}
+        onRenameDraftChange={handleRenameDraftChange}
+        onCommitRename={handleCommitRename}
+        onCancelRename={handleCancelRename}
+        onSetPinned={handleSetPinned}
+        onShareConversation={handleShareConversation}
+        onDeleteConversation={handleDeleteConversation}
+        onSetPendingDelete={setPendingDeleteId}
+      />
     ),
     [
       currentConversationId,
@@ -649,10 +483,6 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
       renamingId,
       runningConversationIds,
     ],
-  );
-  const historyRows = useMemo(
-    () => (shouldVirtualizeHistory ? null : items.map(renderHistoryRow)),
-    [items, renderHistoryRow, shouldVirtualizeHistory],
   );
 
   return (
@@ -757,7 +587,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
           </div>
           <div className="flex items-center gap-1.5">
             <div className="rounded-full border border-border/60 bg-background/80 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-              {items.length}
+              {Math.max(totalItems, items.length)}
             </div>
             {canShareConversations ? (
               <Button
@@ -782,8 +612,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
         ) : null}
 
         <div
-          ref={shouldVirtualizeHistory ? historyVirtualizer.scrollRef : undefined}
-          onScroll={shouldVirtualizeHistory ? historyVirtualizer.handleScroll : undefined}
+          ref={historyScrollRef}
           className="chat-history-list min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-3"
         >
           {isLoading ? (
@@ -804,27 +633,34 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
                 {t("chat.clickNewConversation")}
               </p>
             </div>
-          ) : shouldVirtualizeHistory ? (
+          ) : (
             <div
               className="relative"
-              style={{ height: historyVirtualizer.totalSize }}
+              style={{ height: historyVirtualizer.getTotalSize() }}
             >
-              {historyVirtualizer.virtualRows.map((virtualRow) => (
-                <MeasuredVirtualRow
-                  key={virtualRow.item.id}
-                  id={virtualRow.item.id}
-                  start={virtualRow.start}
-                  onMeasure={historyVirtualizer.measureElement}
-                >
-                  {renderHistoryRow(virtualRow.item)}
-                </MeasuredVirtualRow>
-              ))}
-            </div>
-          ) : (
-            <div className="space-y-1.5 pr-1">
-              {historyRows}
+              {virtualHistoryRows.map((virtualRow) => {
+                const item = items[virtualRow.index];
+                if (!item) return null;
+
+                return (
+                  <div
+                    key={virtualRow.key}
+                    data-index={virtualRow.index}
+                    ref={historyVirtualizer.measureElement}
+                    className="absolute left-0 right-1 top-0 pb-1.5"
+                    style={{ transform: `translateY(${virtualRow.start}px)` }}
+                  >
+                    {renderHistoryRow(item)}
+                  </div>
+                );
+              })}
             </div>
           )}
+          {!isLoading && items.length > 0 && (hasMore || isLoadingMore) ? (
+            <div className="px-2 pb-2 pt-1 text-center text-[11px] leading-5 text-muted-foreground/70">
+              {isLoadingMore ? "正在加载更多历史记录..." : "继续滚动加载更多"}
+            </div>
+          ) : null}
         </div>
       </div>
     </aside>

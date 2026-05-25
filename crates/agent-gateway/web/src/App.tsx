@@ -250,6 +250,7 @@ type SendChatOptions = {
 type SendChatFn = (message: string, options?: SendChatOptions) => Promise<void>;
 
 const PROTECTED_DRAFT_CONVERSATION = "__protected_draft__";
+const HISTORY_LIST_PAGE_SIZE = 80;
 const HISTORY_DETAIL_INITIAL_MAX_MESSAGES = 360;
 const HISTORY_SWITCH_OVERLAY_MIN_MS = 260;
 const HISTORY_TITLE_POSITION_LOCK_MS = 1200;
@@ -554,9 +555,12 @@ export default function App() {
   const [chatToolStatus, setChatToolStatus] = useState<string | null>(null);
   const [chatToolStatusIsCompaction, setChatToolStatusIsCompaction] = useState(false);
   const [historyListLoading, setHistoryListLoading] = useState(false);
+  const [historyListLoadingMore, setHistoryListLoadingMore] = useState(false);
   const [historyDetailLoading, setHistoryDetailLoading] = useState(false);
   const [historyMutating, setHistoryMutating] = useState(false);
   const [historyItems, setHistoryItems] = useState<ConversationSummary[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [localRunningConversationIds, setLocalRunningConversationIds] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -631,6 +635,10 @@ export default function App() {
   const chatToolStatusIsCompactionRef = useRef(chatToolStatusIsCompaction);
   const selectedHistoryRef = useRef(selectedHistory);
   const historyItemsRef = useRef(historyItems);
+  const historyTotalRef = useRef(historyTotal);
+  const historyHasMoreRef = useRef(historyHasMore);
+  const loadedHistoryOffsetRef = useRef(0);
+  const historyListPageLoadingRef = useRef(false);
   const pendingUploadedFilesRef = useRef(pendingUploadedFiles);
   const isUploadingFilesRef = useRef(isUploadingFiles);
   const uploadDragDepthRef = useRef(0);
@@ -696,15 +704,36 @@ export default function App() {
     composerDraftCacheRef.current.delete(targetConversationId);
   }
 
-  const updateHistoryItems = useCallback((
-    updater: (current: ConversationSummary[]) => ConversationSummary[],
-  ) => {
-    setHistoryItems((current) => {
+  const commitHistoryListState = useCallback(
+    (conversations: ConversationSummary[], total: number, loadedOffset: number) => {
+      const nextTotal = Math.max(0, total);
+      const nextOffset = Math.max(0, loadedOffset);
+      const nextHasMore = nextOffset < nextTotal;
+
+      historyItemsRef.current = conversations;
+      historyTotalRef.current = nextTotal;
+      historyHasMoreRef.current = nextHasMore;
+      loadedHistoryOffsetRef.current = nextOffset;
+      setHistoryItems(conversations);
+      setHistoryTotal(nextTotal);
+      setHistoryHasMore(nextHasMore);
+    },
+    [],
+  );
+
+  const updateHistoryItems = useCallback(
+    (updater: (current: ConversationSummary[]) => ConversationSummary[]) => {
+      const current = historyItemsRef.current;
       const next = updater(current);
-      historyItemsRef.current = next;
-      return next;
-    });
-  }, []);
+      const delta = next.length - current.length;
+      commitHistoryListState(
+        next,
+        Math.max(next.length, historyTotalRef.current + delta),
+        loadedHistoryOffsetRef.current + delta,
+      );
+    },
+    [commitHistoryListState],
+  );
 
   const unlockHistoryTitlePosition = useCallback((conversationIdValue: string) => {
     const conversationId = conversationIdValue.trim();
@@ -844,6 +873,14 @@ export default function App() {
   useEffect(() => {
     historyItemsRef.current = historyItems;
   }, [historyItems]);
+
+  useEffect(() => {
+    historyTotalRef.current = historyTotal;
+  }, [historyTotal]);
+
+  useEffect(() => {
+    historyHasMoreRef.current = historyHasMore;
+  }, [historyHasMore]);
 
   useEffect(() => {
     pendingUploadedFilesRef.current = pendingUploadedFiles;
@@ -2558,7 +2595,7 @@ export default function App() {
       setHistoryError(null);
     }
     try {
-      const response = await currentApi.listHistory();
+      const response = await currentApi.listHistory(1, HISTORY_LIST_PAGE_SIZE);
       const runningConversationIds = normalizeRunningConversationIds(
         response.running_conversation_ids,
       );
@@ -2583,6 +2620,11 @@ export default function App() {
           retainedConversationIds.add(id);
         }
       }
+      if (silent) {
+        for (const item of historyItemsRef.current) {
+          retainedConversationIds.add(item.id);
+        }
+      }
       const conversations = reconcileConversationSummaries(
         historyItemsRef.current,
         response.conversations,
@@ -2592,8 +2634,13 @@ export default function App() {
           retainConversationIds: retainedConversationIds,
         },
       );
-      historyItemsRef.current = conversations;
-      setHistoryItems(conversations);
+      commitHistoryListState(
+        conversations,
+        response.total_count,
+        silent
+          ? Math.max(loadedHistoryOffsetRef.current, response.conversations.length)
+          : response.conversations.length,
+      );
 
       const adoptedPendingDraftConversationId =
         options?.adoptPendingDraftConversation === true
@@ -2766,6 +2813,55 @@ export default function App() {
       }
     }
   }
+
+  const loadMoreHistory = useCallback(async () => {
+    if (!api || historyListPageLoadingRef.current || !historyHasMoreRef.current) {
+      return;
+    }
+
+    historyListPageLoadingRef.current = true;
+    setHistoryListLoadingMore(true);
+    try {
+      const offset = loadedHistoryOffsetRef.current;
+      const pageNumber = Math.floor(offset / HISTORY_LIST_PAGE_SIZE) + 1;
+      const response = await api.listHistory(pageNumber, HISTORY_LIST_PAGE_SIZE);
+      const runningConversationIds = normalizeRunningConversationIds(
+        response.running_conversation_ids,
+      );
+      for (const runningConversationId of runningConversationIds) {
+        setRemoteConversationRunningState(runningConversationId, true);
+      }
+
+      const retainConversationIds = new Set(historyItemsRef.current.map((item) => item.id));
+      const conversations = reconcileConversationSummaries(
+        historyItemsRef.current,
+        response.conversations,
+        {
+          preserveTitleConversationIds: optimisticTitleConversationIdsRef.current,
+          preserveUpdatedAtConversationIds: getHistoryPositionLockedConversationIds(),
+          retainConversationIds,
+        },
+      );
+      commitHistoryListState(
+        conversations,
+        response.total_count,
+        response.conversations.length === 0
+          ? response.total_count
+          : offset + response.conversations.length,
+      );
+      setHistoryError(null);
+    } catch (error) {
+      setHistoryError(asErrorMessage(error, "读取更多历史列表失败"));
+    } finally {
+      historyListPageLoadingRef.current = false;
+      setHistoryListLoadingMore(false);
+    }
+  }, [
+    api,
+    commitHistoryListState,
+    getHistoryPositionLockedConversationIds,
+    setRemoteConversationRunningState,
+  ]);
 
   const recoverUnavailableActiveConversationStream = useCallback(
     (targetConversationId: string, currentApi = api) => {
@@ -3781,6 +3877,10 @@ export default function App() {
     chatToolStatusIsCompactionRef.current = false;
     selectedHistoryRef.current = null;
     historyItemsRef.current = [];
+    historyTotalRef.current = 0;
+    historyHasMoreRef.current = false;
+    loadedHistoryOffsetRef.current = 0;
+    historyListPageLoadingRef.current = false;
     pendingUploadedFilesRef.current = [];
     draftConversationPinnedRef.current = false;
     protectedConversationRef.current = "";
@@ -3807,8 +3907,11 @@ export default function App() {
     clearHistoryTitlePositionLocks();
     historyItemsRef.current = [];
     setHistoryItems([]);
+    setHistoryTotal(0);
+    setHistoryHasMore(false);
     setHistoryError(null);
     setHistoryListLoading(false);
+    setHistoryListLoadingMore(false);
     setHistoryDetailLoading(false);
     setHistoryMutating(false);
     setLocalRunningConversationIds(new Set());
@@ -4392,6 +4495,9 @@ export default function App() {
           isBusy={historyDetailLoading || historyMutating}
           runningConversationIds={sidebarRunningConversationIds}
           isLoading={historyListLoading && sidebarItems.length === 0}
+          totalItems={historyTotal}
+          hasMore={historyHasMore}
+          isLoadingMore={historyListLoadingMore}
           errorMessage={historyError}
           renamingId={renamingId}
           renameDraft={renameDraft}
@@ -4478,6 +4584,7 @@ export default function App() {
               }
             })();
           }}
+          onLoadMore={loadMoreHistory}
           onCloseSidebar={() => setSidebarOpen(false)}
           activeView={activeView}
           onOpenSkillsHub={handleSidebarOpenSkillsHub}

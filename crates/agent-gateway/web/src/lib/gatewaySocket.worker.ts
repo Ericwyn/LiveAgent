@@ -240,8 +240,8 @@ async function resolveRequest(client: GatewayWebSocketClient, method: string, pa
       );
     case "history.list":
       return client.listHistory(
-        typeof body.limit === "number" ? body.limit : 0,
-        typeof body.offset === "number" ? body.offset : 0,
+        typeof body.page === "number" ? body.page : 0,
+        typeof body.page_size === "number" ? body.page_size : 0,
       );
     case "history.get":
       return client.getHistory(String(body.conversation_id ?? ""), {

@@ -84,6 +84,7 @@ type websocketConnection struct {
 }
 
 const recentActiveChatRetention = 5 * time.Second
+const maxHistoryListLimit = 200
 
 func NewWebSocketServer(cfg *config.Config, sm *session.Manager) http.Handler {
 	server := &websocket.Server{
@@ -486,8 +487,8 @@ func (c *websocketConnection) handleFsListDirs(req websocketRequest) {
 
 func (c *websocketConnection) handleHistoryList(req websocketRequest) {
 	type payload struct {
-		Limit  int `json:"limit"`
-		Offset int `json:"offset"`
+		Page     int `json:"page"`
+		PageSize int `json:"page_size"`
 	}
 
 	var body payload
@@ -495,14 +496,26 @@ func (c *websocketConnection) handleHistoryList(req websocketRequest) {
 		_ = c.writeError(req.ID, "invalid history.list payload")
 		return
 	}
+	page := body.Page
+	if page <= 0 {
+		_ = c.writeError(req.ID, "history.list page must be greater than 0")
+		return
+	}
+	pageSize := body.PageSize
+	if pageSize <= 0 {
+		_ = c.writeError(req.ID, "history.list page_size must be greater than 0")
+		return
+	} else if pageSize > maxHistoryListLimit {
+		pageSize = maxHistoryListLimit
+	}
 
 	response, err := c.awaitAgentResponse(req.ID, &gatewayv1.GatewayEnvelope{
 		RequestId: req.ID,
 		Timestamp: time.Now().Unix(),
 		Payload: &gatewayv1.GatewayEnvelope_HistoryList{
 			HistoryList: &gatewayv1.HistoryListRequest{
-				Limit:  int32(body.Limit),
-				Offset: int32(body.Offset),
+				Page:     int32(page),
+				PageSize: int32(pageSize),
 			},
 		},
 	})
@@ -528,7 +541,7 @@ func (c *websocketConnection) handleHistoryList(req websocketRequest) {
 
 	_ = c.writeResponse(req.ID, map[string]any{
 		"conversations":            conversations,
-		"total":                    resp.GetTotal(),
+		"total_count":              resp.GetTotalCount(),
 		"running_conversation_ids": c.sm.ActiveChatRunConversationIDs(),
 	})
 }

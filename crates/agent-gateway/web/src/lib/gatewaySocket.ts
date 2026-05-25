@@ -537,10 +537,10 @@ export class GatewayWebSocketClient {
     return this.request<T>("memory.manage", payload);
   }
 
-  async listHistory(limit = 0, offset = 0): Promise<HistoryList> {
+  async listHistory(page: number, pageSize: number): Promise<HistoryList> {
     return this.requestWithRecovery<HistoryList>("history.list", {
-      limit,
-      offset,
+      page,
+      page_size: pageSize,
     });
   }
 
@@ -1383,7 +1383,7 @@ type GatewayWebSocketClientLike = {
   cancelChat(conversationId: string): Promise<void>;
   cronManage(payload: CronManagePayload): Promise<CronManageResponse>;
   memoryManage<T = unknown>(payload: MemoryManagePayload): Promise<T>;
-  listHistory(limit?: number, offset?: number): Promise<HistoryList>;
+  listHistory(page: number, pageSize: number): Promise<HistoryList>;
   getHistory(conversationId: string, options?: HistoryGetOptions): Promise<HistoryDetail>;
   truncateHistory(
     conversationId: string,
@@ -1796,8 +1796,8 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
     return this.request<T>("memory.manage", payload);
   }
 
-  async listHistory(limit = 0, offset = 0): Promise<HistoryList> {
-    return this.request<HistoryList>("history.list", { limit, offset });
+  async listHistory(page: number, pageSize: number): Promise<HistoryList> {
+    return this.request<HistoryList>("history.list", { page, page_size: pageSize });
   }
 
   async getHistory(conversationId: string, options?: HistoryGetOptions): Promise<HistoryDetail> {

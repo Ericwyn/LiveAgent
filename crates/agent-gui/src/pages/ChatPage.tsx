@@ -507,9 +507,13 @@ export function ChatPage(props: ChatPageProps) {
     historyItems,
     setHistoryItems,
     historyItemsRef,
+    historyTotal,
+    historyHasMore,
     historyLoading,
+    historyLoadingMore,
     historyError,
     setHistoryError,
+    loadMoreHistory,
   } = useChatHistoryList();
   const [shareConversation, setShareConversation] = useState<ChatHistorySummary | null>(null);
   const [shareStatus, setShareStatus] = useState<ChatHistoryShareStatus | null>(null);
@@ -2966,6 +2970,9 @@ export function ChatPage(props: ChatPageProps) {
         isBusy={isSending}
         runningConversationIds={runningConversationIds}
         isLoading={historyLoading}
+        totalItems={historyTotal}
+        hasMore={historyHasMore}
+        isLoadingMore={historyLoadingMore}
         errorMessage={historyError}
         renamingId={renamingId}
         renameDraft={renameDraft}
@@ -2991,6 +2998,7 @@ export function ChatPage(props: ChatPageProps) {
         onShareConversation={handleOpenShareModal}
         onOpenSharedConversations={handleOpenSharedHistoryManager}
         onDeleteConversation={handleDeleteConversation}
+        onLoadMore={loadMoreHistory}
         onCloseSidebar={handleCloseSidebar}
         onOpenSkillsHub={() => {
           cacheActiveComposerDraft();

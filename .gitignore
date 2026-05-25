@@ -22,6 +22,7 @@ target
 .vscode
 target
 bin
+.serena
 
 # Editor directories and files
 .vscode/*

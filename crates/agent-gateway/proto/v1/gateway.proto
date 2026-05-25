@@ -191,13 +191,13 @@ message CronManageResponse {
 }
 
 message HistoryListRequest {
-  int32 limit = 1;
-  int32 offset = 2;
+  int32 page = 1;
+  int32 page_size = 2;
 }
 
 message HistoryListResponse {
   repeated ConversationSummary conversations = 1;
-  int32 total = 2;
+  int32 total_count = 2;
 }
 
 message ConversationSummary {

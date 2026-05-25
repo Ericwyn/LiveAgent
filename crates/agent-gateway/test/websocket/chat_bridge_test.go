@@ -830,15 +830,15 @@ func TestWebSocketForwardsHistorySettingsAndFsRPCs(t *testing.T) {
 	}
 
 	sendEnvelope(t, conn, "history-1", "history.list", map[string]any{
-		"limit":  25,
-		"offset": 5,
+		"page":      2,
+		"page_size": 25,
 	})
 	historyOutbound := readOutboundEnvelope(t, agentSession)
 	historyReq := historyOutbound.GetHistoryList()
 	if historyReq == nil {
 		t.Fatalf("history outbound payload = %T, want HistoryListRequest", historyOutbound.GetPayload())
 	}
-	if historyReq.GetLimit() != 25 || historyReq.GetOffset() != 5 {
+	if historyReq.GetPage() != 2 || historyReq.GetPageSize() != 25 {
 		t.Fatalf("history list request = %#v", historyReq)
 	}
 	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
@@ -846,7 +846,7 @@ func TestWebSocketForwardsHistorySettingsAndFsRPCs(t *testing.T) {
 		Timestamp: time.Now().Unix(),
 		Payload: &gatewayv1.AgentEnvelope_HistoryListResp{
 			HistoryListResp: &gatewayv1.HistoryListResponse{
-				Total: 1,
+				TotalCount: 1,
 				Conversations: []*gatewayv1.ConversationSummary{
 					{
 						Id:           "conversation-1",
@@ -874,7 +874,7 @@ func TestWebSocketForwardsHistorySettingsAndFsRPCs(t *testing.T) {
 	if err := json.Unmarshal(historyResponse.Payload, &historyPayload); err != nil {
 		t.Fatalf("decode history response: %v", err)
 	}
-	if historyPayload["total"] != float64(1) {
+	if historyPayload["total_count"] != float64(1) {
 		t.Fatalf("history payload = %#v", historyPayload)
 	}
 	runningConversationIDs, ok := historyPayload["running_conversation_ids"].([]any)

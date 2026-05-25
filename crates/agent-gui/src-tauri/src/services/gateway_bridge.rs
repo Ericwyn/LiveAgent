@@ -83,14 +83,13 @@ pub async fn handle_cron_manage(
 pub async fn handle_history_list(
     request: proto::HistoryListRequest,
 ) -> Result<proto::HistoryListResponse, String> {
-    let limit = usize::try_from(request.limit.max(0)).unwrap_or(0);
-    let offset = usize::try_from(request.offset.max(0)).unwrap_or(0);
-    let all = chat_history::chat_history_list().await?;
-    let total = i32::try_from(all.len()).unwrap_or(i32::MAX);
-    let conversations = all
+    let page =
+        chat_history::chat_history_list(i64::from(request.page), i64::from(request.page_size))
+            .await?;
+    let total_count = i32::try_from(page.total_count).unwrap_or(i32::MAX);
+    let conversations = page
+        .items
         .into_iter()
-        .skip(offset)
-        .take(if limit == 0 { usize::MAX } else { limit })
         .map(|item| proto::ConversationSummary {
             id: item.id,
             title: item.title,
@@ -109,7 +108,7 @@ pub async fn handle_history_list(
 
     Ok(proto::HistoryListResponse {
         conversations,
-        total,
+        total_count,
     })
 }
 

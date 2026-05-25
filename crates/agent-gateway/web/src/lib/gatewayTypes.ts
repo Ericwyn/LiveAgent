@@ -153,7 +153,7 @@ export type ConversationSummary = {
 
 export type HistoryList = {
   conversations: ConversationSummary[];
-  total: number;
+  total_count: number;
   running_conversation_ids?: string[];
 };
 

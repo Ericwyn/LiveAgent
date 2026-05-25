@@ -1,5 +1,6 @@
 import {
   memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -7,6 +8,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Check, CheckCircle2, ChevronDown, Copy, File, FileText, Loader2, Pencil, Settings, X } from "./icons";
 import {
   normalizeLiveToolStatus,
@@ -94,15 +96,16 @@ const EMPTY_LIVE_SNAPSHOT: LiveConversationStreamSnapshot = {
   toolStatus: null,
   toolStatusIsCompaction: false,
 };
-const TRANSCRIPT_HISTORY_WINDOW_MIN_ITEMS = 320;
-const TRANSCRIPT_HISTORY_INITIAL_ITEMS = 240;
-const TRANSCRIPT_HISTORY_PAGE_SIZE = 160;
+const TRANSCRIPT_ROW_ESTIMATED_HEIGHT = 260;
+const TRANSCRIPT_ROW_GAP = 18;
+const TRANSCRIPT_ROW_OVERSCAN_COUNT = 5;
 
-function getDefaultVisibleHistoryItemCount(itemCount: number) {
-  if (itemCount <= TRANSCRIPT_HISTORY_WINDOW_MIN_ITEMS) {
-    return itemCount;
-  }
-  return Math.min(itemCount, TRANSCRIPT_HISTORY_INITIAL_ITEMS);
+type GatewayTranscriptVirtualItem =
+  | { key: string; kind: "loadRemoteHistory" }
+  | { key: string; kind: "history"; item: GatewayTranscriptItem };
+
+function resolveNearestScrollViewport(element: HTMLElement | null) {
+  return element?.closest("[data-radix-scroll-area-viewport]") as HTMLDivElement | null;
 }
 
 function subscribeEmptyLiveStore() {
@@ -776,6 +779,7 @@ const EditableUserMessageBubble = memo(function EditableUserMessageBubble(props:
 const GatewayTranscriptHistory = memo(function GatewayTranscriptHistory(props: {
   conversationId?: string;
   items: GatewayTranscriptItem[];
+  scrollViewport: HTMLDivElement | null;
   hasMoreHistory?: boolean;
   isLoadingMoreHistory?: boolean;
   onLoadFullHistory?: () => void;
@@ -800,6 +804,7 @@ const GatewayTranscriptHistory = memo(function GatewayTranscriptHistory(props: {
   const {
     conversationId,
     items,
+    scrollViewport,
     hasMoreHistory,
     isLoadingMoreHistory,
     onLoadFullHistory,
@@ -818,33 +823,13 @@ const GatewayTranscriptHistory = memo(function GatewayTranscriptHistory(props: {
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [resolvingEditMessageId, setResolvingEditMessageId] = useState<string | null>(null);
   const [resolvedMessageRefs, setResolvedMessageRefs] = useState<Record<string, HistoryMessageRef>>({});
-  const [visibleHistoryItemCount, setVisibleHistoryItemCount] = useState(() =>
-    readOnly ? items.length : getDefaultVisibleHistoryItemCount(items.length),
-  );
-  const historyWindowResetKey = `${conversationId ?? ""}\n${items[0]?.id ?? ""}`;
+  const historyIdentityKey = `${conversationId ?? ""}\n${items[0]?.id ?? ""}`;
 
-  // Reset only when the loaded window identity changes; tail appends during
-  // stream finalization must not collapse previously loaded older items.
   useEffect(() => {
     setEditingMessageId(null);
     setResolvingEditMessageId(null);
     setResolvedMessageRefs({});
-    setVisibleHistoryItemCount(
-      readOnly ? items.length : getDefaultVisibleHistoryItemCount(items.length),
-    );
-  }, [historyWindowResetKey, readOnly]);
-
-  useEffect(() => {
-    if (readOnly) {
-      setVisibleHistoryItemCount(items.length);
-      return;
-    }
-    setVisibleHistoryItemCount((prev) => {
-      const defaultCount = getDefaultVisibleHistoryItemCount(items.length);
-      const next = Math.max(prev, defaultCount);
-      return Math.min(next, items.length);
-    });
-  }, [items.length, readOnly]);
+  }, [historyIdentityKey]);
 
   useEffect(() => {
     if (!editingMessageId) {
@@ -858,16 +843,49 @@ const GatewayTranscriptHistory = memo(function GatewayTranscriptHistory(props: {
     }
   }, [editingMessageId, items]);
 
-  const hiddenItemCount = readOnly ? 0 : Math.max(0, items.length - visibleHistoryItemCount);
-  const renderedItems = useMemo(
-    () => (readOnly || hiddenItemCount === 0 ? items : items.slice(hiddenItemCount)),
-    [hiddenItemCount, items, readOnly],
+  const virtualItems = useMemo<GatewayTranscriptVirtualItem[]>(() => {
+    const next: GatewayTranscriptVirtualItem[] = [];
+    if (!readOnly && hasMoreHistory) {
+      next.push({ key: "load-remote-history", kind: "loadRemoteHistory" });
+    }
+    for (const item of items) {
+      next.push({ key: item.id, kind: "history", item });
+    }
+    return next;
+  }, [hasMoreHistory, items, readOnly]);
+  const getTranscriptItemKey = useCallback(
+    (index: number) => virtualItems[index]?.key ?? index,
+    [virtualItems],
   );
-  const loadOlderItemCount = Math.min(hiddenItemCount, TRANSCRIPT_HISTORY_PAGE_SIZE);
+  const transcriptVirtualizer = useVirtualizer({
+    count: virtualItems.length,
+    getScrollElement: () => scrollViewport,
+    estimateSize: () => TRANSCRIPT_ROW_ESTIMATED_HEIGHT,
+    getItemKey: getTranscriptItemKey,
+    gap: TRANSCRIPT_ROW_GAP,
+    overscan: TRANSCRIPT_ROW_OVERSCAN_COUNT,
+    enabled: scrollViewport !== null,
+  });
+  const virtualRows = transcriptVirtualizer.getVirtualItems();
+
   return (
-    <>
-      {!readOnly && hasMoreHistory ? (
-        <div className="mb-1 flex justify-center">
+    <div
+      className="relative"
+      style={{ height: transcriptVirtualizer.getTotalSize() }}
+    >
+      {virtualRows.map((virtualRow) => {
+        const virtualItem = virtualItems[virtualRow.index];
+        if (!virtualItem) return null;
+
+        if (virtualItem.kind === "loadRemoteHistory") {
+          return (
+            <div
+              key={virtualRow.key}
+              data-index={virtualRow.index}
+              ref={transcriptVirtualizer.measureElement}
+              className="absolute left-0 right-0 top-0 flex justify-center"
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
           <button
             type="button"
             onClick={onLoadFullHistory}
@@ -882,28 +900,11 @@ const GatewayTranscriptHistory = memo(function GatewayTranscriptHistory(props: {
                 ? "Load earlier history"
                 : "加载更早历史"}
           </button>
-        </div>
-      ) : null}
+            </div>
+          );
+        }
 
-      {!readOnly && hiddenItemCount > 0 ? (
-        <div className="mb-1 flex justify-center">
-          <button
-            type="button"
-            onClick={() =>
-              setVisibleHistoryItemCount((prev) =>
-                Math.min(items.length, prev + TRANSCRIPT_HISTORY_PAGE_SIZE),
-              )
-            }
-            className="rounded-full border border-border/60 bg-background/80 px-4 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-          >
-            {locale === "en-US"
-              ? `Load ${loadOlderItemCount} older items`
-              : `加载更早的 ${loadOlderItemCount} 条历史项`}
-          </button>
-        </div>
-      ) : null}
-
-      {renderedItems.map((item) => {
+        const item = virtualItem.item;
         if (item.kind === "user") {
           const userOrdinal = item.userOrdinal;
           const isCopied = copiedMessageId === item.id;
@@ -917,7 +918,13 @@ const GatewayTranscriptHistory = memo(function GatewayTranscriptHistory(props: {
             item.text,
           );
           return (
-            <article key={item.id} className="gateway-transcript-row gateway-transcript-row-user">
+            <article
+              key={virtualRow.key}
+              data-index={virtualRow.index}
+              ref={transcriptVirtualizer.measureElement}
+              className="gateway-transcript-row gateway-transcript-row-user absolute left-0 right-0 top-0"
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
               {isEditing && effectiveMessageRef ? (
                 <EditableUserMessageBubble
                   initialText={item.text}
@@ -1018,7 +1025,13 @@ const GatewayTranscriptHistory = memo(function GatewayTranscriptHistory(props: {
 
         if (item.kind === "assistant") {
           return (
-            <article key={item.id} className="gateway-transcript-row">
+            <article
+              key={virtualRow.key}
+              data-index={virtualRow.index}
+              ref={transcriptVirtualizer.measureElement}
+              className="gateway-transcript-row absolute left-0 right-0 top-0"
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
               <div className="min-w-0 w-full max-w-full space-y-1">
                 <AssistantBubble
                   rounds={normalizeRoundsForRender(item.rounds, false)}
@@ -1035,14 +1048,26 @@ const GatewayTranscriptHistory = memo(function GatewayTranscriptHistory(props: {
 
         if (item.kind === "checkpoint") {
           return (
-            <article key={item.id} className="gateway-transcript-row gateway-transcript-row-checkpoint">
+            <article
+              key={virtualRow.key}
+              data-index={virtualRow.index}
+              ref={transcriptVirtualizer.measureElement}
+              className="gateway-transcript-row gateway-transcript-row-checkpoint absolute left-0 right-0 top-0"
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
               <CheckpointCard item={item} readOnly={readOnly} />
             </article>
           );
         }
 
         return (
-          <article key={item.id} className="gateway-transcript-row">
+          <article
+            key={virtualRow.key}
+            data-index={virtualRow.index}
+            ref={transcriptVirtualizer.measureElement}
+            className="gateway-transcript-row absolute left-0 right-0 top-0"
+            style={{ transform: `translateY(${virtualRow.start}px)` }}
+          >
             <div className="gateway-bubble gateway-bubble-error">
               <div className="gateway-bubble-label">Error</div>
               <div className="gateway-bubble-content">
@@ -1052,7 +1077,7 @@ const GatewayTranscriptHistory = memo(function GatewayTranscriptHistory(props: {
           </article>
         );
       })}
-    </>
+    </div>
   );
 });
 
@@ -1244,6 +1269,9 @@ export function GatewayTranscript({
     [entries, liveSnapshot.entries],
   );
   const historyItems = useMemo(() => buildTranscriptItems(historyEntries), [historyEntries]);
+  const transcriptListRef = useRef<HTMLDivElement | null>(null);
+  const [transcriptScrollViewport, setTranscriptScrollViewport] =
+    useState<HTMLDivElement | null>(null);
   const hasLiveEntries = liveSnapshot.entries.length > 0;
   const lastHistoryKind = historyItems.at(-1)?.kind;
   const inlineErrorText = error?.trim() ?? "";
@@ -1255,6 +1283,13 @@ export function GatewayTranscript({
       ),
     [historyItems, inlineErrorText],
   );
+
+  useLayoutEffect(() => {
+    const nextViewport = resolveNearestScrollViewport(transcriptListRef.current);
+    setTranscriptScrollViewport((current) =>
+      current === nextViewport ? current : nextViewport,
+    );
+  });
 
   if (historyItems.length === 0 && !hasLiveEntries && isLoading) {
     return <HistoryLoadingState title={loadingTitle} />;
@@ -1319,10 +1354,11 @@ export function GatewayTranscript({
 
   return (
     <div className="gateway-transcript-shell">
-      <div className="gateway-chat-column gateway-transcript-list">
+      <div ref={transcriptListRef} className="gateway-chat-column gateway-transcript-list">
         <GatewayTranscriptHistory
           conversationId={conversationId}
           items={historyItems}
+          scrollViewport={transcriptScrollViewport}
           hasMoreHistory={hasMoreHistory}
           isLoadingMoreHistory={isLoadingMoreHistory}
           onLoadFullHistory={onLoadFullHistory}

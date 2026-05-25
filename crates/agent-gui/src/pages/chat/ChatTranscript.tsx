@@ -1,12 +1,15 @@
 import {
   memo,
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   useSyncExternalStore,
   type RefObject,
 } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import iconSimpleUrl from "../../../src-tauri/icons/icon-simple.png";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -24,7 +27,6 @@ import {
 
 import { LiveMarkdown, Markdown } from "../../components/Markdown";
 import { ImagePreview, type ImagePreviewSlide } from "../../components/chat/ImagePreview";
-import { Button } from "../../components/ui/button";
 import { ScrollArea } from "../../components/ui/scroll-area";
 import { useLocale } from "../../i18n";
 import { normalizeLiveToolStatus, VIBING_STATUS } from "../../lib/chat/page/chatPageHelpers";
@@ -84,6 +86,10 @@ function writeUploadedImagePreviewCache(cacheKey: string, value: string) {
 
 function resolveNearestScrollViewport(element: HTMLElement | null) {
   return element?.closest("[data-radix-scroll-area-viewport]") as HTMLDivElement | null;
+}
+
+function resolveScrollAreaViewport(root: HTMLDivElement | null) {
+  return root?.querySelector("[data-radix-scroll-area-viewport]") as HTMLDivElement | null;
 }
 
 async function loadUploadedImagePreview(params: {
@@ -536,6 +542,7 @@ type TranscriptHistoryProps = Pick<
   | "onResendFromEdit"
 > & {
   isSending: boolean;
+  scrollViewport: HTMLDivElement | null;
 };
 
 type TranscriptLiveStateProps = Pick<
@@ -548,31 +555,9 @@ type TranscriptLiveStateProps = Pick<
   | "isCompactionRunning"
 >;
 
-const SEGMENT_PAGINATION_THRESHOLD = 100;
-const SEGMENT_PAGE_SIZE = 24;
-const TRANSCRIPT_HISTORY_WINDOW_MIN_ITEMS = 320;
-const TRANSCRIPT_HISTORY_INITIAL_ITEMS = 240;
-const TRANSCRIPT_HISTORY_PAGE_SIZE = 160;
-
-function getUniqueSegmentIndices(historyItems: RenderTimelineItem[]) {
-  return Array.from(new Set(historyItems.map((item) => item.segmentIndex))).sort((a, b) => a - b);
-}
-
-function getDefaultVisibleSegmentIndex(historyItems: RenderTimelineItem[]) {
-  const segmentIndices = getUniqueSegmentIndices(historyItems);
-  if (segmentIndices.length === 0) return 0;
-  if (segmentIndices.length <= SEGMENT_PAGINATION_THRESHOLD) {
-    return segmentIndices[0];
-  }
-  return segmentIndices[Math.max(0, segmentIndices.length - SEGMENT_PAGE_SIZE)];
-}
-
-function getDefaultVisibleHistoryItemCount(itemCount: number) {
-  if (itemCount <= TRANSCRIPT_HISTORY_WINDOW_MIN_ITEMS) {
-    return itemCount;
-  }
-  return Math.min(itemCount, TRANSCRIPT_HISTORY_INITIAL_ITEMS);
-}
+const TRANSCRIPT_ROW_ESTIMATED_HEIGHT = 260;
+const TRANSCRIPT_ROW_GAP = 24;
+const TRANSCRIPT_ROW_OVERSCAN_COUNT = 5;
 
 const SummaryCard = memo(function SummaryCard(props: { item: RenderSummaryCard }) {
   const { item } = props;
@@ -722,6 +707,7 @@ const TranscriptHistory = memo(function TranscriptHistory(props: TranscriptHisto
   const {
     conversationId,
     historyItems,
+    scrollViewport,
     showUsage,
     usageContextWindow,
     copiedMessageKey,
@@ -730,44 +716,8 @@ const TranscriptHistory = memo(function TranscriptHistory(props: TranscriptHisto
     workspaceRoot,
     isSending,
   } = props;
-  const { locale, t } = useLocale();
+  const { t } = useLocale();
   const [editingMessageKey, setEditingMessageKey] = useState<string | null>(null);
-  const segmentIndices = useMemo(
-    () => getUniqueSegmentIndices(historyItems),
-    [historyItems],
-  );
-  const defaultVisibleSegmentIndex = useMemo(
-    () => getDefaultVisibleSegmentIndex(historyItems),
-    [historyItems],
-  );
-  const [minVisibleSegmentIndex, setMinVisibleSegmentIndex] = useState(() =>
-    getDefaultVisibleSegmentIndex(historyItems),
-  );
-  const [visibleHistoryItemCount, setVisibleHistoryItemCount] = useState(() =>
-    getDefaultVisibleHistoryItemCount(historyItems.length),
-  );
-
-  useEffect(() => {
-    setMinVisibleSegmentIndex(defaultVisibleSegmentIndex);
-    setVisibleHistoryItemCount(getDefaultVisibleHistoryItemCount(historyItems.length));
-  }, [conversationId, defaultVisibleSegmentIndex]);
-
-  useEffect(() => {
-    setMinVisibleSegmentIndex((prev) => {
-      if (segmentIndices.length === 0) {
-        return defaultVisibleSegmentIndex;
-      }
-      return prev <= defaultVisibleSegmentIndex ? prev : defaultVisibleSegmentIndex;
-    });
-  }, [defaultVisibleSegmentIndex, segmentIndices.length]);
-
-  useEffect(() => {
-    setVisibleHistoryItemCount((prev) => {
-      const defaultCount = getDefaultVisibleHistoryItemCount(historyItems.length);
-      const next = Math.max(prev, defaultCount);
-      return Math.min(next, historyItems.length);
-    });
-  }, [historyItems.length]);
 
   useEffect(() => {
     setEditingMessageKey(null);
@@ -785,76 +735,39 @@ const TranscriptHistory = memo(function TranscriptHistory(props: TranscriptHisto
     }
   }, [editingMessageKey, historyItems]);
 
-  const visibleHistoryItems = useMemo(
-    () => historyItems.filter((item) => item.segmentIndex >= minVisibleSegmentIndex),
-    [historyItems, minVisibleSegmentIndex],
+  const getTranscriptItemKey = useCallback(
+    (index: number) => historyItems[index]?.key ?? index,
+    [historyItems],
   );
-  const hiddenItemCount = Math.max(0, visibleHistoryItems.length - visibleHistoryItemCount);
-  const renderedHistoryItems = useMemo(
-    () => (hiddenItemCount > 0 ? visibleHistoryItems.slice(hiddenItemCount) : visibleHistoryItems),
-    [hiddenItemCount, visibleHistoryItems],
-  );
-  const hiddenSegmentCount = segmentIndices.filter(
-    (segmentIndex) => segmentIndex < minVisibleSegmentIndex,
-  ).length;
-  const enableContentVisibility = historyItems.length >= 80;
-  const rowPerfClass = enableContentVisibility
-    ? "[content-visibility:auto] [contain-intrinsic-size:1px_260px] [contain:content]"
-    : "";
+  const transcriptVirtualizer = useVirtualizer({
+    count: historyItems.length,
+    getScrollElement: () => scrollViewport,
+    estimateSize: () => TRANSCRIPT_ROW_ESTIMATED_HEIGHT,
+    getItemKey: getTranscriptItemKey,
+    gap: TRANSCRIPT_ROW_GAP,
+    overscan: TRANSCRIPT_ROW_OVERSCAN_COUNT,
+    enabled: scrollViewport !== null,
+  });
+  const virtualRows = transcriptVirtualizer.getVirtualItems();
 
   return (
-    <>
-      {hiddenSegmentCount > 0 ? (
-        <div className="mb-4 flex justify-center">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              const currentIndex = segmentIndices.findIndex(
-                (segmentIndex) => segmentIndex >= minVisibleSegmentIndex,
-              );
-              if (currentIndex <= 0) {
-                setMinVisibleSegmentIndex(segmentIndices[0] ?? 0);
-                return;
-              }
-              const nextIndex = Math.max(0, currentIndex - SEGMENT_PAGE_SIZE);
-              setVisibleHistoryItemCount((prev) =>
-                prev + TRANSCRIPT_HISTORY_PAGE_SIZE,
-              );
-              setMinVisibleSegmentIndex(segmentIndices[nextIndex] ?? 0);
-            }}
-            className="rounded-full border-border/60 bg-background/80 px-4 text-xs text-muted-foreground hover:text-foreground"
-          >
-            {locale === "en-US"
-              ? `Load ${Math.min(hiddenSegmentCount, SEGMENT_PAGE_SIZE)} older segments`
-              : `加载更早的 ${Math.min(hiddenSegmentCount, SEGMENT_PAGE_SIZE)} 个分段`}
-          </Button>
-        </div>
-      ) : null}
+    <div
+      className="relative"
+      style={{ height: transcriptVirtualizer.getTotalSize() }}
+    >
+      {virtualRows.map((virtualRow) => {
+        const item = historyItems[virtualRow.index];
+        if (!item) return null;
 
-      {hiddenItemCount > 0 ? (
-        <div className="mb-4 flex justify-center">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              setVisibleHistoryItemCount((prev) =>
-                Math.min(visibleHistoryItems.length, prev + TRANSCRIPT_HISTORY_PAGE_SIZE),
-              )
-            }
-            className="rounded-full border-border/60 bg-background/80 px-4 text-xs text-muted-foreground hover:text-foreground"
-          >
-            {locale === "en-US"
-              ? `Load ${Math.min(hiddenItemCount, TRANSCRIPT_HISTORY_PAGE_SIZE)} older items`
-              : `加载更早的 ${Math.min(hiddenItemCount, TRANSCRIPT_HISTORY_PAGE_SIZE)} 条历史项`}
-          </Button>
-        </div>
-      ) : null}
-
-      {renderedHistoryItems.map((item) => {
         if (item.kind === "summary") {
           return (
-            <div key={item.key} className={rowPerfClass}>
+            <div
+              key={virtualRow.key}
+              data-index={virtualRow.index}
+              ref={transcriptVirtualizer.measureElement}
+              className="absolute left-0 right-0 top-0"
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
               <SummaryCard item={item} />
             </div>
           );
@@ -869,7 +782,13 @@ const TranscriptHistory = memo(function TranscriptHistory(props: TranscriptHisto
             item.text,
           );
           return (
-            <div key={item.key} className={`flex justify-end ${rowPerfClass}`}>
+            <div
+              key={virtualRow.key}
+              data-index={virtualRow.index}
+              ref={transcriptVirtualizer.measureElement}
+              className="absolute left-0 right-0 top-0 flex justify-end"
+              style={{ transform: `translateY(${virtualRow.start}px)` }}
+            >
               {isEditing ? (
                 <EditableUserMessageBubble
                   initialText={item.text}
@@ -933,10 +852,13 @@ const TranscriptHistory = memo(function TranscriptHistory(props: TranscriptHisto
 
         return (
           <div
-            key={item.key}
-            className={`flex justify-start ${rowPerfClass} ${
+            key={virtualRow.key}
+            data-index={virtualRow.index}
+            ref={transcriptVirtualizer.measureElement}
+            className={`absolute left-0 right-0 top-0 flex justify-start ${
               item.isFromCompactedSegment ? "opacity-70" : ""
             }`}
+            style={{ transform: `translateY(${virtualRow.start}px)` }}
           >
             {item.rounds.length > 0 ? (
               <AssistantBubble
@@ -960,7 +882,7 @@ const TranscriptHistory = memo(function TranscriptHistory(props: TranscriptHisto
           </div>
         );
       })}
-    </>
+    </div>
   );
 });
 
@@ -1077,6 +999,12 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
   const showNoModelsState = !hasModels;
   const showStartChatState = hasModels && historyItems.length === 0 && !isSending;
   const shouldReserveTranscriptBottomSpace = !(showNoModelsState || showStartChatState);
+  const [scrollViewport, setScrollViewport] = useState<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    const nextViewport = resolveScrollAreaViewport(scrollAreaRef.current);
+    setScrollViewport((current) => (current === nextViewport ? current : nextViewport));
+  });
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -1149,6 +1077,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
           <TranscriptHistory
             conversationId={conversationId}
             workspaceRoot={workspaceRoot}
+            scrollViewport={scrollViewport}
             historyItems={historyItems}
             showUsage={showUsage}
             usageContextWindow={usageContextWindow}

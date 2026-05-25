@@ -28,6 +28,7 @@ const HISTORY_SHARE_TOKEN_ALPHABET: &[u8] =
 const CHAT_HISTORY_FTS_REFRESH_BATCH_SIZE: usize = 8;
 const DEFAULT_HISTORY_SEARCH_LIMIT: usize = 6;
 const MAX_HISTORY_SEARCH_LIMIT: usize = 12;
+const MAX_HISTORY_LIST_LIMIT: i64 = 200;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +45,13 @@ pub struct ChatHistorySummary {
     pub is_pinned: bool,
     pub pinned_at: Option<i64>,
     pub is_shared: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatHistoryListResponse {
+    pub items: Vec<ChatHistorySummary>,
+    pub total_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2040,7 +2048,36 @@ fn verify_chat_history_consistency(conn: &Connection, conversation_id: &str) -> 
     Ok(())
 }
 
-fn list_chat_history_sync(conn: &Connection) -> Result<Vec<ChatHistorySummary>, String> {
+fn resolve_history_list_page(page: i64) -> Result<i64, String> {
+    if page <= 0 {
+        Err("历史列表 page 必须大于 0".to_string())
+    } else {
+        Ok(page)
+    }
+}
+
+fn resolve_history_list_page_size(page_size: i64) -> Result<i64, String> {
+    if page_size <= 0 {
+        Err("历史列表 pageSize 必须大于 0".to_string())
+    } else {
+        Ok(page_size.min(MAX_HISTORY_LIST_LIMIT))
+    }
+}
+
+pub(crate) fn list_chat_history_sync(
+    conn: &Connection,
+    page: i64,
+    page_size: i64,
+) -> Result<ChatHistoryListResponse, String> {
+    let page = resolve_history_list_page(page)?;
+    let limit = resolve_history_list_page_size(page_size)?;
+    let offset = (page - 1).saturating_mul(limit);
+    let total = conn
+        .query_row("SELECT COUNT(*) FROM chatHistory", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|e| format!("统计历史列表失败：{e}"))?;
+
     let mut stmt = conn
         .prepare(
             "
@@ -2062,20 +2099,24 @@ fn list_chat_history_sync(conn: &Connection) -> Result<Vec<ChatHistorySummary>, 
                 END AS is_shared
             FROM chatHistory h
             LEFT JOIN chatHistoryShare share ON share.conversation_id = h.id
-            ORDER BY h.is_pinned DESC, h.pinned_at DESC, h.updated_at DESC
+            ORDER BY h.is_pinned DESC, h.pinned_at DESC, h.updated_at DESC, h.id ASC
+            LIMIT ?1 OFFSET ?2
             ",
         )
         .map_err(|e| format!("准备历史列表查询失败：{e}"))?;
 
     let rows = stmt
-        .query_map([], row_to_summary)
+        .query_map(params![limit, offset], row_to_summary)
         .map_err(|e| format!("查询历史列表失败：{e}"))?;
 
     let mut out = Vec::new();
     for row in rows {
         out.push(row.map_err(|e| format!("读取历史列表行失败：{e}"))?);
     }
-    Ok(out)
+    Ok(ChatHistoryListResponse {
+        items: out,
+        total_count: total,
+    })
 }
 
 fn history_fts_phrase(input: &str) -> String {
@@ -2720,10 +2761,13 @@ pub(crate) fn search_chat_history_for_memory_sync(
 }
 
 #[tauri::command]
-pub async fn chat_history_list() -> Result<Vec<ChatHistorySummary>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn chat_history_list(
+    page: i64,
+    page_size: i64,
+) -> Result<ChatHistoryListResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db()?;
-        list_chat_history_sync(&conn)
+        list_chat_history_sync(&conn, page, page_size)
     })
     .await
     .map_err(|e| format!("chat_history_list join 失败：{e}"))?
@@ -3437,7 +3481,9 @@ mod tests {
         assert!(pinned.is_pinned);
         assert!(pinned.pinned_at.is_some());
 
-        let pinned_order = list_chat_history_sync(&conn).expect("list pinned history");
+        let pinned_order = list_chat_history_sync(&conn, 1, 20)
+            .expect("list pinned history")
+            .items;
         assert_eq!(
             pinned_order
                 .iter()
@@ -3451,13 +3497,37 @@ mod tests {
         assert!(!unpinned.is_pinned);
         assert_eq!(unpinned.pinned_at, None);
 
-        let restored_order = list_chat_history_sync(&conn).expect("list unpinned history");
+        let restored_order = list_chat_history_sync(&conn, 1, 20)
+            .expect("list unpinned history")
+            .items;
         assert_eq!(
             restored_order
                 .iter()
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["newer", "older"]
+        );
+    }
+
+    #[test]
+    fn list_history_returns_limited_page_and_total() {
+        let conn = open_test_db().expect("open test db");
+        for index in 0..5 {
+            let mut conversation = sample_conversation();
+            conversation.id = format!("conv-{index}");
+            conversation.updated_at = 1_700_000_000_000 + index;
+            upsert_chat_history_header(&conn, &conversation).expect("upsert header");
+        }
+
+        let page = list_chat_history_sync(&conn, 2, 2).expect("list history page");
+
+        assert_eq!(page.total_count, 5);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["conv-2", "conv-1"]
         );
     }
 
