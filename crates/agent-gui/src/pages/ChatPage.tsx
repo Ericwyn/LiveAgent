@@ -1712,6 +1712,38 @@ export function ChatPage(props: ChatPageProps) {
     clearAbortSnapshot(transcriptStore);
 
     let nextConversationState = appendMessagesToConversation(baseConversationState, [pendingUserMessage]);
+    let conversationRunStarted = false;
+    let gatewayActivityPublishChain: Promise<void> = Promise.resolve();
+    function queueGatewayConversationActivity(running: boolean) {
+      gatewayActivityPublishChain = gatewayActivityPublishChain.then(() =>
+        publishGatewayConversationActivity(conversationId, running),
+      );
+      void gatewayActivityPublishChain;
+    }
+    function markConversationRunStarted() {
+      if (conversationRunStarted) {
+        return;
+      }
+      conversationRunStarted = true;
+      applyConversationState(nextConversationState);
+      resetLiveTranscript(transcriptStore);
+      setConversationAbortController(conversationId, requestController);
+      setConversationSendingState(conversationId, true);
+      gatewayBridgeEvents.queueToken("", { round: 0 });
+      queueGatewayConversationActivity(true);
+      if (isConversationVisible()) {
+        stickToBottom();
+      }
+    }
+    function markConversationRunStopped() {
+      if (!conversationRunStarted) {
+        return;
+      }
+      setConversationAbortController(conversationId, null);
+      setConversationSendingState(conversationId, false);
+      queueGatewayConversationActivity(false);
+    }
+
     const shouldSynchronizeInitialPersistBeforeGatewayStream =
       Boolean(gatewayBridgeRequest) || hasRemoteGatewayTarget;
     // Persist the user turn immediately so WebUI/GUI sidebars can surface the
@@ -1728,6 +1760,7 @@ export function ChatPage(props: ChatPageProps) {
       titlePromise,
       titleLookahead: !shouldSynchronizeInitialPersistBeforeGatewayStream,
     });
+    markConversationRunStarted();
     if (overrides?.afterInitialHistoryPersist) {
       const persisted = await initialPersist;
       if (!persisted) {
@@ -1735,6 +1768,7 @@ export function ChatPage(props: ChatPageProps) {
         setConversationErrorState(message);
         gatewayBridgeEvents.emitError(message, conversationId);
         gatewayBridgeEvents.close();
+        markConversationRunStopped();
         return;
       }
       try {
@@ -1744,6 +1778,7 @@ export function ChatPage(props: ChatPageProps) {
         setConversationErrorState(message);
         gatewayBridgeEvents.emitError(message, conversationId);
         gatewayBridgeEvents.close();
+        markConversationRunStopped();
         return;
       }
     } else {
@@ -1905,6 +1940,8 @@ export function ChatPage(props: ChatPageProps) {
         const message = `找不到以下 Skills：${missing.join(", ")}（请先重新扫描固定 Skills 目录）`;
         setConversationErrorState(message);
         gatewayBridgeEvents.emitError(message, conversationId);
+        gatewayBridgeEvents.close();
+        markConversationRunStopped();
         return;
       }
 
@@ -2317,18 +2354,10 @@ export function ChatPage(props: ChatPageProps) {
       }
     }
 
-    applyConversationState(nextConversationState);
-    resetLiveTranscript(transcriptStore);
     if (typeof overrides?.textOverride !== "string") {
       clearCachedComposerDraft(conversationId);
     }
     resetVisibleTransientState(conversationId);
-    setConversationAbortController(conversationId, requestController);
-    setConversationSendingState(conversationId, true);
-    await publishGatewayConversationActivity(conversationId, true);
-    if (isConversationVisible()) {
-      stickToBottom();
-    }
 
     try {
       if (effectiveIsAgentMode) {
@@ -2471,9 +2500,7 @@ export function ChatPage(props: ChatPageProps) {
       clearCompactionRollback();
       hookLifecycle.endAgent();
       clearAbortSnapshot(transcriptStore);
-      setConversationAbortController(conversationId, null);
-      setConversationSendingState(conversationId, false);
-      await publishGatewayConversationActivity(conversationId, false);
+      markConversationRunStopped();
       pruneIdleConversationCaches([conversationId]);
     }
   }

@@ -380,8 +380,10 @@ impl GatewayController {
             if connect_result.is_ok() || attempt_duration >= GATEWAY_RECONNECT_STABLE_AFTER {
                 reconnect_delay = GATEWAY_RECONNECT_INITIAL_DELAY;
             } else {
-                reconnect_delay =
-                    std::cmp::min(reconnect_delay.saturating_mul(2), GATEWAY_RECONNECT_MAX_DELAY);
+                reconnect_delay = std::cmp::min(
+                    reconnect_delay.saturating_mul(2),
+                    GATEWAY_RECONNECT_MAX_DELAY,
+                );
             }
 
             tokio::select! {
@@ -965,19 +967,7 @@ impl GatewayController {
                 }
             }
             Some(proto::gateway_envelope::Payload::UploadedImagePreview(request)) => {
-                match gateway_bridge::handle_uploaded_image_preview(request).await {
-                    Ok(response) => {
-                        self.send_agent_envelope(proto::AgentEnvelope {
-                            request_id,
-                            timestamp: now_unix_seconds(),
-                            payload: Some(
-                                proto::agent_envelope::Payload::UploadedImagePreviewResp(response),
-                            ),
-                        })
-                        .await
-                    }
-                    Err(error) => self.send_error_response(request_id, 500, error).await,
-                }
+                self.spawn_uploaded_image_preview_response(request_id, request)
             }
             Some(proto::gateway_envelope::Payload::MemoryManage(request)) => {
                 match gateway_bridge::handle_memory_manage(Arc::clone(&self.memory_store), request)
@@ -1046,16 +1036,40 @@ impl GatewayController {
     }
 
     async fn send_agent_envelope(&self, envelope: proto::AgentEnvelope) -> Result<(), String> {
-        let sender = self
-            .outbound_tx
+        let sender = self.current_outbound_sender()?;
+        send_agent_envelope_to(sender, envelope).await
+    }
+
+    fn current_outbound_sender(&self) -> Result<mpsc::Sender<proto::AgentEnvelope>, String> {
+        self.outbound_tx
             .lock()
             .map_err(|_| "gateway outbound sender lock poisoned".to_string())?
             .clone()
-            .ok_or_else(|| "gateway outbound stream is offline".to_string())?;
-        sender
-            .send(envelope)
-            .await
-            .map_err(|_| "gateway outbound stream closed".to_string())
+            .ok_or_else(|| "gateway outbound stream is offline".to_string())
+    }
+
+    fn spawn_uploaded_image_preview_response(
+        &self,
+        request_id: String,
+        request: proto::UploadedImagePreviewRequest,
+    ) -> Result<(), String> {
+        let sender = self.current_outbound_sender()?;
+        tauri::async_runtime::spawn(async move {
+            let envelope = match gateway_bridge::handle_uploaded_image_preview(request).await {
+                Ok(response) => proto::AgentEnvelope {
+                    request_id,
+                    timestamp: now_unix_seconds(),
+                    payload: Some(proto::agent_envelope::Payload::UploadedImagePreviewResp(
+                        response,
+                    )),
+                },
+                Err(error) => build_error_response_envelope(request_id, 500, error),
+            };
+            if let Err(error) = send_agent_envelope_to(sender, envelope).await {
+                eprintln!("send gateway uploaded image preview response failed: {error}");
+            }
+        });
+        Ok(())
     }
 
     async fn send_error_response(
@@ -1064,14 +1078,8 @@ impl GatewayController {
         code: i32,
         message: String,
     ) -> Result<(), String> {
-        self.send_agent_envelope(proto::AgentEnvelope {
-            request_id,
-            timestamp: now_unix_seconds(),
-            payload: Some(proto::agent_envelope::Payload::Error(
-                proto::ErrorResponse { code, message },
-            )),
-        })
-        .await
+        self.send_agent_envelope(build_error_response_envelope(request_id, code, message))
+            .await
     }
 
     fn set_outbound_sender(&self, sender: Option<mpsc::Sender<proto::AgentEnvelope>>) {
@@ -1246,6 +1254,30 @@ fn build_history_sync_upsert_from_proto(
             pinned_at: (summary.pinned_at > 0).then_some(summary.pinned_at),
             is_shared: summary.is_shared,
         }),
+    }
+}
+
+async fn send_agent_envelope_to(
+    sender: mpsc::Sender<proto::AgentEnvelope>,
+    envelope: proto::AgentEnvelope,
+) -> Result<(), String> {
+    sender
+        .send(envelope)
+        .await
+        .map_err(|_| "gateway outbound stream closed".to_string())
+}
+
+fn build_error_response_envelope(
+    request_id: String,
+    code: i32,
+    message: String,
+) -> proto::AgentEnvelope {
+    proto::AgentEnvelope {
+        request_id,
+        timestamp: now_unix_seconds(),
+        payload: Some(proto::agent_envelope::Payload::Error(
+            proto::ErrorResponse { code, message },
+        )),
     }
 }
 

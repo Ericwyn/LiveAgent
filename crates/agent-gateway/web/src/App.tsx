@@ -9,6 +9,7 @@ import {
   mergePendingUploadedFiles,
   withPastedTextDisplayMetadata,
 } from "@/lib/chat/uploadedFiles";
+import { registerLocalUploadedImagePreviews } from "@/lib/chat/uploadedImagePreview";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { LocaleContext, t as translate } from "@/i18n";
@@ -3598,6 +3599,11 @@ export default function App() {
         settings.system.workdir,
         importBatch,
       );
+      registerLocalUploadedImagePreviews({
+        workspaceRoot: settings.system.workdir,
+        uploadedFiles: result.files,
+        sourceFiles: importBatch,
+      });
 
       if (result.files.length > 0) {
         setPendingUploadedFiles((current) => {

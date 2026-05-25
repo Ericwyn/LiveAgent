@@ -8,6 +8,7 @@ const rootDir = fileURLToPath(new URL("../", import.meta.url));
 const uiMessagesLoader = createTsModuleLoader({ rootDir });
 const uiMessages = uiMessagesLoader.loadModule("src/lib/chat/uiMessages.ts");
 const hostedSearch = uiMessagesLoader.loadModule("src/lib/chat/hostedSearch.ts");
+const uploadedImagePreview = uiMessagesLoader.loadModule("src/lib/chat/uploadedImagePreview.ts");
 const loader = createTsModuleLoader({
   rootDir,
   mocks: {
@@ -35,6 +36,90 @@ const loader = createTsModuleLoader({
 });
 
 const { buildTranscriptItems, pushChatEvent } = loader.loadModule("src/lib/chatUi.ts");
+
+function withMockObjectUrl(run) {
+  const createDescriptor = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const revokeDescriptor = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: (file) => `blob:local-preview/${file.name}/${file.size}`,
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    configurable: true,
+    value: () => {},
+  });
+  try {
+    return run();
+  } finally {
+    if (createDescriptor) {
+      Object.defineProperty(URL, "createObjectURL", createDescriptor);
+    } else {
+      delete URL.createObjectURL;
+    }
+    if (revokeDescriptor) {
+      Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
+    } else {
+      delete URL.revokeObjectURL;
+    }
+  }
+}
+
+test("uploaded image previews use local object URLs before files.preview", async () => {
+  await withMockObjectUrl(async () => {
+    const uploadedFile = {
+      relativePath: "uploads/batch/photo.png",
+      absolutePath: "/workspace/uploads/batch/photo.png",
+      fileName: "photo.png",
+      kind: "image",
+      sizeBytes: 128_000,
+    };
+
+    uploadedImagePreview.registerLocalUploadedImagePreviews({
+      workspaceRoot: "/workspace",
+      uploadedFiles: [uploadedFile],
+      sourceFiles: [{ name: "photo.png", size: 128_000, type: "image/png" }],
+    });
+
+    assert.equal(
+      uploadedImagePreview.readUploadedImagePreviewCache("/workspace", uploadedFile),
+      "blob:local-preview/photo.png/128000",
+    );
+
+    let remotePreviewCalls = 0;
+    const preview = await uploadedImagePreview.loadUploadedImagePreview({
+      workspaceRoot: "/workspace",
+      file: uploadedFile,
+      loader: async () => {
+        remotePreviewCalls += 1;
+        return { mimeType: "image/png", data: "remote" };
+      },
+    });
+
+    assert.equal(preview, "blob:local-preview/photo.png/128000");
+    assert.equal(remotePreviewCalls, 0);
+  });
+});
+
+test("uploaded image previews fall back to files.preview when no local object URL exists", async () => {
+  const uploadedFile = {
+    relativePath: "uploads/batch/remote.png",
+    absolutePath: "/workspace/uploads/batch/remote.png",
+    fileName: "remote.png",
+    kind: "image",
+    sizeBytes: 256_000,
+  };
+  const preview = await uploadedImagePreview.loadUploadedImagePreview({
+    workspaceRoot: "/workspace",
+    file: uploadedFile,
+    loader: async () => ({ mimeType: "image/png", data: "cmVtb3Rl" }),
+  });
+
+  assert.equal(preview, "data:image/png;base64,cmVtb3Rl");
+  assert.equal(
+    uploadedImagePreview.readUploadedImagePreviewCache("/workspace", uploadedFile),
+    "data:image/png;base64,cmVtb3Rl",
+  );
+});
 
 function createDelegateAgent(id, prompt, summary) {
   return {
@@ -117,6 +202,27 @@ test("buildTranscriptItems assigns stable user ordinals", () => {
     items.filter((item) => item.kind === "user").map((item) => item.userOrdinal),
     [0, 1, 2],
   );
+});
+
+test("pushChatEvent ignores empty start tokens without creating a blank assistant", () => {
+  let entries = [];
+  entries = pushChatEvent(entries, {
+    type: "token",
+    text: "",
+    round: 0,
+    conversation_id: "conversation-1",
+  });
+  assert.deepEqual(entries, []);
+
+  entries = pushChatEvent(entries, {
+    type: "token",
+    text: "answer",
+    round: 1,
+    conversation_id: "conversation-1",
+  });
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].kind, "assistant");
+  assert.equal(entries[0].text, "answer");
 });
 
 test("pushChatEvent and buildTranscriptItems preserve hosted search events", () => {

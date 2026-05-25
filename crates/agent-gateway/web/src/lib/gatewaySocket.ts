@@ -2010,6 +2010,7 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
               conversation_id: String(body.conversation_id ?? ""),
               client_request_id: String(body.client_request_id ?? ""),
               selected_model: body.selected_model as GatewaySelectedModel | undefined,
+              runtime_controls: body.runtime_controls as GatewayChatRuntimeControls | undefined,
               system_settings: body.system_settings as GatewayChatSystemSettings | undefined,
               uploaded_files: body.uploaded_files as PendingUploadedFile[] | undefined,
             },

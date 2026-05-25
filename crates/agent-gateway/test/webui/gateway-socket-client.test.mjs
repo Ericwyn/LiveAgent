@@ -174,6 +174,108 @@ test("SharedWorker gateway client sends conversation cancel even without a local
   resetGatewayWebSocketClient();
 });
 
+test("SharedWorker gateway client forwards chat runtime controls to the worker", async () => {
+  installBrowser();
+  FakeSharedWorker.instances = [];
+  globalThis.SharedWorker = FakeSharedWorker;
+  const loader = createWebModuleLoader();
+  const { getGatewayWebSocketClient, resetGatewayWebSocketClient } = loader.loadModule("src/lib/gatewaySocket.ts");
+  resetGatewayWebSocketClient();
+
+  const client = getGatewayWebSocketClient(" token ");
+  assert.equal(FakeSharedWorker.instances.length, 1);
+  const port = FakeSharedWorker.instances[0].port;
+  const connect = port.messages.find((message) => message.type === "connect");
+  assert.ok(connect);
+  port.emit({
+    type: "ready",
+    connection_id: connect.connection_id,
+    payload: { status: { online: true }, error: null },
+  });
+
+  const stream = client.chat(
+    "hello",
+    "conversation-1",
+    { customProviderId: "claude-provider", model: "claude-test", providerType: "claude_code" },
+    { executionMode: "agent-dev", workdir: "/workspace", selectedSystemTools: ["http_get_test"] },
+    undefined,
+    [
+      {
+        relativePath: "uploads/notes.txt",
+        absolutePath: "/workspace/uploads/notes.txt",
+        fileName: "notes.txt",
+        kind: "text",
+        sizeBytes: 12,
+      },
+    ],
+    "client-submit-1",
+    {
+      thinkingEnabled: false,
+      nativeWebSearchEnabled: true,
+      reasoning: "xhigh",
+    },
+  );
+  const firstEventPromise = stream.next();
+
+  await waitFor(
+    () => port.messages.some((message) => message.type === "chat.start"),
+    "shared worker client chat.start message",
+  );
+  const chatStart = port.messages.find((message) => message.type === "chat.start");
+  assert.equal(chatStart.connection_id, connect.connection_id);
+  assert.equal(typeof chatStart.request_id, "string");
+  assert.equal(typeof chatStart.stream_id, "string");
+  assert.deepEqual(chatStart.payload, {
+    message: "hello",
+    conversation_id: "conversation-1",
+    client_request_id: "client-submit-1",
+    selected_model: {
+      customProviderId: "claude-provider",
+      model: "claude-test",
+      providerType: "claude_code",
+    },
+    runtime_controls: {
+      thinkingEnabled: false,
+      nativeWebSearchEnabled: true,
+      reasoning: "xhigh",
+    },
+    system_settings: {
+      executionMode: "agent-dev",
+      workdir: "/workspace",
+      selectedSystemTools: ["http_get_test"],
+    },
+    uploaded_files: [
+      {
+        relativePath: "uploads/notes.txt",
+        absolutePath: "/workspace/uploads/notes.txt",
+        fileName: "notes.txt",
+        kind: "text",
+        sizeBytes: 12,
+      },
+    ],
+  });
+
+  port.emit({
+    type: "response",
+    connection_id: connect.connection_id,
+    request_id: chatStart.request_id,
+    payload: { ok: true },
+  });
+  port.emit({
+    type: "chat-event",
+    connection_id: connect.connection_id,
+    stream_id: chatStart.stream_id,
+    payload: { type: "done", conversation_id: "conversation-1" },
+  });
+  assert.deepEqual(await firstEventPromise, {
+    value: { type: "done", conversation_id: "conversation-1" },
+    done: false,
+  });
+  assert.deepEqual(await stream.next(), { value: undefined, done: true });
+
+  resetGatewayWebSocketClient();
+});
+
 test("Gateway SharedWorker broadcasts events with each port connection id", async () => {
   installBrowser();
   const loader = createWebModuleLoader();

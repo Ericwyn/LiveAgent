@@ -18,6 +18,12 @@ import {
   parsePastedTextDisplayReferences,
   type PendingUploadedFile,
 } from "@/lib/chat/uploadedFiles";
+import {
+  getUploadedImagePreviewCacheKey,
+  loadUploadedImagePreview,
+  readUploadedImagePreviewCache,
+  type UploadedImagePreviewLoader,
+} from "@/lib/chat/uploadedImagePreview";
 import { Markdown } from "@/components/Markdown";
 import { ImagePreview, type ImagePreviewSlide } from "@/components/chat/ImagePreview";
 import { useLocale } from "@/i18n/LocaleContext";
@@ -77,16 +83,6 @@ type GatewayTranscriptProps = {
   readOnly?: boolean;
   redactToolContent?: boolean;
 };
-
-type UploadedImagePreviewResult = {
-  mimeType: string;
-  data: string;
-};
-
-type UploadedImagePreviewLoader = (
-  workspaceRoot: string,
-  absolutePath: string,
-) => Promise<UploadedImagePreviewResult | null>;
 
 const EMPTY_LIVE_SNAPSHOT: LiveConversationStreamSnapshot = {
   revision: 0,
@@ -261,102 +257,43 @@ function CheckpointCard(props: {
   );
 }
 
-const gatewayUploadedImagePreviewCache = new Map<string, string>();
-const gatewayUploadedImagePreviewRequests = new Map<string, Promise<string | null>>();
-const GATEWAY_UPLOADED_IMAGE_PREVIEW_CACHE_LIMIT = 64;
-
-function getGatewayUploadedImagePreviewCacheKey(workspaceRoot: string, absolutePath: string) {
-  return `${workspaceRoot}\n${absolutePath}`;
-}
-
-function readGatewayUploadedImagePreviewCache(cacheKey: string) {
-  const cached = gatewayUploadedImagePreviewCache.get(cacheKey);
-  if (cached === undefined) return undefined;
-  gatewayUploadedImagePreviewCache.delete(cacheKey);
-  gatewayUploadedImagePreviewCache.set(cacheKey, cached);
-  return cached;
-}
-
-function writeGatewayUploadedImagePreviewCache(cacheKey: string, value: string) {
-  gatewayUploadedImagePreviewCache.delete(cacheKey);
-  gatewayUploadedImagePreviewCache.set(cacheKey, value);
-
-  while (gatewayUploadedImagePreviewCache.size > GATEWAY_UPLOADED_IMAGE_PREVIEW_CACHE_LIMIT) {
-    const oldestKey = gatewayUploadedImagePreviewCache.keys().next().value;
-    if (typeof oldestKey !== "string") break;
-    gatewayUploadedImagePreviewCache.delete(oldestKey);
-  }
-}
-
-async function loadGatewayUploadedImagePreview(params: {
-  workspaceRoot: string;
-  absolutePath: string;
-  loader: UploadedImagePreviewLoader;
-}) {
-  const { workspaceRoot, absolutePath, loader } = params;
-  const cacheKey = getGatewayUploadedImagePreviewCacheKey(workspaceRoot, absolutePath);
-  const cached = readGatewayUploadedImagePreviewCache(cacheKey);
-  if (cached !== undefined) return cached;
-
-  const existing = gatewayUploadedImagePreviewRequests.get(cacheKey);
-  if (existing) return existing;
-
-  const request = loader(workspaceRoot, absolutePath)
-    .then((result) => {
-      const mimeType =
-        typeof result?.mimeType === "string" && result.mimeType.trim()
-          ? result.mimeType.trim()
-          : "application/octet-stream";
-      const data = typeof result?.data === "string" ? result.data.trim() : "";
-      const next = data ? `data:${mimeType};base64,${data}` : null;
-      if (next) {
-        writeGatewayUploadedImagePreviewCache(cacheKey, next);
-      }
-      return next;
-    })
-    .catch(() => null)
-    .finally(() => {
-      gatewayUploadedImagePreviewRequests.delete(cacheKey);
-    });
-
-  gatewayUploadedImagePreviewRequests.set(cacheKey, request);
-  return request;
-}
-
 function useGatewayUploadedImagePreview(
-  absolutePath?: string,
+  file?: PendingUploadedFile,
   workspaceRoot?: string,
   loader?: UploadedImagePreviewLoader,
 ) {
-  const normalizedPath = typeof absolutePath === "string" ? absolutePath.trim() : "";
-  const normalizedWorkspaceRoot =
-    typeof workspaceRoot === "string" ? workspaceRoot.trim() : "";
-  const cacheKey =
-    normalizedPath && normalizedWorkspaceRoot
-      ? getGatewayUploadedImagePreviewCacheKey(normalizedWorkspaceRoot, normalizedPath)
-      : "";
+  const normalizedWorkspaceRoot = typeof workspaceRoot === "string" ? workspaceRoot.trim() : "";
+  const absolutePath = typeof file?.absolutePath === "string" ? file.absolutePath.trim() : "";
+  const relativePath = typeof file?.relativePath === "string" ? file.relativePath.trim() : "";
+  const cacheKey = file
+    ? getUploadedImagePreviewCacheKey(normalizedWorkspaceRoot, file)
+    : "";
   const [imageSrc, setImageSrc] = useState<string | null | undefined>(() => {
-    if (!cacheKey) return null;
-    return readGatewayUploadedImagePreviewCache(cacheKey);
+    if (!file || !normalizedWorkspaceRoot) return null;
+    return readUploadedImagePreviewCache(normalizedWorkspaceRoot, file);
   });
 
   useEffect(() => {
-    if (!cacheKey || !normalizedPath || !normalizedWorkspaceRoot || !loader) {
+    if (!file || !cacheKey || !normalizedWorkspaceRoot) {
       setImageSrc(null);
       return;
     }
 
-    const cached = readGatewayUploadedImagePreviewCache(cacheKey);
+    const cached = readUploadedImagePreviewCache(normalizedWorkspaceRoot, file);
     if (cached !== undefined) {
       setImageSrc(cached);
+      return;
+    }
+    if (!absolutePath || !loader) {
+      setImageSrc(null);
       return;
     }
 
     let cancelled = false;
     setImageSrc(undefined);
-    void loadGatewayUploadedImagePreview({
+    void loadUploadedImagePreview({
       workspaceRoot: normalizedWorkspaceRoot,
-      absolutePath: normalizedPath,
+      file,
       loader,
     }).then((value) => {
       if (!cancelled) {
@@ -366,11 +303,11 @@ function useGatewayUploadedImagePreview(
     return () => {
       cancelled = true;
     };
-  }, [cacheKey, normalizedPath, normalizedWorkspaceRoot, loader]);
+  }, [absolutePath, cacheKey, file, loader, normalizedWorkspaceRoot, relativePath]);
 
   return {
     imageSrc: imageSrc ?? null,
-    isLoading: Boolean(cacheKey && loader) && imageSrc === undefined,
+    isLoading: Boolean(cacheKey && absolutePath && loader) && imageSrc === undefined,
   };
 }
 
@@ -552,13 +489,10 @@ function GatewayUserAttachmentCard(props: {
   } = props;
   const shouldPreviewImage =
     file.kind === "image" &&
-    typeof file.absolutePath === "string" &&
-    file.absolutePath.trim() &&
     typeof workspaceRoot === "string" &&
-    workspaceRoot.trim() &&
-    onLoadUploadedImagePreview;
+    workspaceRoot.trim();
   const { imageSrc, isLoading } = useGatewayUploadedImagePreview(
-    shouldPreviewImage ? file.absolutePath : undefined,
+    shouldPreviewImage ? file : undefined,
     shouldPreviewImage ? workspaceRoot : undefined,
     onLoadUploadedImagePreview,
   );
