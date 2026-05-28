@@ -220,7 +220,11 @@ func (c *websocketConnection) handleAuth(req websocketRequest) {
 	c.startTerminalEventForwarder()
 	c.startChatEventForwarder()
 	c.startWebSocketHeartbeat()
-	_ = c.writeResponse(req.ID, map[string]any{"ok": true})
+	if err := c.writeResponse(req.ID, map[string]any{"ok": true}); err != nil {
+		c.close()
+		return
+	}
+	c.replayTerminalSessionSnapshot()
 }
 
 func (c *websocketConnection) startHistorySyncForwarder() {
@@ -342,6 +346,23 @@ func (c *websocketConnection) startTerminalEventForwarder() {
 			}
 		}
 	}()
+}
+
+func (c *websocketConnection) replayTerminalSessionSnapshot() {
+	if !c.sm.WebTerminalEnabled() {
+		return
+	}
+	for _, terminalSession := range c.sm.TerminalSessionSnapshot("") {
+		if err := c.writeTerminalEvent(websocketTerminalEventPayload(&gatewayv1.TerminalEvent{
+			Kind:           "created",
+			SessionId:      terminalSession.GetId(),
+			ProjectPathKey: terminalSession.GetProjectPathKey(),
+			Session:        terminalSession,
+		})); err != nil {
+			c.close()
+			return
+		}
+	}
 }
 
 func (c *websocketConnection) rememberTerminalProject(projectPathKey string) {
@@ -1695,6 +1716,10 @@ func (c *websocketConnection) handleTerminalRequest(req websocketRequest) {
 		_ = c.writeError(req.ID, err.Error())
 		return
 	}
+	projectPathKey := strings.TrimSpace(body.ProjectPathKey)
+	if action == "attach" || action == "snapshot" {
+		c.rememberTerminalSession(body.SessionID, projectPathKey)
+	}
 
 	response, err := c.awaitAgentResponse(req.ID, &gatewayv1.GatewayEnvelope{
 		RequestId: req.ID,
@@ -1703,7 +1728,7 @@ func (c *websocketConnection) handleTerminalRequest(req websocketRequest) {
 			TerminalRequest: &gatewayv1.TerminalRequest{
 				Action:         action,
 				SessionId:      strings.TrimSpace(body.SessionID),
-				ProjectPathKey: strings.TrimSpace(body.ProjectPathKey),
+				ProjectPathKey: projectPathKey,
 				Cwd:            strings.TrimSpace(body.Cwd),
 				Shell:          strings.TrimSpace(body.Shell),
 				Title:          strings.TrimSpace(body.Title),
@@ -1728,6 +1753,7 @@ func (c *websocketConnection) handleTerminalRequest(req websocketRequest) {
 		_ = c.writeError(req.ID, "unexpected agent response")
 		return
 	}
+	c.sm.ApplyTerminalResponseSnapshot(action, projectPathKey, resp)
 	c.rememberTerminalInterest(action, body, resp)
 
 	_ = c.writeResponse(req.ID, websocketTerminalResponsePayload(resp))
@@ -2411,6 +2437,10 @@ func websocketTerminalResponsePayload(resp *gatewayv1.TerminalResponse) map[stri
 		"shell_options": shellOptions,
 		"default_shell": resp.GetDefaultShell(),
 	}
+	if resp.GetOutputStartOffset() != 0 || resp.GetOutputEndOffset() != 0 || resp.GetOutput() != "" {
+		payload["output_start_offset"] = resp.GetOutputStartOffset()
+		payload["output_end_offset"] = resp.GetOutputEndOffset()
+	}
 	if session := websocketTerminalSessionPayload(resp.GetSession()); session != nil {
 		payload["session"] = session
 	}
@@ -2423,6 +2453,10 @@ func websocketTerminalEventPayload(event *gatewayv1.TerminalEvent) map[string]an
 		"session_id":       strings.TrimSpace(event.GetSessionId()),
 		"project_path_key": strings.TrimSpace(event.GetProjectPathKey()),
 		"data":             event.GetData(),
+	}
+	if event.GetOutputStartOffset() != 0 || event.GetOutputEndOffset() != 0 || event.GetData() != "" {
+		payload["output_start_offset"] = event.GetOutputStartOffset()
+		payload["output_end_offset"] = event.GetOutputEndOffset()
 	}
 	if session := websocketTerminalSessionPayload(event.GetSession()); session != nil {
 		payload["session"] = session

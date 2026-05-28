@@ -18,6 +18,8 @@ export type TerminalSnapshot = {
   session: TerminalSession;
   output: string;
   truncated: boolean;
+  outputStartOffset?: number;
+  outputEndOffset?: number;
 };
 
 export type TerminalShellOption = {
@@ -37,6 +39,8 @@ export type TerminalEvent = {
   projectPathKey: string;
   session: TerminalSession;
   data?: string;
+  outputStartOffset?: number;
+  outputEndOffset?: number;
 };
 
 export type TerminalClient = {

@@ -75,6 +75,14 @@ html[data-liveagent-webui="gateway"] .chat-history-row {
   contain: layout paint style;
 }
 
+html[data-liveagent-webui="gateway"] .gateway-terminal-panel-toggle {
+  margin-right: 6px;
+}
+
+html[data-liveagent-webui="gateway"] .project-terminal-panel-handle {
+  display: none;
+}
+
 html[data-liveagent-webui="gateway"] {
   --ring: 220 13% 62%;
   --gateway-scrollbar-size: 10px;
@@ -1457,6 +1465,59 @@ html[data-liveagent-webui="gateway"] .external-link-modal-overlay[data-state="cl
     padding-bottom: 100px;
   }
 
+  html[data-liveagent-webui="gateway"] .project-terminal-panel {
+    inset: 0;
+    z-index: 50;
+    width: 100%;
+    height: 100svh;
+    height: 100dvh;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+    background: hsl(var(--background) / 0.97);
+    box-shadow: none;
+    backdrop-filter: blur(18px);
+  }
+
+  html[data-liveagent-webui="gateway"] .project-terminal-panel-inner {
+    min-width: 0;
+  }
+
+  html[data-liveagent-webui="gateway"] .project-terminal-panel-handle {
+    display: block;
+    width: 36px;
+    height: 4px;
+    flex: 0 0 auto;
+    align-self: center;
+    margin-top: 8px;
+    border-radius: 999px;
+    background: hsl(var(--muted-foreground) / 0.24);
+  }
+
+  html[data-liveagent-webui="gateway"] .project-terminal-panel-header {
+    height: auto;
+    min-height: 44px;
+    gap: 6px;
+    padding: 6px 8px 8px;
+  }
+
+  html[data-liveagent-webui="gateway"] .project-terminal-panel-tabs {
+    padding-bottom: 1px;
+    scrollbar-width: none;
+  }
+
+  html[data-liveagent-webui="gateway"] .project-terminal-panel-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  html[data-liveagent-webui="gateway"] .project-terminal-panel-tab {
+    max-width: min(12rem, calc(100vw - 10rem));
+  }
+
+  html[data-liveagent-webui="gateway"] .project-terminal-panel-shell-select {
+    max-width: 6.75rem;
+  }
+
   html[data-liveagent-webui="gateway"] .gateway-settings-overlay {
     height: 100svh;
     height: 100dvh;
@@ -2264,6 +2325,10 @@ html[data-liveagent-webui="gateway"] .external-link-modal-overlay[data-state="cl
     width: 7px;
     height: 7px;
   }
+
+  html[data-liveagent-webui="gateway"] .gateway-terminal-panel-toggle {
+    margin-right: 8px;
+  }
 }
 
 @media (max-width: 380px) {
@@ -2279,6 +2344,16 @@ html[data-liveagent-webui="gateway"] .external-link-modal-overlay[data-state="cl
   html[data-liveagent-webui="gateway"] .model-selector-trigger {
     width: clamp(6.25rem, calc(100vw - 12.5rem), 13rem);
     max-width: clamp(6.25rem, calc(100vw - 12.5rem), 13rem) !important;
+  }
+
+  html[data-liveagent-webui="gateway"] .project-terminal-panel-tab {
+    max-width: min(10rem, calc(100vw - 8.5rem));
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+
+  html[data-liveagent-webui="gateway"] .project-terminal-panel-shell-select {
+    max-width: 5.8rem;
   }
 
   .gateway-chat-frame .composer-toolbar-action {

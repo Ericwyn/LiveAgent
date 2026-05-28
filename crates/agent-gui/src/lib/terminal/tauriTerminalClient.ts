@@ -9,6 +9,23 @@ import type {
   TerminalSnapshot,
 } from "./types";
 
+type TerminalEventListener = (event: TerminalEvent) => void;
+
+const globalTerminalListeners = new Set<TerminalEventListener>();
+let globalListenerStarted = false;
+
+function ensureGlobalTerminalListener() {
+  if (globalListenerStarted) return;
+  globalListenerStarted = true;
+  void listen<RawTerminalEvent>("terminal:event", (event) => {
+    const normalized = normalizeEvent(event.payload);
+    if (!normalized) return;
+    for (const listener of globalTerminalListeners) {
+      listener(normalized);
+    }
+  });
+}
+
 type RawTerminalSession = Partial<TerminalSession> & {
   project_path_key?: string;
   created_at?: number;
@@ -21,6 +38,10 @@ type RawTerminalSnapshot = {
   session?: RawTerminalSession;
   output?: string;
   truncated?: boolean;
+  outputStartOffset?: number;
+  output_start_offset?: number;
+  outputEndOffset?: number;
+  output_end_offset?: number;
 };
 
 type RawTerminalListResponse = {
@@ -43,6 +64,10 @@ type RawTerminalEvent = {
   project_path_key?: string;
   session?: RawTerminalSession;
   data?: string | null;
+  outputStartOffset?: number;
+  output_start_offset?: number;
+  outputEndOffset?: number;
+  output_end_offset?: number;
 };
 
 function normalizeSession(input: RawTerminalSession): TerminalSession {
@@ -68,10 +93,16 @@ function normalizeSnapshot(input: RawTerminalSnapshot): TerminalSnapshot {
   if (!input.session) {
     throw new Error("Terminal response did not include a session");
   }
+  const outputStartOffset = normalizeOptionalOffset(
+    input.outputStartOffset ?? input.output_start_offset,
+  );
+  const outputEndOffset = normalizeOptionalOffset(input.outputEndOffset ?? input.output_end_offset);
   return {
     session: normalizeSession(input.session),
     output: input.output ?? "",
     truncated: input.truncated === true,
+    outputStartOffset,
+    outputEndOffset,
   };
 }
 
@@ -92,13 +123,25 @@ function normalizeShellOptions(input: RawTerminalShellOptionsResponse): Terminal
 function normalizeEvent(input: RawTerminalEvent): TerminalEvent | null {
   if (!input.session) return null;
   const session = normalizeSession(input.session);
+  const outputStartOffset = normalizeOptionalOffset(
+    input.outputStartOffset ?? input.output_start_offset,
+  );
+  const outputEndOffset = normalizeOptionalOffset(input.outputEndOffset ?? input.output_end_offset);
   return {
     kind: input.kind ?? "",
     sessionId: input.sessionId ?? input.session_id ?? session.id,
     projectPathKey: input.projectPathKey ?? input.project_path_key ?? session.projectPathKey,
     session,
     data: input.data ?? undefined,
+    outputStartOffset,
+    outputEndOffset,
   };
+}
+
+function normalizeOptionalOffset(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : undefined;
 }
 
 export const tauriTerminalClient: TerminalClient = {
@@ -171,22 +214,10 @@ export const tauriTerminalClient: TerminalClient = {
     // Tauri clients receive local events directly; detach is only meaningful for Gateway fanout.
   },
   subscribe(listener) {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void listen<RawTerminalEvent>("terminal:event", (event) => {
-      if (disposed) return;
-      const normalized = normalizeEvent(event.payload);
-      if (normalized) listener(normalized);
-    }).then((dispose) => {
-      if (disposed) {
-        dispose();
-      } else {
-        unlisten = dispose;
-      }
-    });
+    ensureGlobalTerminalListener();
+    globalTerminalListeners.add(listener);
     return () => {
-      disposed = true;
-      unlisten?.();
+      globalTerminalListeners.delete(listener);
     };
   },
 };

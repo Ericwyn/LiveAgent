@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::str;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -48,6 +49,8 @@ pub struct TerminalSnapshotResponse {
     pub session: TerminalSessionRecord,
     pub output: String,
     pub truncated: bool,
+    pub output_start_offset: u64,
+    pub output_end_offset: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -74,6 +77,10 @@ pub struct TerminalEventPayload {
     pub session: TerminalSessionRecord,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_start_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_end_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,7 +99,40 @@ struct TerminalSessionEntry {
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     record: Mutex<TerminalSessionRecord>,
-    output: Mutex<VecDeque<String>>,
+    output: Mutex<TerminalOutputBuffer>,
+}
+
+#[derive(Debug, Clone)]
+struct TerminalOutputChunk {
+    start_offset: u64,
+    data: String,
+}
+
+#[derive(Debug, Default)]
+struct TerminalOutputBuffer {
+    chunks: VecDeque<TerminalOutputChunk>,
+    next_offset: u64,
+}
+
+impl TerminalOutputBuffer {
+    fn append(&mut self, data: String) -> (u64, u64) {
+        let start_offset = self.next_offset;
+        self.next_offset = self.next_offset.saturating_add(data.len() as u64);
+        self.chunks
+            .push_back(TerminalOutputChunk { start_offset, data });
+        while self.chunks.len() > MAX_RING_CHUNKS {
+            self.chunks.pop_front();
+        }
+        (start_offset, self.next_offset)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TerminalOutputTail {
+    output: String,
+    truncated: bool,
+    output_start_offset: u64,
+    output_end_offset: u64,
 }
 
 #[derive(Default)]
@@ -198,8 +238,7 @@ impl TerminalSessionRegistry {
             cmd.arg(arg);
         }
         cmd.cwd(&cwd);
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        configure_terminal_shell_env(&mut cmd, &shell_spec.command);
 
         let child = pair
             .slave
@@ -242,27 +281,34 @@ impl TerminalSessionRegistry {
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             record: Mutex::new(record),
-            output: Mutex::new(VecDeque::new()),
+            output: Mutex::new(TerminalOutputBuffer::default()),
         });
         self.sessions
             .lock()
             .expect("terminal session registry poisoned")
             .insert(id.clone(), Arc::clone(&entry));
-        self.broadcast("created", &entry, None);
+        self.broadcast("created", &entry, None, None, None);
 
         let registry = Arc::clone(self);
         let reader_session_id = id.clone();
         thread::spawn(move || {
             let mut buffer = [0u8; 8192];
+            let mut decoder = TerminalUtf8Decoder::default();
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let data = String::from_utf8_lossy(&buffer[..n]).to_string();
-                        registry.append_output(&reader_session_id, data);
+                        let data = decoder.push(&buffer[..n]);
+                        if !data.is_empty() {
+                            registry.append_output(&reader_session_id, data);
+                        }
                     }
                     Err(_) => break,
                 }
+            }
+            let data = decoder.finish();
+            if !data.is_empty() {
+                registry.append_output(&reader_session_id, data);
             }
             registry.mark_finished(&reader_session_id);
         });
@@ -281,11 +327,13 @@ impl TerminalSessionRegistry {
             .lock()
             .map_err(|_| "terminal session lock poisoned".to_string())?
             .clone();
-        let (output, truncated) = read_output_tail(&entry, max_bytes.unwrap_or(MAX_TAIL_BYTES));
+        let tail = read_output_tail(&entry, max_bytes.unwrap_or(MAX_TAIL_BYTES));
         Ok(TerminalSnapshotResponse {
             session,
-            output,
-            truncated,
+            output: tail.output,
+            truncated: tail.truncated,
+            output_start_offset: tail.output_start_offset,
+            output_end_offset: tail.output_end_offset,
         })
     }
 
@@ -345,7 +393,7 @@ impl TerminalSessionRegistry {
             record.rows = rows;
             record.updated_at = now_ms();
         }
-        self.broadcast("resized", &entry, None);
+        self.broadcast("resized", &entry, None, None, None);
         self.record(session_id)
     }
 
@@ -367,7 +415,7 @@ impl TerminalSessionRegistry {
             record.title = next_title.to_string();
             record.updated_at = now_ms();
         }
-        self.broadcast("renamed", &entry, None);
+        self.broadcast("renamed", &entry, None, None, None);
         self.record(session_id)
     }
 
@@ -384,7 +432,7 @@ impl TerminalSessionRegistry {
             .lock()
             .map_err(|_| "terminal session lock poisoned".to_string())?
             .clone();
-        self.broadcast("closed", &entry, None);
+        self.broadcast("closed", &entry, None, None, None);
         Ok(session)
     }
 
@@ -536,18 +584,21 @@ impl TerminalSessionRegistry {
         let Ok(entry) = self.entry(session_id) else {
             return;
         };
-        {
+        let (output_start_offset, output_end_offset) = {
             let mut output = match entry.output.lock() {
                 Ok(output) => output,
                 Err(_) => return,
             };
-            output.push_back(data.clone());
-            while output.len() > MAX_RING_CHUNKS {
-                output.pop_front();
-            }
-        }
+            output.append(data.clone())
+        };
         self.touch(&entry);
-        self.broadcast("output", &entry, Some(data));
+        self.broadcast(
+            "output",
+            &entry,
+            Some(data),
+            Some(output_start_offset),
+            Some(output_end_offset),
+        );
     }
 
     fn mark_finished(&self, session_id: &str) {
@@ -572,10 +623,17 @@ impl TerminalSessionRegistry {
                 record.updated_at = now_ms();
             }
         }
-        self.broadcast("exit", &entry, None);
+        self.broadcast("exit", &entry, None, None, None);
     }
 
-    fn broadcast(&self, kind: &str, entry: &Arc<TerminalSessionEntry>, data: Option<String>) {
+    fn broadcast(
+        &self,
+        kind: &str,
+        entry: &Arc<TerminalSessionEntry>,
+        data: Option<String>,
+        output_start_offset: Option<u64>,
+        output_end_offset: Option<u64>,
+    ) {
         let Ok(record) = entry.record.lock().map(|record| record.clone()) else {
             return;
         };
@@ -585,6 +643,8 @@ impl TerminalSessionRegistry {
             project_path_key: record.project_path_key.clone(),
             session: record,
             data,
+            output_start_offset,
+            output_end_offset,
         };
 
         if let Ok(app_handle) = self.app_handle.lock() {
@@ -627,41 +687,71 @@ pub struct TerminalReadTailResponse {
     pub truncated: bool,
 }
 
-fn read_output_tail(entry: &TerminalSessionEntry, max_bytes: usize) -> (String, bool) {
+fn read_output_tail(entry: &TerminalSessionEntry, max_bytes: usize) -> TerminalOutputTail {
     let output = match entry.output.lock() {
         Ok(output) => output,
-        Err(_) => return (String::new(), false),
+        Err(_) => {
+            return TerminalOutputTail {
+                output: String::new(),
+                truncated: false,
+                output_start_offset: 0,
+                output_end_offset: 0,
+            }
+        }
     };
     read_output_chunks_tail(&output, max_bytes)
 }
 
-fn read_output_chunks_tail(output: &VecDeque<String>, max_bytes: usize) -> (String, bool) {
+fn read_output_chunks_tail(output: &TerminalOutputBuffer, max_bytes: usize) -> TerminalOutputTail {
+    let output_end_offset = output.next_offset;
     if max_bytes == 0 {
-        return (String::new(), !output.is_empty());
+        return TerminalOutputTail {
+            output: String::new(),
+            truncated: output_end_offset > 0,
+            output_start_offset: output_end_offset,
+            output_end_offset,
+        };
     }
     let mut remaining = max_bytes;
     let mut chunks = VecDeque::new();
     let mut truncated = false;
-    for chunk in output.iter().rev() {
+    for chunk in output.chunks.iter().rev() {
         if remaining == 0 {
             truncated = true;
             break;
         }
-        let len = chunk.len();
+        let len = chunk.data.len();
         if len > remaining {
             let start = chunk
+                .data
                 .char_indices()
                 .map(|(index, _)| index)
                 .find(|index| len.saturating_sub(*index) <= remaining)
                 .unwrap_or(len);
-            chunks.push_front(chunk[start..].to_string());
+            chunks.push_front(TerminalOutputChunk {
+                start_offset: chunk.start_offset.saturating_add(start as u64),
+                data: chunk.data[start..].to_string(),
+            });
             truncated = true;
             break;
         }
         remaining = remaining.saturating_sub(len);
         chunks.push_front(chunk.clone());
     }
-    (chunks.into_iter().collect::<String>(), truncated)
+    let output_start_offset = chunks
+        .front()
+        .map(|chunk| chunk.start_offset)
+        .unwrap_or(output_end_offset);
+    let output_text = chunks
+        .into_iter()
+        .map(|chunk| chunk.data)
+        .collect::<String>();
+    TerminalOutputTail {
+        output: output_text,
+        truncated: truncated || output_start_offset > 0,
+        output_start_offset,
+        output_end_offset,
+    }
 }
 
 fn terminate_terminal_entry(entry: &Arc<TerminalSessionEntry>) {
@@ -725,7 +815,142 @@ fn canonicalize_workdir(workdir: &str) -> Result<PathBuf, String> {
     if !metadata.is_dir() {
         return Err(format!("workdir must be a directory: {workdir}"));
     }
-    fs::canonicalize(&path).map_err(|err| format!("failed to canonicalize workdir: {err}"))
+    let canonical =
+        fs::canonicalize(&path).map_err(|err| format!("failed to canonicalize workdir: {err}"))?;
+    Ok(strip_windows_unc_prefix(canonical))
+}
+
+fn strip_windows_unc_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path
+}
+
+fn is_program_on_path(program: &str) -> bool {
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path_var) {
+        if dir.join(program).is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+fn scrub_terminal_shell_env(cmd: &mut CommandBuilder) {
+    for key in ["npm_config_prefix", "NPM_CONFIG_PREFIX"] {
+        cmd.env_remove(key);
+    }
+}
+
+fn configure_terminal_shell_env(cmd: &mut CommandBuilder, shell_command: &str) {
+    scrub_terminal_shell_env(cmd);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    if is_zsh_shell(shell_command) {
+        configure_zsh_colored_prompt(cmd);
+    }
+}
+
+fn configure_zsh_colored_prompt(cmd: &mut CommandBuilder) {
+    let colored_prompt =
+        "%F{green}%n%f%F{yellow}@%f%F{blue}%m%f %F{magenta}%1~%f %F{cyan}%#%f ";
+    let zdotdir = create_zsh_prompt_overlay(colored_prompt);
+    if let Some(dir) = zdotdir {
+        cmd.env("ZDOTDIR", dir.to_string_lossy().as_ref());
+    }
+}
+
+fn create_zsh_prompt_overlay(prompt: &str) -> Option<PathBuf> {
+    let base = dirs::cache_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    let zdotdir = base.join("liveagent-zsh");
+    if fs::create_dir_all(&zdotdir).is_err() {
+        return None;
+    }
+
+    let home = dirs::home_dir().unwrap_or_default();
+    let user_zshrc = home.join(".zshrc");
+    let user_zshenv = home.join(".zshenv");
+
+    let zshenv_content = format!(
+        "export _LIVEAGENT_REAL_ZDOTDIR=\"$HOME\"\n\
+         [[ -f \"{}\" ]] && source \"{}\"\n",
+        user_zshenv.display(),
+        user_zshenv.display(),
+    );
+    let zshrc_content = format!(
+        "[[ -f \"{}\" ]] && source \"{}\"\n\
+         PROMPT='{}'\n\
+         unset ZDOTDIR\n",
+        user_zshrc.display(),
+        user_zshrc.display(),
+        prompt,
+    );
+
+    if fs::write(zdotdir.join(".zshenv"), zshenv_content).is_err() {
+        return None;
+    }
+    if fs::write(zdotdir.join(".zshrc"), zshrc_content).is_err() {
+        return None;
+    }
+    Some(zdotdir)
+}
+
+#[derive(Default)]
+struct TerminalUtf8Decoder {
+    pending: Vec<u8>,
+}
+
+impl TerminalUtf8Decoder {
+    fn push(&mut self, bytes: &[u8]) -> String {
+        if bytes.is_empty() {
+            return String::new();
+        }
+        let mut input = if self.pending.is_empty() {
+            bytes.to_vec()
+        } else {
+            self.pending.extend_from_slice(bytes);
+            std::mem::take(&mut self.pending)
+        };
+
+        let mut output = String::new();
+        loop {
+            match str::from_utf8(&input) {
+                Ok(text) => {
+                    output.push_str(text);
+                    return output;
+                }
+                Err(error) => {
+                    let valid_up_to = error.valid_up_to();
+                    output.push_str(&String::from_utf8_lossy(&input[..valid_up_to]));
+                    let tail = &input[valid_up_to..];
+                    let Some(error_len) = error.error_len() else {
+                        self.pending.extend_from_slice(tail);
+                        return output;
+                    };
+                    let invalid_end = error_len.min(tail.len());
+                    output.push_str(&String::from_utf8_lossy(&tail[..invalid_end]));
+                    input = tail[invalid_end..].to_vec();
+                    if input.is_empty() {
+                        return output;
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self) -> String {
+        if self.pending.is_empty() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&std::mem::take(&mut self.pending)).to_string()
+    }
 }
 
 struct ShellSpec {
@@ -741,17 +966,23 @@ fn resolve_shell(shell: Option<String>) -> Result<ShellSpec, String> {
         .unwrap_or_else(|| "default".to_string());
 
     if cfg!(windows) {
+        let powershell_args = vec![
+            "-NoLogo".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+        ];
         match requested.as_str() {
-            "powershell" | "pwsh" => Ok(ShellSpec {
+            "pwsh" => Ok(ShellSpec {
+                label: "PowerShell 7".to_string(),
+                command: "pwsh.exe".to_string(),
+                args: powershell_args,
+            }),
+            "powershell" | "default" => Ok(ShellSpec {
                 label: "PowerShell".to_string(),
                 command: "powershell.exe".to_string(),
-                args: vec![
-                    "-NoLogo".to_string(),
-                    "-ExecutionPolicy".to_string(),
-                    "Bypass".to_string(),
-                ],
+                args: powershell_args,
             }),
-            "cmd" | "default" => Ok(ShellSpec {
+            "cmd" => Ok(ShellSpec {
                 label: "cmd".to_string(),
                 command: "cmd.exe".to_string(),
                 args: Vec::new(),
@@ -772,10 +1003,25 @@ fn resolve_shell(shell: Option<String>) -> Result<ShellSpec, String> {
             .to_string();
         Ok(ShellSpec {
             label,
+            args: unix_shell_args(&command),
             command,
-            args: Vec::new(),
         })
     }
+}
+
+fn unix_shell_args(command: &str) -> Vec<String> {
+    if is_zsh_shell(command) {
+        return vec!["-o".to_string(), "NO_PROMPT_SP".to_string()];
+    }
+    Vec::new()
+}
+
+fn is_zsh_shell(command: &str) -> bool {
+    Path::new(command)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("zsh"))
+        .unwrap_or(false)
 }
 
 fn resolve_unix_shell_fallback() -> Option<String> {
@@ -792,20 +1038,31 @@ fn resolve_unix_shell_fallback() -> Option<String> {
 
 pub fn terminal_shell_options() -> TerminalShellOptionsResponse {
     if cfg!(windows) {
+        let mut options = vec![
+            TerminalShellOption {
+                id: "powershell".to_string(),
+                label: "PowerShell".to_string(),
+                command: "powershell.exe".to_string(),
+            },
+            TerminalShellOption {
+                id: "cmd".to_string(),
+                label: "cmd".to_string(),
+                command: "cmd.exe".to_string(),
+            },
+        ];
+        if is_program_on_path("pwsh.exe") {
+            options.insert(
+                0,
+                TerminalShellOption {
+                    id: "pwsh".to_string(),
+                    label: "PowerShell 7".to_string(),
+                    command: "pwsh.exe".to_string(),
+                },
+            );
+        }
         TerminalShellOptionsResponse {
-            default_shell: "cmd".to_string(),
-            options: vec![
-                TerminalShellOption {
-                    id: "cmd".to_string(),
-                    label: "cmd".to_string(),
-                    command: "cmd.exe".to_string(),
-                },
-                TerminalShellOption {
-                    id: "powershell".to_string(),
-                    label: "PowerShell".to_string(),
-                    command: "powershell.exe".to_string(),
-                },
-            ],
+            default_shell: "powershell".to_string(),
+            options,
         }
     } else {
         let shell = resolve_shell(None).unwrap_or_else(|_| ShellSpec {
@@ -837,14 +1094,72 @@ mod tests {
 
     #[test]
     fn output_tail_respects_byte_limit_inside_large_chunk() {
-        let mut output = VecDeque::new();
-        output.push_back("prefix".to_string());
-        output.push_back("abcdefghijklmnopqrstuvwxyz".to_string());
+        let mut output = TerminalOutputBuffer::default();
+        output.append("prefix".to_string());
+        output.append("abcdefghijklmnopqrstuvwxyz".to_string());
 
-        let (tail, truncated) = read_output_chunks_tail(&output, 8);
+        let tail = read_output_chunks_tail(&output, 8);
 
-        assert_eq!(tail, "stuvwxyz");
-        assert!(truncated);
+        assert_eq!(tail.output, "stuvwxyz");
+        assert_eq!(tail.output_start_offset, 24);
+        assert_eq!(tail.output_end_offset, 32);
+        assert!(tail.truncated);
+    }
+
+    #[test]
+    fn output_tail_keeps_offsets_for_repeated_text() {
+        let mut output = TerminalOutputBuffer::default();
+        output.append("uploads\n".to_string());
+        output.append("uploads\n".to_string());
+
+        let tail = read_output_chunks_tail(&output, MAX_TAIL_BYTES);
+
+        assert_eq!(tail.output, "uploads\nuploads\n");
+        assert_eq!(tail.output_start_offset, 0);
+        assert_eq!(tail.output_end_offset, 16);
+        assert!(!tail.truncated);
+    }
+
+    #[test]
+    fn terminal_utf8_decoder_preserves_split_multibyte_character() {
+        let mut decoder = TerminalUtf8Decoder::default();
+
+        assert_eq!(decoder.push(&[0xe4, 0xb8]), "");
+        assert_eq!(decoder.push(&[0xad]), "中");
+        assert_eq!(decoder.finish(), "");
+    }
+
+    #[test]
+    fn terminal_shell_env_scrubs_npm_prefix() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.env("npm_config_prefix", "/tmp/npm-prefix");
+        command.env("NPM_CONFIG_PREFIX", "/tmp/npm-prefix");
+        command.env("TERM", "dumb");
+
+        configure_terminal_shell_env(&mut command, "/bin/sh");
+
+        assert!(command.get_env("npm_config_prefix").is_none());
+        assert!(command.get_env("NPM_CONFIG_PREFIX").is_none());
+        assert_eq!(
+            command.get_env("TERM").and_then(|value| value.to_str()),
+            Some("xterm-256color")
+        );
+        assert_eq!(
+            command
+                .get_env("COLORTERM")
+                .and_then(|value| value.to_str()),
+            Some("truecolor")
+        );
+        assert!(command.get_env("PROMPT_EOL_MARK").is_none());
+    }
+
+    #[test]
+    fn zsh_terminal_shell_disables_prompt_sp() {
+        assert_eq!(
+            unix_shell_args("/bin/zsh"),
+            vec!["-o".to_string(), "NO_PROMPT_SP".to_string()]
+        );
+        assert!(unix_shell_args("/bin/bash").is_empty());
     }
 
     #[test]

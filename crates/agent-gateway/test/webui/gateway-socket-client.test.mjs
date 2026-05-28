@@ -174,6 +174,60 @@ test("SharedWorker gateway client sends conversation cancel even without a local
   resetGatewayWebSocketClient();
 });
 
+test("SharedWorker gateway client accepts terminal list sessions from worker payload", async () => {
+  installBrowser();
+  FakeSharedWorker.instances = [];
+  globalThis.SharedWorker = FakeSharedWorker;
+  const loader = createWebModuleLoader();
+  const { getGatewayWebSocketClient, resetGatewayWebSocketClient } = loader.loadModule("src/lib/gatewaySocket.ts");
+  resetGatewayWebSocketClient();
+
+  const client = getGatewayWebSocketClient(" token ");
+  const port = FakeSharedWorker.instances[0].port;
+  const connect = port.messages.find((message) => message.type === "connect");
+  assert.ok(connect);
+  port.emit({
+    type: "ready",
+    connection_id: connect.connection_id,
+    payload: { status: { online: true }, error: null },
+  });
+
+  const sessionsPromise = client.listTerminals("/workspace/project");
+  await waitFor(
+    () => port.messages.some((message) => message.method === "terminal.list"),
+    "shared worker terminal.list request",
+  );
+  const request = port.messages.find((message) => message.method === "terminal.list");
+  assert.deepEqual(request.payload, { project_path_key: "/workspace/project" });
+
+  port.emit({
+    type: "response",
+    connection_id: connect.connection_id,
+    request_id: request.request_id,
+    payload: {
+      sessions: [
+        {
+          id: "terminal-1",
+          project_path_key: "/workspace/project",
+          cwd: "/workspace/project",
+          title: "Terminal 1",
+          created_at: 1,
+          updated_at: 2,
+          running: true,
+        },
+      ],
+    },
+  });
+
+  const sessions = await sessionsPromise;
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].id, "terminal-1");
+  assert.equal(sessions[0].projectPathKey, "/workspace/project");
+  assert.equal(sessions[0].title, "Terminal 1");
+
+  resetGatewayWebSocketClient();
+});
+
 test("SharedWorker gateway client forwards chat runtime controls to the worker", async () => {
   installBrowser();
   FakeSharedWorker.instances = [];
@@ -459,6 +513,10 @@ test("Gateway SharedWorker terminal metadata reaches every page while output sta
     "terminal list all response",
   );
   assert.deepEqual(clientInstances[0].calls, [["listTerminals", ""]]);
+  const listResponse = firstPort.messages.find(
+    (message) => message.request_id === "terminal-list-all",
+  );
+  assert.equal(listResponse.payload.sessions[0].id, "terminal-1");
 
   const event = {
     kind: "created",
@@ -507,6 +565,307 @@ test("Gateway SharedWorker terminal metadata reaches every page while output sta
     secondPort.messages.some((message) => message.payload === outputEvent),
     false,
   );
+
+  globalThis.onconnect = previousOnConnect;
+});
+
+test("Gateway SharedWorker forwards terminal output while attach request is pending", async () => {
+  installBrowser();
+  const loader = createWebModuleLoader();
+  const gatewaySocketPath = loader.resolveLocal("src/lib/gatewaySocket.ts");
+  const clientInstances = [];
+  let resolveSnapshot = null;
+
+  class MockGatewayWebSocketClient {
+    terminalListeners = [];
+    calls = [];
+
+    constructor(token) {
+      this.token = token;
+      clientInstances.push(this);
+    }
+
+    subscribeStatus() {
+      return () => {};
+    }
+
+    subscribeHistory() {
+      return () => {};
+    }
+
+    subscribeConversation() {
+      return () => {};
+    }
+
+    subscribeSettings() {
+      return () => {};
+    }
+
+    subscribeTerminal(listener) {
+      this.terminalListeners.push(listener);
+      return () => {};
+    }
+
+    snapshotTerminal(sessionId, maxBytes, projectPathKey) {
+      this.calls.push(["snapshotTerminal", sessionId, maxBytes, projectPathKey]);
+      return new Promise((resolve) => {
+        resolveSnapshot = resolve;
+      });
+    }
+
+    dispose() {}
+  }
+
+  const workerLoader = createWebModuleLoader({
+    mocks: {
+      [gatewaySocketPath]: {
+        GatewayWebSocketClient: MockGatewayWebSocketClient,
+      },
+    },
+  });
+
+  const previousOnConnect = globalThis.onconnect;
+  workerLoader.loadModule("src/lib/gatewaySocket.worker.ts");
+
+  const port = new FakeMessagePort();
+  globalThis.onconnect({ ports: [port] });
+  port.emit({ type: "connect", connection_id: "connection-1", token: "token" });
+  port.emit({
+    type: "request",
+    connection_id: "connection-1",
+    request_id: "terminal-attach",
+    method: "terminal.attach",
+    payload: {
+      session_id: "terminal-1",
+      project_path_key: "/workspace/project",
+    },
+  });
+  await waitFor(
+    () => clientInstances[0]?.calls.some((call) => call[0] === "snapshotTerminal"),
+    "terminal attach request",
+  );
+
+  const event = {
+    kind: "output",
+    sessionId: "terminal-1",
+    projectPathKey: "/workspace/project",
+    session: {
+      id: "terminal-1",
+      projectPathKey: "/workspace/project",
+      cwd: "/workspace/project",
+      shell: "zsh",
+      title: "Terminal 1",
+      cols: 80,
+      rows: 24,
+      createdAt: 1,
+      updatedAt: 2,
+      running: true,
+    },
+    data: "pwd\r\n",
+    outputStartOffset: 10,
+    outputEndOffset: 15,
+  };
+  clientInstances[0].terminalListeners[0](event);
+  await waitFor(
+    () =>
+      port.messages.some(
+        (message) => message.event_type === "terminal" && message.payload === event,
+      ),
+    "attach-pending terminal output",
+  );
+
+  resolveSnapshot({
+    session: event.session,
+    output: "",
+    truncated: false,
+    outputStartOffset: 15,
+    outputEndOffset: 15,
+  });
+  await waitFor(
+    () => port.messages.some((message) => message.request_id === "terminal-attach"),
+    "terminal attach response",
+  );
+
+  globalThis.onconnect = previousOnConnect;
+});
+
+test("Gateway SharedWorker keeps upstream terminal attached until every port detaches", async () => {
+  installBrowser();
+  const loader = createWebModuleLoader();
+  const gatewaySocketPath = loader.resolveLocal("src/lib/gatewaySocket.ts");
+  const clientInstances = [];
+
+  class MockGatewayWebSocketClient {
+    terminalListeners = [];
+    calls = [];
+
+    constructor(token) {
+      this.token = token;
+      clientInstances.push(this);
+    }
+
+    subscribeStatus() {
+      return () => {};
+    }
+
+    subscribeHistory() {
+      return () => {};
+    }
+
+    subscribeConversation() {
+      return () => {};
+    }
+
+    subscribeSettings() {
+      return () => {};
+    }
+
+    subscribeTerminal(listener) {
+      this.terminalListeners.push(listener);
+      return () => {};
+    }
+
+    async snapshotTerminal(sessionId, maxBytes, projectPathKey) {
+      this.calls.push(["snapshotTerminal", sessionId, maxBytes, projectPathKey]);
+      return {
+        session: {
+          id: sessionId,
+          projectPathKey,
+          cwd: projectPathKey,
+          shell: "zsh",
+          title: "Terminal 1",
+          cols: 80,
+          rows: 24,
+          createdAt: 1,
+          updatedAt: 1,
+          running: true,
+        },
+        output: "",
+        truncated: false,
+        outputStartOffset: 0,
+        outputEndOffset: 0,
+      };
+    }
+
+    async detachTerminal(sessionId, projectPathKey) {
+      this.calls.push(["detachTerminal", sessionId, projectPathKey]);
+    }
+
+    dispose() {}
+  }
+
+  const workerLoader = createWebModuleLoader({
+    mocks: {
+      [gatewaySocketPath]: {
+        GatewayWebSocketClient: MockGatewayWebSocketClient,
+      },
+    },
+  });
+
+  const previousOnConnect = globalThis.onconnect;
+  workerLoader.loadModule("src/lib/gatewaySocket.worker.ts");
+
+  const firstPort = new FakeMessagePort();
+  const secondPort = new FakeMessagePort();
+  globalThis.onconnect({ ports: [firstPort] });
+  globalThis.onconnect({ ports: [secondPort] });
+  firstPort.emit({ type: "connect", connection_id: "connection-1", token: "token" });
+  secondPort.emit({ type: "connect", connection_id: "connection-2", token: "token" });
+
+  firstPort.emit({
+    type: "request",
+    connection_id: "connection-1",
+    request_id: "first-attach",
+    method: "terminal.attach",
+    payload: {
+      session_id: "terminal-1",
+      project_path_key: "/workspace/project",
+    },
+  });
+  secondPort.emit({
+    type: "request",
+    connection_id: "connection-2",
+    request_id: "second-attach",
+    method: "terminal.attach",
+    payload: {
+      session_id: "terminal-1",
+      project_path_key: "/workspace/project",
+    },
+  });
+  await waitFor(
+    () =>
+      firstPort.messages.some((message) => message.request_id === "first-attach") &&
+      secondPort.messages.some((message) => message.request_id === "second-attach"),
+    "terminal attach responses",
+  );
+
+  firstPort.emit({
+    type: "request",
+    connection_id: "connection-1",
+    request_id: "first-detach",
+    method: "terminal.detach",
+    payload: {
+      session_id: "terminal-1",
+      project_path_key: "/workspace/project",
+    },
+  });
+  await waitFor(
+    () => firstPort.messages.some((message) => message.request_id === "first-detach"),
+    "first terminal detach response",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(
+    clientInstances[0].calls.some((call) => call[0] === "detachTerminal"),
+    false,
+  );
+
+  const firstPortMessageCount = firstPort.messages.length;
+  const event = {
+    kind: "output",
+    sessionId: "terminal-1",
+    projectPathKey: "/workspace/project",
+    session: {
+      id: "terminal-1",
+      projectPathKey: "/workspace/project",
+      cwd: "/workspace/project",
+      shell: "zsh",
+      title: "Terminal 1",
+      cols: 80,
+      rows: 24,
+      createdAt: 1,
+      updatedAt: 2,
+      running: true,
+    },
+    data: "pwd\r\n",
+  };
+  clientInstances[0].terminalListeners[0](event);
+  assert.equal(firstPort.messages.length, firstPortMessageCount);
+  assert.deepEqual(secondPort.messages.at(-1), {
+    type: "event",
+    event_type: "terminal",
+    payload: event,
+    connection_id: "connection-2",
+  });
+
+  secondPort.emit({
+    type: "request",
+    connection_id: "connection-2",
+    request_id: "second-detach",
+    method: "terminal.detach",
+    payload: {
+      session_id: "terminal-1",
+      project_path_key: "/workspace/project",
+    },
+  });
+  await waitFor(
+    () => clientInstances[0].calls.some((call) => call[0] === "detachTerminal"),
+    "upstream terminal detach",
+  );
+  assert.deepEqual(clientInstances[0].calls.at(-1), [
+    "detachTerminal",
+    "terminal-1",
+    "/workspace/project",
+  ]);
 
   globalThis.onconnect = previousOnConnect;
 });

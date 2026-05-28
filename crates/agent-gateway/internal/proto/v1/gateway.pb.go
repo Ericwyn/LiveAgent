@@ -2190,16 +2190,18 @@ func (x *TerminalShellOption) GetCommand() string {
 }
 
 type TerminalResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Action        string                 `protobuf:"bytes,1,opt,name=action,proto3" json:"action,omitempty"`
-	Sessions      []*TerminalSession     `protobuf:"bytes,2,rep,name=sessions,proto3" json:"sessions,omitempty"`
-	Session       *TerminalSession       `protobuf:"bytes,3,opt,name=session,proto3" json:"session,omitempty"`
-	Output        string                 `protobuf:"bytes,4,opt,name=output,proto3" json:"output,omitempty"`
-	Truncated     bool                   `protobuf:"varint,5,opt,name=truncated,proto3" json:"truncated,omitempty"`
-	ShellOptions  []*TerminalShellOption `protobuf:"bytes,6,rep,name=shell_options,json=shellOptions,proto3" json:"shell_options,omitempty"`
-	DefaultShell  string                 `protobuf:"bytes,7,opt,name=default_shell,json=defaultShell,proto3" json:"default_shell,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Action            string                 `protobuf:"bytes,1,opt,name=action,proto3" json:"action,omitempty"`
+	Sessions          []*TerminalSession     `protobuf:"bytes,2,rep,name=sessions,proto3" json:"sessions,omitempty"`
+	Session           *TerminalSession       `protobuf:"bytes,3,opt,name=session,proto3" json:"session,omitempty"`
+	Output            string                 `protobuf:"bytes,4,opt,name=output,proto3" json:"output,omitempty"`
+	Truncated         bool                   `protobuf:"varint,5,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	ShellOptions      []*TerminalShellOption `protobuf:"bytes,6,rep,name=shell_options,json=shellOptions,proto3" json:"shell_options,omitempty"`
+	DefaultShell      string                 `protobuf:"bytes,7,opt,name=default_shell,json=defaultShell,proto3" json:"default_shell,omitempty"`
+	OutputStartOffset uint64                 `protobuf:"varint,8,opt,name=output_start_offset,json=outputStartOffset,proto3" json:"output_start_offset,omitempty"`
+	OutputEndOffset   uint64                 `protobuf:"varint,9,opt,name=output_end_offset,json=outputEndOffset,proto3" json:"output_end_offset,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *TerminalResponse) Reset() {
@@ -2281,15 +2283,31 @@ func (x *TerminalResponse) GetDefaultShell() string {
 	return ""
 }
 
+func (x *TerminalResponse) GetOutputStartOffset() uint64 {
+	if x != nil {
+		return x.OutputStartOffset
+	}
+	return 0
+}
+
+func (x *TerminalResponse) GetOutputEndOffset() uint64 {
+	if x != nil {
+		return x.OutputEndOffset
+	}
+	return 0
+}
+
 type TerminalEvent struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	Kind           string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
-	SessionId      string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	ProjectPathKey string                 `protobuf:"bytes,3,opt,name=project_path_key,json=projectPathKey,proto3" json:"project_path_key,omitempty"`
-	Session        *TerminalSession       `protobuf:"bytes,4,opt,name=session,proto3" json:"session,omitempty"`
-	Data           string                 `protobuf:"bytes,5,opt,name=data,proto3" json:"data,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Kind              string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	SessionId         string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	ProjectPathKey    string                 `protobuf:"bytes,3,opt,name=project_path_key,json=projectPathKey,proto3" json:"project_path_key,omitempty"`
+	Session           *TerminalSession       `protobuf:"bytes,4,opt,name=session,proto3" json:"session,omitempty"`
+	Data              string                 `protobuf:"bytes,5,opt,name=data,proto3" json:"data,omitempty"`
+	OutputStartOffset uint64                 `protobuf:"varint,6,opt,name=output_start_offset,json=outputStartOffset,proto3" json:"output_start_offset,omitempty"`
+	OutputEndOffset   uint64                 `protobuf:"varint,7,opt,name=output_end_offset,json=outputEndOffset,proto3" json:"output_end_offset,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *TerminalEvent) Reset() {
@@ -2355,6 +2373,20 @@ func (x *TerminalEvent) GetData() string {
 		return x.Data
 	}
 	return ""
+}
+
+func (x *TerminalEvent) GetOutputStartOffset() uint64 {
+	if x != nil {
+		return x.OutputStartOffset
+	}
+	return 0
+}
+
+func (x *TerminalEvent) GetOutputEndOffset() uint64 {
+	if x != nil {
+		return x.OutputEndOffset
+	}
+	return 0
 }
 
 type ChatRequest struct {
@@ -5633,7 +5665,7 @@ const file_proto_v1_gateway_proto_rawDesc = "" +
 	"\x13TerminalShellOption\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05label\x18\x02 \x01(\tR\x05label\x12\x18\n" +
-	"\acommand\x18\x03 \x01(\tR\acommand\"\xd9\x02\n" +
+	"\acommand\x18\x03 \x01(\tR\acommand\"\xb5\x03\n" +
 	"\x10TerminalResponse\x12\x16\n" +
 	"\x06action\x18\x01 \x01(\tR\x06action\x12A\n" +
 	"\bsessions\x18\x02 \x03(\v2%.liveagent.gateway.v1.TerminalSessionR\bsessions\x12?\n" +
@@ -5641,14 +5673,18 @@ const file_proto_v1_gateway_proto_rawDesc = "" +
 	"\x06output\x18\x04 \x01(\tR\x06output\x12\x1c\n" +
 	"\ttruncated\x18\x05 \x01(\bR\ttruncated\x12N\n" +
 	"\rshell_options\x18\x06 \x03(\v2).liveagent.gateway.v1.TerminalShellOptionR\fshellOptions\x12#\n" +
-	"\rdefault_shell\x18\a \x01(\tR\fdefaultShell\"\xc1\x01\n" +
+	"\rdefault_shell\x18\a \x01(\tR\fdefaultShell\x12.\n" +
+	"\x13output_start_offset\x18\b \x01(\x04R\x11outputStartOffset\x12*\n" +
+	"\x11output_end_offset\x18\t \x01(\x04R\x0foutputEndOffset\"\x9d\x02\n" +
 	"\rTerminalEvent\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x02 \x01(\tR\tsessionId\x12(\n" +
 	"\x10project_path_key\x18\x03 \x01(\tR\x0eprojectPathKey\x12?\n" +
 	"\asession\x18\x04 \x01(\v2%.liveagent.gateway.v1.TerminalSessionR\asession\x12\x12\n" +
-	"\x04data\x18\x05 \x01(\tR\x04data\"\xe6\x03\n" +
+	"\x04data\x18\x05 \x01(\tR\x04data\x12.\n" +
+	"\x13output_start_offset\x18\x06 \x01(\x04R\x11outputStartOffset\x12*\n" +
+	"\x11output_end_offset\x18\a \x01(\x04R\x0foutputEndOffset\"\xe6\x03\n" +
 	"\vChatRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12N\n" +

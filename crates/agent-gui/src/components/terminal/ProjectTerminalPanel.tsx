@@ -14,7 +14,9 @@ import {
 import { cn } from "../../lib/shared/utils";
 import type {
   TerminalClient,
+  TerminalEvent,
   TerminalSession,
+  TerminalSnapshot,
   TerminalShellOption,
 } from "../../lib/terminal/types";
 import { Check, Plus, Terminal, X } from "../icons";
@@ -111,23 +113,45 @@ function XTermViewport({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const resizeTimerRef = useRef<number | null>(null);
+  const clientRef = useRef(client);
+  const sessionRef = useRef(session);
+  const themeRef = useRef(theme);
+  const onErrorRef = useRef(onError);
+  clientRef.current = client;
+  sessionRef.current = session;
+  themeRef.current = theme;
+  onErrorRef.current = onError;
+
+  const termRef = useRef<XTerm | null>(null);
+
+  useEffect(() => {
+    if (!termRef.current) return;
+    termRef.current.options.theme = terminalTheme(theme);
+  }, [theme]);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     let disposed = false;
+    let snapshotLoaded = false;
+    let loadingSnapshot = false;
+    let lastOutputOffset = 0;
+    const bufferedEvents: TerminalEvent[] = [];
     const term = new XTerm({
-      convertEol: true,
       cursorBlink: true,
-      disableStdin: !session.running,
+      disableStdin: true,
       fontFamily:
-        'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
-      fontSize: 13,
-      lineHeight: 1.2,
+        '"SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Code", Consolas, "Liberation Mono", monospace',
+      fontSize: 12,
+      fontWeight: "normal",
+      fontWeightBold: "bold",
+      lineHeight: 1.1,
+      letterSpacing: 0,
       scrollback: 5000,
-      theme: terminalTheme(theme),
+      theme: terminalTheme(themeRef.current),
     });
+    termRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
@@ -136,8 +160,9 @@ function XTermViewport({
       if (disposed) return;
       try {
         fit.fit();
-        void client
-          .resize(session.id, term.cols, term.rows, session.projectPathKey)
+        const s = sessionRef.current;
+        void clientRef.current
+          .resize(s.id, term.cols, term.rows, s.projectPathKey)
           .catch(() => undefined);
       } catch {
         // xterm fit can throw while the panel is hidden or measuring at zero size.
@@ -154,39 +179,69 @@ function XTermViewport({
     window.setTimeout(fitAndResize, 0);
 
     const dataDisposable = term.onData((data) => {
-      void client.input(session.id, data, session.projectPathKey).catch((error) => {
-        onError(error instanceof Error ? error.message : String(error));
+      if (!snapshotLoaded) return;
+      const s = sessionRef.current;
+      void clientRef.current.input(s.id, data, s.projectPathKey).catch((error) => {
+        onErrorRef.current(error instanceof Error ? error.message : String(error));
       });
     });
 
-    void client
-      .snapshot(session.id, undefined, session.projectPathKey)
-      .then((snapshot) => {
-        if (disposed) return;
-        term.reset();
-        if (snapshot.output) {
-          term.write(snapshot.output);
-        }
-        window.setTimeout(fitAndResize, 0);
-      })
-      .catch((error) => {
-        if (!disposed) {
-          onError(error instanceof Error ? error.message : String(error));
-        }
-      });
+    const replayBufferedEvents = () => {
+      const events = bufferedEvents.splice(0);
+      for (const event of events) {
+        writeTerminalEvent(term, event, (nextOffset) => {
+          lastOutputOffset = nextOffset;
+        }, lastOutputOffset);
+      }
+    };
 
-    const unsubscribe = client.subscribe((event) => {
+    const loadSnapshot = () => {
+      if (disposed || loadingSnapshot) return;
+      loadingSnapshot = true;
+      const s = sessionRef.current;
+      void clientRef.current
+        .snapshot(s.id, undefined, s.projectPathKey)
+        .then((snapshot) => {
+          if (disposed) return;
+          if (snapshot.output) {
+            term.write(snapshot.output);
+          }
+          lastOutputOffset = terminalSnapshotEndOffset(snapshot);
+          snapshotLoaded = true;
+          loadingSnapshot = false;
+          term.options.disableStdin = !snapshot.session.running;
+          replayBufferedEvents();
+          window.setTimeout(fitAndResize, 0);
+        })
+        .catch((error) => {
+          loadingSnapshot = false;
+          if (!disposed) {
+            onErrorRef.current(error instanceof Error ? error.message : String(error));
+          }
+        });
+    };
+
+    const unsubscribe = clientRef.current.subscribe((event) => {
       if (disposed || event.sessionId !== session.id) return;
       if (event.kind === "output" && event.data) {
-        term.write(event.data);
+        if (snapshotLoaded && !loadingSnapshot) {
+          writeTerminalEvent(term, event, (nextOffset) => {
+            lastOutputOffset = nextOffset;
+          }, lastOutputOffset);
+        } else {
+          bufferedEvents.push(event);
+        }
       }
       if (event.kind === "exit" || event.kind === "closed") {
         term.options.disableStdin = true;
       }
     });
 
+    loadSnapshot();
+
     return () => {
       disposed = true;
+      termRef.current = null;
       unsubscribe();
       dataDisposable.dispose();
       resizeObserver.disconnect();
@@ -194,12 +249,94 @@ function XTermViewport({
         window.clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;
       }
-      void client.detach(session.id, session.projectPathKey).catch(() => undefined);
+      const s = sessionRef.current;
+      void clientRef.current.detach(s.id, s.projectPathKey).catch(() => undefined);
       term.dispose();
     };
-  }, [client, onError, session.id, session.projectPathKey, session.running, theme]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.id, session.projectPathKey]);
 
   return <div ref={containerRef} className="h-full min-h-0 w-full overflow-hidden px-2 py-2" />;
+}
+
+function terminalSnapshotEndOffset(snapshot: TerminalSnapshot) {
+  if (
+    typeof snapshot.outputEndOffset === "number" &&
+    Number.isFinite(snapshot.outputEndOffset) &&
+    snapshot.outputEndOffset >= 0
+  ) {
+    return snapshot.outputEndOffset;
+  }
+  const startOffset =
+    typeof snapshot.outputStartOffset === "number" &&
+    Number.isFinite(snapshot.outputStartOffset) &&
+    snapshot.outputStartOffset >= 0
+      ? snapshot.outputStartOffset
+      : 0;
+  return startOffset + utf8ByteLength(snapshot.output);
+}
+
+function writeTerminalEvent(
+  term: XTerm,
+  event: TerminalEvent,
+  setLastOutputOffset: (offset: number) => void,
+  lastOutputOffset: number,
+): "written" | "skipped" {
+  const data = event.data ?? "";
+  if (!data) return "skipped";
+  const startOffset = event.outputStartOffset;
+  const endOffset = event.outputEndOffset;
+  if (
+    typeof startOffset === "number" &&
+    Number.isFinite(startOffset) &&
+    typeof endOffset === "number" &&
+    Number.isFinite(endOffset) &&
+    endOffset >= startOffset
+  ) {
+    if (endOffset <= lastOutputOffset) return "skipped";
+    const alreadyWritten = Math.max(0, lastOutputOffset - startOffset);
+    term.write(alreadyWritten > 0 ? sliceUtf8Bytes(data, alreadyWritten) : data);
+    setLastOutputOffset(endOffset);
+    return "written";
+  }
+  term.write(data);
+  setLastOutputOffset(lastOutputOffset + utf8ByteLength(data));
+  return "written";
+}
+
+function sliceUtf8Bytes(value: string, byteOffset: number) {
+  if (byteOffset <= 0) return value;
+  let consumed = 0;
+  let index = 0;
+  for (const segment of value) {
+    const next = consumed + utf8ByteLengthOfCodePoint(segment);
+    if (next <= byteOffset) {
+      consumed = next;
+      index += segment.length;
+      continue;
+    }
+    if (consumed < byteOffset) {
+      index += segment.length;
+    }
+    return value.slice(index);
+  }
+  return "";
+}
+
+function utf8ByteLength(value: string) {
+  let length = 0;
+  for (const segment of value) {
+    length += utf8ByteLengthOfCodePoint(segment);
+  }
+  return length;
+}
+
+function utf8ByteLengthOfCodePoint(value: string) {
+  const codePoint = value.codePointAt(0) ?? 0;
+  if (codePoint <= 0x7f) return 1;
+  if (codePoint <= 0x7ff) return 2;
+  if (codePoint <= 0xffff) return 3;
+  return 4;
 }
 
 export function ProjectTerminalPanel(props: ProjectTerminalPanelProps) {
@@ -225,7 +362,8 @@ export function ProjectTerminalPanel(props: ProjectTerminalPanelProps) {
   const [shellOptions, setShellOptions] = useState<TerminalShellOption[]>([]);
   const [selectedShell, setSelectedShell] = useState("");
   const [shouldRenderContent, setShouldRenderContent] = useState(isOpen);
-  const [isResizing, setIsResizing] = useState(false);
+  const [widthCollapsed, setWidthCollapsed] = useState(!isOpen);
+  const [, setIsResizing] = useState(false);
   const projectReady = projectPathKey.trim() !== "" && cwd.trim() !== "" && !disabledMessage;
   const clampedWidth = Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, width));
   const [draftWidth, setDraftWidth] = useState(clampedWidth);
@@ -310,10 +448,14 @@ export function ProjectTerminalPanel(props: ProjectTerminalPanelProps) {
 
   useEffect(() => {
     if (isOpen) {
+      setWidthCollapsed(false);
       setShouldRenderContent(true);
       return;
     }
-    const timer = window.setTimeout(() => setShouldRenderContent(false), 220);
+    const timer = window.setTimeout(() => {
+      setShouldRenderContent(false);
+      setWidthCollapsed(true);
+    }, 220);
     return () => window.clearTimeout(timer);
   }, [isOpen]);
 
@@ -348,7 +490,7 @@ export function ProjectTerminalPanel(props: ProjectTerminalPanelProps) {
   }, [client, projectReady]);
 
   useEffect(() => {
-    if (!projectReady) return;
+    if (!projectReady || isControlled) return;
     return client.subscribe((event) => {
       if (event.projectPathKey !== projectPathKey) return;
       if (event.kind === "output") return;
@@ -370,7 +512,7 @@ export function ProjectTerminalPanel(props: ProjectTerminalPanelProps) {
         return sorted;
       });
     });
-  }, [client, onSessionsChange, projectPathKey, projectReady]);
+  }, [client, isControlled, onSessionsChange, projectPathKey, projectReady]);
 
   useEffect(() => {
     if (lastProjectPathKeyRef.current === projectPathKey) return;
@@ -518,10 +660,10 @@ export function ProjectTerminalPanel(props: ProjectTerminalPanelProps) {
       data-state={isOpen ? "open" : "closed"}
       className={cn(
         "fixed inset-x-0 bottom-0 z-40 flex h-[min(72vh,34rem)] min-h-0 w-full shrink-0 flex-col overflow-hidden bg-background shadow-2xl transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none md:relative md:inset-auto md:z-10 md:h-full md:shadow-none",
-        !isResizing && "md:transition-[width,opacity,transform]",
         isOpen
           ? "pointer-events-auto translate-y-0 border-t border-border opacity-100 md:w-[var(--terminal-panel-width)] md:translate-x-0 md:border-l md:border-t-0"
-          : "pointer-events-none translate-y-full border-t border-transparent opacity-0 md:w-0 md:translate-x-3 md:translate-y-0 md:border-l-0 md:border-t-0",
+          : "pointer-events-none translate-y-full border-t border-transparent opacity-0 md:translate-x-3 md:translate-y-0 md:border-l-0 md:border-t-0",
+        widthCollapsed ? "md:w-0" : "md:w-[var(--terminal-panel-width)]",
       )}
       style={panelStyle}
     >

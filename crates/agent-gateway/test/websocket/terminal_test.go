@@ -252,6 +252,68 @@ func TestWebSocketTerminalListCanBootstrapAllSessions(t *testing.T) {
 	}
 }
 
+func TestWebSocketTerminalReplaysCachedSessionsAfterAuth(t *testing.T) {
+	t.Parallel()
+
+	sm := session.NewManager()
+	sm.ApplySettingsJSON(`{"remote":{"enableWebTerminal":true}}`)
+	sm.RecordAuthentication("desktop-agent", "0.9.0", "session-1")
+	agentSession := session.NewAgentSession(sm.LatestAuthSnapshot())
+	sm.SetSession(agentSession)
+
+	handler := server.NewWebSocketServer(&config.Config{
+		Token:          "ws-token",
+		RequestTimeout: time.Second,
+	}, sm)
+	conn1, cleanup1 := dialGatewayWebSocket(t, handler)
+	defer cleanup1()
+	authWebSocket(t, conn1, "ws-token")
+
+	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
+		RequestId: "event-created-replay",
+		Timestamp: time.Now().Unix(),
+		Payload: &gatewayv1.AgentEnvelope_TerminalEvent{
+			TerminalEvent: &gatewayv1.TerminalEvent{
+				Kind:           "created",
+				SessionId:      "terminal-1",
+				ProjectPathKey: "/workspace/project",
+				Session: &gatewayv1.TerminalSession{
+					Id:             "terminal-1",
+					ProjectPathKey: "/workspace/project",
+					Cwd:            "/workspace/project",
+					Title:          "Terminal 1",
+					CreatedAt:      1,
+					UpdatedAt:      1,
+					Running:        true,
+				},
+			},
+		},
+	})
+	firstEvent := receiveEnvelope(t, conn1)
+	if firstEvent.Type != "terminal.event" {
+		t.Fatalf("terminal created event = %#v, want terminal.event", firstEvent)
+	}
+
+	conn2, cleanup2 := dialGatewayWebSocket(t, handler)
+	defer cleanup2()
+	authWebSocket(t, conn2, "ws-token")
+	replayedEvent := receiveEnvelope(t, conn2)
+	if replayedEvent.Type != "terminal.event" {
+		t.Fatalf("terminal replay event = %#v, want terminal.event", replayedEvent)
+	}
+	var payload struct {
+		Kind      string         `json:"kind"`
+		SessionID string         `json:"session_id"`
+		Session   map[string]any `json:"session"`
+	}
+	if err := json.Unmarshal(replayedEvent.Payload, &payload); err != nil {
+		t.Fatalf("decode terminal replay event: %v", err)
+	}
+	if payload.Kind != "created" || payload.SessionID != "terminal-1" {
+		t.Fatalf("terminal replay payload = %#v, want terminal-1 created", payload)
+	}
+}
+
 func TestWebSocketTerminalForwardsInteractiveRequestsWhenEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -476,6 +538,44 @@ func TestWebSocketTerminalEventsForwardMetadataAndRequireAttachForOutput(t *test
 		"project_path_key": "/workspace/project",
 	})
 	attachOutbound := readOutboundEnvelope(t, agentSession)
+	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
+		RequestId: "event-attach-pending-output",
+		Timestamp: time.Now().Unix(),
+		Payload: &gatewayv1.AgentEnvelope_TerminalEvent{
+			TerminalEvent: &gatewayv1.TerminalEvent{
+				Kind:           "output",
+				SessionId:      "terminal-1",
+				ProjectPathKey: "/workspace/project",
+				Session: &gatewayv1.TerminalSession{
+					Id:             "terminal-1",
+					ProjectPathKey: "/workspace/project",
+					Cwd:            "/workspace/project",
+					Title:          "Terminal 1",
+					Running:        true,
+				},
+				Data:              "visible-before-attach-response\n",
+				OutputStartOffset: 10,
+				OutputEndOffset:   41,
+			},
+		},
+	})
+	pendingOutputEvent := receiveEnvelope(t, conn)
+	if pendingOutputEvent.Type != "terminal.event" {
+		t.Fatalf("terminal attach-pending output event = %#v, want terminal.event", pendingOutputEvent)
+	}
+	var pendingOutputPayload struct {
+		Data              string `json:"data"`
+		OutputStartOffset uint64 `json:"output_start_offset"`
+		OutputEndOffset   uint64 `json:"output_end_offset"`
+	}
+	if err := json.Unmarshal(pendingOutputEvent.Payload, &pendingOutputPayload); err != nil {
+		t.Fatalf("decode terminal attach-pending output event: %v", err)
+	}
+	if pendingOutputPayload.Data != "visible-before-attach-response\n" ||
+		pendingOutputPayload.OutputStartOffset != 10 ||
+		pendingOutputPayload.OutputEndOffset != 41 {
+		t.Fatalf("terminal attach-pending output payload = %#v", pendingOutputPayload)
+	}
 	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
 		RequestId: attachOutbound.GetRequestId(),
 		Timestamp: time.Now().Unix(),

@@ -32,3 +32,33 @@ func TestWebsocketChatEventPayloadPreservesHostedSearch(t *testing.T) {
 		t.Fatalf("expected seq 7, got %#v", payload["seq"])
 	}
 }
+
+func TestWebsocketTerminalPayloadsPreserveOutputOffsets(t *testing.T) {
+	response := websocketTerminalResponsePayload(&gatewayv1.TerminalResponse{
+		Action:            "attach",
+		Output:            "uploads\n",
+		OutputStartOffset: 8,
+		OutputEndOffset:   16,
+	})
+	if response["output_start_offset"] != uint64(8) {
+		t.Fatalf("terminal response output_start_offset = %#v, want 8", response["output_start_offset"])
+	}
+	if response["output_end_offset"] != uint64(16) {
+		t.Fatalf("terminal response output_end_offset = %#v, want 16", response["output_end_offset"])
+	}
+
+	event := websocketTerminalEventPayload(&gatewayv1.TerminalEvent{
+		Kind:              "output",
+		SessionId:         "terminal-1",
+		ProjectPathKey:    "/workspace/project",
+		Data:              "uploads\n",
+		OutputStartOffset: 16,
+		OutputEndOffset:   24,
+	})
+	if event["output_start_offset"] != uint64(16) {
+		t.Fatalf("terminal event output_start_offset = %#v, want 16", event["output_start_offset"])
+	}
+	if event["output_end_offset"] != uint64(24) {
+		t.Fatalf("terminal event output_end_offset = %#v, want 24", event["output_end_offset"])
+	}
+}

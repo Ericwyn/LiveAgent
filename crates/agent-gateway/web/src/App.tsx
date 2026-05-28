@@ -80,6 +80,7 @@ import { createGatewayTerminalClient } from "./lib/terminal/gatewayTerminalClien
 import {
   applyTerminalEventToSessions,
   replaceTerminalSessionsForProject,
+  sortTerminalSessions,
   terminalSessionBelongsToProject,
 } from "./lib/terminal/sessionStore";
 import type { TerminalSession } from "./lib/terminal/types";
@@ -785,7 +786,8 @@ export default function App() {
   const [activeView, setActiveView] = useState<"chat" | "skills-hub" | "mcp-hub">("chat");
   const [terminalPanelOpen, setTerminalPanelOpen] = useState(false);
   const [terminalSessions, setTerminalSessions] = useState<TerminalSession[]>([]);
-  const terminalProjectVersionsRef = useRef<Map<string, number>>(new Map());
+  const terminalSessionsVersionRef = useRef(0);
+  const terminalStatusSessionIdRef = useRef("");
   const {
     scrollAreaRef: transcriptScrollAreaRef,
     showJumpToBottom: showTranscriptJumpToBottom,
@@ -5006,7 +5008,8 @@ export default function App() {
     setRemoteRunningConversationRuntime(new Map());
     setProjectActivityUpdatedAtOverrides(new Map());
     setTerminalSessions([]);
-    terminalProjectVersionsRef.current.clear();
+    terminalSessionsVersionRef.current += 1;
+    terminalStatusSessionIdRef.current = "";
     clearAllConversationLiveStreams();
     setSelectedHistoryId("");
     setSelectedHistory(null);
@@ -5246,13 +5249,7 @@ export default function App() {
   );
   const handleProjectTerminalSessionsChange = useCallback(
     (sessions: TerminalSession[]) => {
-      const key = workspaceProjectPathKey(terminalProjectPathKey);
-      if (key) {
-        terminalProjectVersionsRef.current.set(
-          key,
-          (terminalProjectVersionsRef.current.get(key) ?? 0) + 1,
-        );
-      }
+      terminalSessionsVersionRef.current += 1;
       setTerminalSessions((current) =>
         replaceTerminalSessionsForProject(current, terminalProjectPathKey, sessions),
       );
@@ -5262,45 +5259,37 @@ export default function App() {
 
   useEffect(() => {
     if (!terminalClient) {
+      terminalSessionsVersionRef.current += 1;
       setTerminalSessions([]);
       return;
     }
-    if (terminalDisabledMessage) {
-      if (!settingsSyncReady) {
-        return;
-      }
-      if (terminalProjectPathKey) {
-        setTerminalSessions((current) =>
-          replaceTerminalSessionsForProject(current, terminalProjectPathKey, []),
-        );
-      } else {
+    if (!settingsSyncReady) {
+      return;
+    }
+    if (!isAgentMode || !settings.remote.enableWebTerminal || status?.online === false) {
+      terminalSessionsVersionRef.current += 1;
+      setTerminalSessions([]);
+      return;
+    }
+    if (status?.online !== true) {
+      return;
+    }
+    const statusSessionId = status?.session_id?.trim() ?? "";
+    if (statusSessionId && terminalStatusSessionIdRef.current !== statusSessionId) {
+      const hadPreviousSession = terminalStatusSessionIdRef.current !== "";
+      terminalStatusSessionIdRef.current = statusSessionId;
+      if (hadPreviousSession) {
+        terminalSessionsVersionRef.current += 1;
         setTerminalSessions([]);
       }
-      return;
-    }
-    if (status?.online === false) {
-      return;
-    }
-    if (!terminalProjectPathKey) {
-      setTerminalSessions([]);
-      return;
     }
     let cancelled = false;
-    const projectPathKey = terminalProjectPathKey;
-    const requestVersion = terminalProjectVersionsRef.current.get(projectPathKey) ?? 0;
+    const requestVersion = terminalSessionsVersionRef.current;
     void terminalClient
-      .list(projectPathKey)
+      .list()
       .then((sessions) => {
-        if (
-          !cancelled &&
-          (terminalProjectVersionsRef.current.get(projectPathKey) ?? 0) === requestVersion
-        ) {
-          setTerminalSessions((current) =>
-            sessions.length === 0 &&
-            current.some((session) => terminalSessionBelongsToProject(session, projectPathKey))
-              ? current
-              : replaceTerminalSessionsForProject(current, projectPathKey, sessions),
-          );
+        if (!cancelled && terminalSessionsVersionRef.current === requestVersion) {
+          setTerminalSessions(sortTerminalSessions(sessions));
         }
       })
       .catch(() => undefined);
@@ -5308,31 +5297,22 @@ export default function App() {
       cancelled = true;
     };
   }, [
+    isAgentMode,
+    settings.remote.enableWebTerminal,
     settingsSyncReady,
     status?.online,
     status?.session_id,
     terminalClient,
-    terminalDisabledMessage,
-    terminalPanelOpen,
-    terminalProjectPathKey,
   ]);
 
   useEffect(() => {
-    if (!terminalClient || terminalDisabledMessage) return;
+    if (!terminalClient) return;
     return terminalClient.subscribe((event) => {
       if (event.kind === "output") return;
-      const projectPathKey = workspaceProjectPathKey(
-        event.projectPathKey || event.session.projectPathKey || event.session.cwd,
-      );
-      if (projectPathKey) {
-        terminalProjectVersionsRef.current.set(
-          projectPathKey,
-          (terminalProjectVersionsRef.current.get(projectPathKey) ?? 0) + 1,
-        );
-      }
+      terminalSessionsVersionRef.current += 1;
       setTerminalSessions((current) => applyTerminalEventToSessions(current, event));
     });
-  }, [terminalClient, terminalDisabledMessage]);
+  }, [terminalClient]);
 
   useEffect(() => {
     if (activeView !== "chat") {
@@ -5975,7 +5955,7 @@ export default function App() {
                         ? "Collapse terminal panel"
                         : (terminalDisabledMessage ?? "Expand terminal panel")
                     }
-                    className={`relative h-8 w-8 rounded-lg text-muted-foreground transition-[background-color,color,transform] duration-150 hover:text-foreground active:scale-95 ${
+                    className={`gateway-terminal-panel-toggle relative h-8 w-8 rounded-lg text-muted-foreground transition-[background-color,color,transform] duration-150 hover:text-foreground active:scale-95 ${
                       terminalPanelOpen ? "bg-muted text-foreground" : ""
                     }`}
                   >
@@ -6262,6 +6242,7 @@ export default function App() {
               )
             }
             onSessionsChange={handleProjectTerminalSessionsChange}
+            onClose={() => setTerminalPanelOpen(false)}
           />
         ) : null}
 

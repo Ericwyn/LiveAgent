@@ -147,6 +147,10 @@ type RawTerminalResponse = {
   session?: RawTerminalSession;
   output?: string;
   truncated?: boolean;
+  outputStartOffset?: number;
+  output_start_offset?: number;
+  outputEndOffset?: number;
+  output_end_offset?: number;
   options?: Array<{ id?: string; label?: string; command?: string }>;
   shellOptions?: Array<{ id?: string; label?: string; command?: string }>;
   shell_options?: Array<{ id?: string; label?: string; command?: string }>;
@@ -162,6 +166,10 @@ type RawTerminalEvent = {
   project_path_key?: string;
   session?: RawTerminalSession;
   data?: string | null;
+  outputStartOffset?: number;
+  output_start_offset?: number;
+  outputEndOffset?: number;
+  output_end_offset?: number;
 };
 
 class AsyncEventQueue<T> implements AsyncIterable<T>, AsyncIterator<T> {
@@ -340,10 +348,16 @@ function normalizeTerminalSnapshot(input: RawTerminalResponse): TerminalSnapshot
   if (!input.session) {
     throw new Error("Terminal response did not include a session");
   }
+  const outputStartOffset = normalizeOptionalOffset(
+    input.outputStartOffset ?? input.output_start_offset,
+  );
+  const outputEndOffset = normalizeOptionalOffset(input.outputEndOffset ?? input.output_end_offset);
   return {
     session: normalizeTerminalSession(input.session),
     output: input.output ?? "",
     truncated: input.truncated === true,
+    outputStartOffset,
+    outputEndOffset,
   };
 }
 
@@ -364,13 +378,25 @@ function normalizeTerminalShellOptions(input: RawTerminalResponse): TerminalShel
 function normalizeTerminalEvent(input: RawTerminalEvent): TerminalEvent | null {
   if (!input.session) return null;
   const session = normalizeTerminalSession(input.session);
+  const outputStartOffset = normalizeOptionalOffset(
+    input.outputStartOffset ?? input.output_start_offset,
+  );
+  const outputEndOffset = normalizeOptionalOffset(input.outputEndOffset ?? input.output_end_offset);
   return {
     kind: input.kind ?? "",
     sessionId: input.sessionId ?? input.session_id ?? session.id,
     projectPathKey: input.projectPathKey ?? input.project_path_key ?? session.projectPathKey,
     session,
     data: input.data ?? undefined,
+    outputStartOffset,
+    outputEndOffset,
   };
+}
+
+function normalizeOptionalOffset(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : undefined;
 }
 
 function normalizeHistoryListPage(page: number) {

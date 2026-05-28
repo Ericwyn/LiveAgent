@@ -196,6 +196,8 @@ message TerminalResponse {
   bool truncated = 5;
   repeated TerminalShellOption shell_options = 6;
   string default_shell = 7;
+  uint64 output_start_offset = 8;
+  uint64 output_end_offset = 9;
 }
 
 message TerminalEvent {
@@ -204,6 +206,8 @@ message TerminalEvent {
   string project_path_key = 3;
   TerminalSession session = 4;
   string data = 5;
+  uint64 output_start_offset = 6;
+  uint64 output_end_offset = 7;
 }
 
 message ChatRequest {

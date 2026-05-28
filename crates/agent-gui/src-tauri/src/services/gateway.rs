@@ -467,7 +467,7 @@ impl GatewayController {
             });
         }
 
-        let (outbound_tx, outbound_rx) = mpsc::channel::<proto::AgentEnvelope>(256);
+        let (outbound_tx, outbound_rx) = mpsc::channel::<proto::AgentEnvelope>(4096);
         self.set_outbound_sender(Some(outbound_tx));
 
         let mut connect_request = tonic::Request::new(ReceiverStream::new(outbound_rx));
@@ -502,6 +502,9 @@ impl GatewayController {
 
         if let Err(error) = self.publish_current_settings_sync().await {
             eprintln!("publish gateway settings sync failed: {error}");
+        }
+        if let Err(error) = self.publish_current_terminal_sessions().await {
+            eprintln!("publish gateway terminal sessions failed: {error}");
         }
 
         let timeout_seconds = i64::try_from(config.heartbeat_interval.max(5)).unwrap_or(30) * 3;
@@ -1130,6 +1133,8 @@ impl GatewayController {
                         .map(terminal_shell_option_to_proto)
                         .collect(),
                     default_shell: options.default_shell,
+                    output_start_offset: 0,
+                    output_end_offset: 0,
                 })
             }
             "list" => {
@@ -1150,6 +1155,8 @@ impl GatewayController {
                     truncated: false,
                     shell_options: Vec::new(),
                     default_shell: String::new(),
+                    output_start_offset: 0,
+                    output_end_offset: 0,
                 })
             }
             "create" => {
@@ -1229,6 +1236,8 @@ impl GatewayController {
                 truncated: false,
                 shell_options: Vec::new(),
                 default_shell: String::new(),
+                output_start_offset: 0,
+                output_end_offset: 0,
             }),
             "" => Err("terminal action is required".to_string()),
             other => Err(format!("unsupported terminal action: {other}")),
@@ -1322,6 +1331,23 @@ impl GatewayController {
     async fn publish_current_settings_sync(&self) -> Result<(), String> {
         let snapshot = self.current_settings_snapshot().await?;
         self.publish_settings_sync(snapshot).await
+    }
+
+    async fn publish_current_terminal_sessions(&self) -> Result<(), String> {
+        let sessions = self.terminal_registry.list(None).sessions;
+        for session in sessions {
+            self.send_agent_envelope(build_terminal_event_envelope(TerminalEventPayload {
+                kind: "created".to_string(),
+                session_id: session.id.clone(),
+                project_path_key: session.project_path_key.clone(),
+                session,
+                data: None,
+                output_start_offset: None,
+                output_end_offset: None,
+            }))
+            .await?;
+        }
+        Ok(())
     }
 
     pub async fn refresh_settings_sync_from_db(&self) -> Result<Value, String> {
@@ -1564,6 +1590,8 @@ fn terminal_list_response_to_proto(
         truncated: false,
         shell_options: Vec::new(),
         default_shell: String::new(),
+        output_start_offset: 0,
+        output_end_offset: 0,
     }
 }
 
@@ -1579,6 +1607,8 @@ fn terminal_record_response_to_proto(
         truncated: false,
         shell_options: Vec::new(),
         default_shell: String::new(),
+        output_start_offset: 0,
+        output_end_offset: 0,
     }
 }
 
@@ -1594,6 +1624,8 @@ fn terminal_snapshot_response_to_proto(
         truncated: snapshot.truncated,
         shell_options: Vec::new(),
         default_shell: String::new(),
+        output_start_offset: snapshot.output_start_offset,
+        output_end_offset: snapshot.output_end_offset,
     }
 }
 
@@ -1608,6 +1640,8 @@ fn build_terminal_event_envelope(payload: TerminalEventPayload) -> proto::AgentE
                 project_path_key: payload.project_path_key,
                 session: Some(terminal_session_to_proto(payload.session)),
                 data: payload.data.unwrap_or_default(),
+                output_start_offset: payload.output_start_offset.unwrap_or_default(),
+                output_end_offset: payload.output_end_offset.unwrap_or_default(),
             },
         )),
     }
