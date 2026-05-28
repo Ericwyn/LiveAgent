@@ -12,7 +12,9 @@ import type {
 } from "../components/chat/MentionComposer";
 import { type NotifyItem, NotifyToast } from "../components/chat/NotifyToast";
 import { SharedHistoryManagerModal } from "../components/chat/SharedHistoryManagerModal";
-import { Ban, Upload } from "../components/icons";
+import { Ban, PanelRightClose, PanelRightOpen, Upload } from "../components/icons";
+import { ProjectTerminalPanel } from "../components/terminal/ProjectTerminalPanel";
+import { Button } from "../components/ui/button";
 import { useLocale } from "../i18n";
 import {
   type CompactionStatus,
@@ -96,6 +98,13 @@ import {
   updateMemorySettings,
   updateSkills,
 } from "../lib/settings";
+import {
+  applyTerminalEventToSessions,
+  sortTerminalSessions,
+  terminalSessionBelongsToProject,
+} from "../lib/terminal/sessionStore";
+import { tauriTerminalClient } from "../lib/terminal/tauriTerminalClient";
+import type { TerminalSession } from "../lib/terminal/types";
 import {
   applyWorkspaceProjectConversationActivityMap,
   buildWorkspaceProjectActivityUpdatedAts,
@@ -601,6 +610,8 @@ export function ChatPage(props: ChatPageProps) {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeView, setActiveView] = useState<"chat" | "skills-hub" | "mcp-hub">("chat");
+  const [terminalPanelOpen, setTerminalPanelOpen] = useState(false);
+  const [projectTerminalSessions, setProjectTerminalSessions] = useState<TerminalSession[]>([]);
   const [remoteRuntimeStatus, setRemoteRuntimeStatus] = useState<GatewayRuntimeStatus>(() =>
     buildFallbackGatewayStatus(settings.remote),
   );
@@ -1267,6 +1278,80 @@ export function ChatPage(props: ChatPageProps) {
     currentConversationPersistedCwd ||
     currentConversationRuntimeWorkdir ||
     (isAgentMode ? activeWorkspaceProjectPath || workdir : "");
+  const terminalProjectPath = isAgentMode ? activeWorkspaceProjectPath.trim() : "";
+  const terminalProjectPathKey = terminalProjectPath ? workspaceProjectPathKey(terminalProjectPath) : "";
+  const terminalDisabledMessage = !isAgentMode
+    ? "Terminal requires Agent project mode."
+    : !terminalProjectPath
+      ? "Select a project to use Terminal."
+      : undefined;
+  useEffect(() => {
+    if (!terminalProjectPathKey) {
+      setProjectTerminalSessions([]);
+      return;
+    }
+    let cancelled = false;
+    void tauriTerminalClient
+      .list(terminalProjectPathKey)
+      .then((sessions) => {
+        if (!cancelled) {
+          setProjectTerminalSessions(sortTerminalSessions(sessions));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setProjectTerminalSessions([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [terminalProjectPathKey]);
+  useEffect(() => {
+    if (!terminalProjectPathKey) return;
+    return tauriTerminalClient.subscribe((event) => {
+      if (!terminalSessionBelongsToProject(event.session, terminalProjectPathKey)) return;
+      if (event.kind === "output") return;
+      setProjectTerminalSessions((current) => applyTerminalEventToSessions(current, event));
+    });
+  }, [terminalProjectPathKey]);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+
+    listen<{ runningCount?: number }>("terminal:exit-requested", async (event) => {
+      if (cancelled) return;
+      const runningCount = Math.max(0, Number(event.payload?.runningCount ?? 0));
+      const confirmed =
+        runningCount === 0 ||
+        window.confirm(
+          `仍有 ${runningCount} 个 Terminal 正在运行。退出 LiveAgent 会关闭这些进程，是否继续？`,
+        );
+      if (!confirmed || cancelled) return;
+      try {
+        await invoke("app_confirmed_exit");
+      } catch (error) {
+        if (!cancelled) {
+          setErrorMessage(asErrorMessage(error, "退出 LiveAgent 失败"));
+        }
+      }
+    })
+      .then((dispose) => {
+        if (cancelled) {
+          dispose();
+        } else {
+          unlisten = dispose;
+        }
+      })
+      .catch((error) => {
+        console.error("failed to listen for terminal exit requests", error);
+      });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [setErrorMessage]);
   const sidebarRunningConversationIds = useMemo(() => {
     const next = new Set(runningConversationIds);
     for (const conversationId of syncedRunningConversationRuntime.keys()) {
@@ -1697,6 +1782,17 @@ export function ChatPage(props: ChatPageProps) {
             return;
           }
 
+          const terminalSessions = pathKey ? await tauriTerminalClient.list(pathKey) : [];
+          const runningTerminalCount = terminalSessions.filter((session) => session.running).length;
+          if (
+            runningTerminalCount > 0 &&
+            !window.confirm(
+              `项目 "${project.name}" 中仍有 ${runningTerminalCount} 个 Terminal 正在运行。删除项目会关闭这些 Terminal，是否继续？`,
+            )
+          ) {
+            return;
+          }
+
           for (const conversationId of conversationIds) {
             await deleteChatHistory(conversationId);
           }
@@ -1718,6 +1814,12 @@ export function ChatPage(props: ChatPageProps) {
               deleteConversationLocalCaches(conversationId);
               subagentRuntimeManagerRef.current.disposeConversation(conversationId);
             }
+          }
+          if (terminalSessions.length > 0) {
+            await tauriTerminalClient.closeProject(pathKey);
+            setProjectTerminalSessions((current) =>
+              current.filter((session) => !terminalSessionBelongsToProject(session, pathKey)),
+            );
           }
 
           const visibleConversationId = currentConversationIdRef.current;
@@ -3934,6 +4036,34 @@ export function ChatPage(props: ChatPageProps) {
                 onOpenSettings={onOpenSettings}
                 onToggleTheme={onToggleTheme}
                 onOpenSidebar={handleOpenSidebar}
+                trailingActions={
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setTerminalPanelOpen((open) => !open)}
+                    disabled={Boolean(terminalDisabledMessage) && !terminalPanelOpen}
+                    aria-expanded={terminalPanelOpen}
+                    title={
+                      terminalPanelOpen
+                        ? "Collapse terminal panel"
+                        : (terminalDisabledMessage ?? "Expand terminal panel")
+                    }
+                    className={`relative h-8 w-8 rounded-lg text-muted-foreground transition-[background-color,color,transform] duration-150 hover:text-foreground active:scale-95 ${
+                      terminalPanelOpen ? "bg-muted text-foreground" : ""
+                    }`}
+                  >
+                    {terminalPanelOpen ? (
+                      <PanelRightClose className="h-4.5 w-4.5" />
+                    ) : (
+                      <PanelRightOpen className="h-4.5 w-4.5" />
+                    )}
+                    {projectTerminalSessions.length > 0 ? (
+                      <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-semibold leading-none text-white">
+                        {projectTerminalSessions.length}
+                      </span>
+                    ) : null}
+                  </Button>
+                }
               />
               <NotifyToast items={notifyItems} onDismiss={dismissNotify} />
             </div>
@@ -4043,6 +4173,26 @@ export function ChatPage(props: ChatPageProps) {
           </>
         )}
       </div>
+      <ProjectTerminalPanel
+        isOpen={terminalPanelOpen}
+        projectPathKey={terminalProjectPathKey}
+        cwd={terminalProjectPath}
+        sessions={projectTerminalSessions}
+        width={settings.customSettings.terminalPanel.width}
+        theme={settings.theme}
+        disabledMessage={terminalDisabledMessage}
+        client={tauriTerminalClient}
+        onWidthChange={(nextWidth) =>
+          setSettings((prev) =>
+            updateCustomSettings(prev, {
+              terminalPanel: {
+                width: nextWidth,
+              },
+            }),
+          )
+        }
+        onSessionsChange={setProjectTerminalSessions}
+      />
     </div>
   );
 }

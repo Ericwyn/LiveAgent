@@ -42,6 +42,12 @@ type Manager struct {
 	settingsMu          sync.Mutex
 	nextSettingsSubID   int
 	settingsSubscribers map[int]chan *gatewayv1.SettingsSyncEvent
+	settingsSnapshotMu  sync.RWMutex
+	settingsSnapshot    map[string]any
+
+	terminalMu          sync.Mutex
+	nextTerminalSubID   int
+	terminalSubscribers map[int]chan *gatewayv1.TerminalEvent
 
 	chatMu                 sync.Mutex
 	nextChatSubID          int
@@ -138,6 +144,7 @@ func NewManager() *Manager {
 	return &Manager{
 		historySubscribers:     make(map[int]chan *gatewayv1.HistorySyncEvent),
 		settingsSubscribers:    make(map[int]chan *gatewayv1.SettingsSyncEvent),
+		terminalSubscribers:    make(map[int]chan *gatewayv1.TerminalEvent),
 		chatSubscribers:        make(map[int]chan *ChatBroadcastEvent),
 		chatRuns:               make(map[string]*chatRun),
 		chatRunByConversation:  make(map[string]string),
@@ -553,10 +560,72 @@ func (m *Manager) SubscribeSettingsSync() (<-chan *gatewayv1.SettingsSyncEvent, 
 	return ch, cleanup
 }
 
+func (m *Manager) WebTerminalEnabled() bool {
+	m.settingsSnapshotMu.RLock()
+	defer m.settingsSnapshotMu.RUnlock()
+
+	remote, ok := m.settingsSnapshot["remote"].(map[string]any)
+	if !ok {
+		return false
+	}
+	enabled, ok := remote["enableWebTerminal"].(bool)
+	return ok && enabled
+}
+
+func (m *Manager) updateSettingsSnapshot(event *gatewayv1.SettingsSyncEvent) {
+	if event == nil {
+		return
+	}
+	m.ApplySettingsJSON(event.GetSettingsJson())
+}
+
+func parseSettingsJSON(settingsJSON string) (map[string]any, bool) {
+	raw := strings.TrimSpace(settingsJSON)
+	if raw == "" {
+		return nil, false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload == nil {
+		return nil, false
+	}
+	return payload, true
+}
+
+func (m *Manager) ApplySettingsJSON(settingsJSON string) {
+	payload, ok := parseSettingsJSON(settingsJSON)
+	if !ok {
+		return
+	}
+	m.settingsSnapshotMu.Lock()
+	if _, hasIncomingRemote := payload["remote"]; !hasIncomingRemote {
+		if existingRemote, hasExistingRemote := m.settingsSnapshot["remote"]; hasExistingRemote {
+			payload["remote"] = existingRemote
+		}
+	}
+	m.settingsSnapshot = payload
+	m.settingsSnapshotMu.Unlock()
+}
+
+func (m *Manager) ApplySettingsJSONPreservingRemote(settingsJSON string) {
+	payload, ok := parseSettingsJSON(settingsJSON)
+	if !ok {
+		return
+	}
+	m.settingsSnapshotMu.Lock()
+	if existingRemote, ok := m.settingsSnapshot["remote"]; ok {
+		payload["remote"] = existingRemote
+	} else {
+		delete(payload, "remote")
+	}
+	m.settingsSnapshot = payload
+	m.settingsSnapshotMu.Unlock()
+}
+
 func (m *Manager) broadcastSettingsSync(event *gatewayv1.SettingsSyncEvent) {
 	if event == nil {
 		return
 	}
+	m.updateSettingsSnapshot(event)
 
 	m.settingsMu.Lock()
 	subscribers := make([]chan *gatewayv1.SettingsSyncEvent, 0, len(m.settingsSubscribers))
@@ -564,6 +633,48 @@ func (m *Manager) broadcastSettingsSync(event *gatewayv1.SettingsSyncEvent) {
 		subscribers = append(subscribers, ch)
 	}
 	m.settingsMu.Unlock()
+
+	for _, ch := range subscribers {
+		select {
+		case ch <- event:
+		default:
+		}
+	}
+}
+
+func (m *Manager) SubscribeTerminalEvents() (<-chan *gatewayv1.TerminalEvent, func()) {
+	ch := make(chan *gatewayv1.TerminalEvent, 128)
+
+	m.terminalMu.Lock()
+	subID := m.nextTerminalSubID
+	m.nextTerminalSubID += 1
+	m.terminalSubscribers[subID] = ch
+	m.terminalMu.Unlock()
+
+	cleanup := func() {
+		m.terminalMu.Lock()
+		existing, ok := m.terminalSubscribers[subID]
+		if ok {
+			delete(m.terminalSubscribers, subID)
+			close(existing)
+		}
+		m.terminalMu.Unlock()
+	}
+
+	return ch, cleanup
+}
+
+func (m *Manager) broadcastTerminalEvent(event *gatewayv1.TerminalEvent) {
+	if event == nil {
+		return
+	}
+
+	m.terminalMu.Lock()
+	subscribers := make([]chan *gatewayv1.TerminalEvent, 0, len(m.terminalSubscribers))
+	for _, ch := range m.terminalSubscribers {
+		subscribers = append(subscribers, ch)
+	}
+	m.terminalMu.Unlock()
 
 	for _, ch := range subscribers {
 		select {
@@ -1046,6 +1157,11 @@ func (m *Manager) dispatchFromAgent(expected *AgentSession, env *gatewayv1.Agent
 
 	if settingsSync := env.GetSettingsSync(); settingsSync != nil {
 		m.broadcastSettingsSync(settingsSync)
+		return
+	}
+
+	if terminalEvent := env.GetTerminalEvent(); terminalEvent != nil {
+		m.broadcastTerminalEvent(terminalEvent)
 		return
 	}
 

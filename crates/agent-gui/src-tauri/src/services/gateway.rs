@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, Once};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::Url;
@@ -18,6 +19,10 @@ use crate::commands::settings::{
     load_gateway_settings_sync_snapshot, load_remote_settings, normalize_remote_settings_payload,
     open_db, redact_gateway_settings_sync_payload, RemoteSettingsPayload,
     PROVIDER_API_KEY_UPDATES_FIELD,
+};
+use crate::runtime::terminal::{
+    terminal_shell_options, TerminalEventPayload, TerminalSessionRecord, TerminalSessionRegistry,
+    TerminalShellOption, TerminalSnapshotResponse,
 };
 use crate::services::cron::CronManager;
 use crate::services::gateway_bridge;
@@ -145,12 +150,14 @@ pub struct GatewayController {
     app_handle: tauri::AppHandle,
     cron_manager: Arc<CronManager>,
     memory_store: Arc<MemoryStore>,
+    terminal_registry: Arc<TerminalSessionRegistry>,
     config_tx: watch::Sender<RemoteSettingsPayload>,
     runner_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     status: Mutex<GatewayStatusSnapshot>,
     outbound_tx: Mutex<Option<mpsc::Sender<proto::AgentEnvelope>>>,
     settings_snapshot: Mutex<Option<Value>>,
     pending_history_truncations: Mutex<HashMap<String, String>>,
+    terminal_forwarder_once: Once,
 }
 
 impl GatewayController {
@@ -158,6 +165,7 @@ impl GatewayController {
         app_handle: tauri::AppHandle,
         cron_manager: Arc<CronManager>,
         memory_store: Arc<MemoryStore>,
+        terminal_registry: Arc<TerminalSessionRegistry>,
     ) -> Self {
         let initial_config = RemoteSettingsPayload::default();
         let (config_tx, _) = watch::channel(initial_config);
@@ -165,6 +173,7 @@ impl GatewayController {
             app_handle,
             cron_manager,
             memory_store,
+            terminal_registry,
             config_tx,
             runner_task: Mutex::new(None),
             status: Mutex::new(GatewayStatusSnapshot {
@@ -181,11 +190,32 @@ impl GatewayController {
             outbound_tx: Mutex::new(None),
             settings_snapshot: Mutex::new(None),
             pending_history_truncations: Mutex::new(HashMap::new()),
+            terminal_forwarder_once: Once::new(),
         }
     }
 
     pub fn start(self: &Arc<Self>) -> Result<(), String> {
+        self.start_terminal_forwarder();
         self.ensure_runner()
+    }
+
+    fn start_terminal_forwarder(self: &Arc<Self>) {
+        let controller = Arc::clone(self);
+        self.terminal_forwarder_once.call_once(move || {
+            let (receiver, guard) = controller.terminal_registry.subscribe();
+            thread::spawn(move || {
+                let _guard = guard;
+                while let Ok(event) = receiver.recv() {
+                    let envelope = build_terminal_event_envelope(event.payload);
+                    let Ok(sender) = controller.current_outbound_sender() else {
+                        continue;
+                    };
+                    if let Err(error) = sender.blocking_send(envelope) {
+                        eprintln!("send gateway terminal event failed: {error}");
+                    }
+                }
+            });
+        });
     }
 
     fn spawn_runner(
@@ -1061,8 +1091,163 @@ impl GatewayController {
                     Err(error) => self.send_error_response(request_id, 500, error).await,
                 }
             }
+            Some(proto::gateway_envelope::Payload::TerminalRequest(request)) => {
+                match self.handle_terminal_request(request) {
+                    Ok(response) => {
+                        self.send_agent_envelope(proto::AgentEnvelope {
+                            request_id,
+                            timestamp: now_unix_seconds(),
+                            payload: Some(proto::agent_envelope::Payload::TerminalResponse(
+                                response,
+                            )),
+                        })
+                        .await
+                    }
+                    Err(error) => self.send_error_response(request_id, 500, error).await,
+                }
+            }
             None => Ok(()),
         }
+    }
+
+    fn handle_terminal_request(
+        &self,
+        request: proto::TerminalRequest,
+    ) -> Result<proto::TerminalResponse, String> {
+        let action = request.action.trim().to_ascii_lowercase();
+        match action.as_str() {
+            "shell_options" => {
+                let options = terminal_shell_options();
+                Ok(proto::TerminalResponse {
+                    action,
+                    sessions: Vec::new(),
+                    session: None,
+                    output: String::new(),
+                    truncated: false,
+                    shell_options: options
+                        .options
+                        .into_iter()
+                        .map(terminal_shell_option_to_proto)
+                        .collect(),
+                    default_shell: options.default_shell,
+                })
+            }
+            "list" => {
+                let project_path_key = request.project_path_key.trim().to_string();
+                let project_filter = (!project_path_key.is_empty()).then_some(project_path_key);
+                let sessions = self
+                    .terminal_registry
+                    .list(project_filter)
+                    .sessions
+                    .into_iter()
+                    .map(terminal_session_to_proto)
+                    .collect();
+                Ok(proto::TerminalResponse {
+                    action,
+                    sessions,
+                    session: None,
+                    output: String::new(),
+                    truncated: false,
+                    shell_options: Vec::new(),
+                    default_shell: String::new(),
+                })
+            }
+            "create" => {
+                let project_path_key =
+                    required_terminal_project_path_key(&request.project_path_key)?;
+                let snapshot = self.terminal_registry.create(
+                    request.cwd,
+                    Some(project_path_key),
+                    optional_proto_text(request.shell),
+                    optional_proto_text(request.title),
+                    optional_proto_u16(request.cols),
+                    optional_proto_u16(request.rows),
+                )?;
+                Ok(terminal_snapshot_response_to_proto(action, snapshot))
+            }
+            "attach" | "snapshot" => {
+                self.ensure_terminal_session_in_project(
+                    &request.session_id,
+                    &request.project_path_key,
+                )?;
+                let snapshot = self
+                    .terminal_registry
+                    .snapshot(request.session_id, optional_proto_usize(request.max_bytes))?;
+                Ok(terminal_snapshot_response_to_proto(action, snapshot))
+            }
+            "input" => {
+                self.ensure_terminal_session_in_project(
+                    &request.session_id,
+                    &request.project_path_key,
+                )?;
+                let session = self
+                    .terminal_registry
+                    .input(request.session_id, request.data)?;
+                Ok(terminal_record_response_to_proto(action, session))
+            }
+            "resize" => {
+                self.ensure_terminal_session_in_project(
+                    &request.session_id,
+                    &request.project_path_key,
+                )?;
+                let session = self.terminal_registry.resize(
+                    request.session_id,
+                    optional_proto_u16(request.cols).unwrap_or(80),
+                    optional_proto_u16(request.rows).unwrap_or(24),
+                )?;
+                Ok(terminal_record_response_to_proto(action, session))
+            }
+            "rename" => {
+                self.ensure_terminal_session_in_project(
+                    &request.session_id,
+                    &request.project_path_key,
+                )?;
+                let session = self
+                    .terminal_registry
+                    .rename(request.session_id, request.title)?;
+                Ok(terminal_record_response_to_proto(action, session))
+            }
+            "close" => {
+                self.ensure_terminal_session_in_project(
+                    &request.session_id,
+                    &request.project_path_key,
+                )?;
+                let session = self.terminal_registry.close(request.session_id)?;
+                Ok(terminal_record_response_to_proto(action, session))
+            }
+            "close_project" => {
+                let project_path_key =
+                    required_terminal_project_path_key(&request.project_path_key)?;
+                let response = self.terminal_registry.close_project(project_path_key)?;
+                Ok(terminal_list_response_to_proto(action, response.sessions))
+            }
+            "detach" => Ok(proto::TerminalResponse {
+                action,
+                sessions: Vec::new(),
+                session: None,
+                output: String::new(),
+                truncated: false,
+                shell_options: Vec::new(),
+                default_shell: String::new(),
+            }),
+            "" => Err("terminal action is required".to_string()),
+            other => Err(format!("unsupported terminal action: {other}")),
+        }
+    }
+
+    fn ensure_terminal_session_in_project(
+        &self,
+        session_id: &str,
+        project_path_key: &str,
+    ) -> Result<(), String> {
+        let project_path_key = required_terminal_project_path_key(project_path_key)?;
+        let session = self
+            .terminal_registry
+            .session_record(session_id.trim().to_string())?;
+        if session.project_path_key != project_path_key {
+            return Err("terminal session is outside the requested project".to_string());
+        }
+        Ok(())
     }
 
     async fn send_agent_envelope(&self, envelope: proto::AgentEnvelope) -> Result<(), String> {
@@ -1306,6 +1491,128 @@ fn build_history_sync_upsert_from_proto(
     }
 }
 
+fn optional_proto_text(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn optional_proto_u16(value: u32) -> Option<u16> {
+    if value == 0 {
+        None
+    } else {
+        Some(value.min(u32::from(u16::MAX)) as u16)
+    }
+}
+
+fn optional_proto_usize(value: u32) -> Option<usize> {
+    (value > 0).then_some(value as usize)
+}
+
+fn required_terminal_project_path_key(value: &str) -> Result<String, String> {
+    let project_path_key = value.trim().to_string();
+    if project_path_key.is_empty() {
+        return Err("project_path_key is required".to_string());
+    }
+    Ok(project_path_key)
+}
+
+fn terminal_u128_to_u64(value: u128) -> u64 {
+    value.min(u128::from(u64::MAX)) as u64
+}
+
+fn terminal_session_to_proto(session: TerminalSessionRecord) -> proto::TerminalSession {
+    proto::TerminalSession {
+        id: session.id,
+        project_path_key: session.project_path_key,
+        cwd: session.cwd,
+        shell: session.shell,
+        title: session.title,
+        pid: session.pid.unwrap_or_default(),
+        cols: u32::from(session.cols),
+        rows: u32::from(session.rows),
+        created_at: terminal_u128_to_u64(session.created_at),
+        updated_at: terminal_u128_to_u64(session.updated_at),
+        finished_at: session
+            .finished_at
+            .map(terminal_u128_to_u64)
+            .unwrap_or_default(),
+        exit_code: session.exit_code.unwrap_or_default(),
+        running: session.running,
+    }
+}
+
+fn terminal_shell_option_to_proto(option: TerminalShellOption) -> proto::TerminalShellOption {
+    proto::TerminalShellOption {
+        id: option.id,
+        label: option.label,
+        command: option.command,
+    }
+}
+
+fn terminal_list_response_to_proto(
+    action: String,
+    sessions: Vec<TerminalSessionRecord>,
+) -> proto::TerminalResponse {
+    proto::TerminalResponse {
+        action,
+        sessions: sessions
+            .into_iter()
+            .map(terminal_session_to_proto)
+            .collect(),
+        session: None,
+        output: String::new(),
+        truncated: false,
+        shell_options: Vec::new(),
+        default_shell: String::new(),
+    }
+}
+
+fn terminal_record_response_to_proto(
+    action: String,
+    session: TerminalSessionRecord,
+) -> proto::TerminalResponse {
+    proto::TerminalResponse {
+        action,
+        sessions: Vec::new(),
+        session: Some(terminal_session_to_proto(session)),
+        output: String::new(),
+        truncated: false,
+        shell_options: Vec::new(),
+        default_shell: String::new(),
+    }
+}
+
+fn terminal_snapshot_response_to_proto(
+    action: String,
+    snapshot: TerminalSnapshotResponse,
+) -> proto::TerminalResponse {
+    proto::TerminalResponse {
+        action,
+        sessions: Vec::new(),
+        session: Some(terminal_session_to_proto(snapshot.session)),
+        output: snapshot.output,
+        truncated: snapshot.truncated,
+        shell_options: Vec::new(),
+        default_shell: String::new(),
+    }
+}
+
+fn build_terminal_event_envelope(payload: TerminalEventPayload) -> proto::AgentEnvelope {
+    proto::AgentEnvelope {
+        request_id: format!("terminal-event-{}", Uuid::new_v4()),
+        timestamp: now_unix_seconds(),
+        payload: Some(proto::agent_envelope::Payload::TerminalEvent(
+            proto::TerminalEvent {
+                kind: payload.kind,
+                session_id: payload.session_id,
+                project_path_key: payload.project_path_key,
+                session: Some(terminal_session_to_proto(payload.session)),
+                data: payload.data.unwrap_or_default(),
+            },
+        )),
+    }
+}
+
 async fn send_agent_envelope_to(
     sender: mpsc::Sender<proto::AgentEnvelope>,
     envelope: proto::AgentEnvelope,
@@ -1356,6 +1663,7 @@ fn build_local_settings_update_event_payload(payload: Value) -> Result<Value, St
         _ => return Err("gateway settings sync payload must be an object".to_string()),
     };
     let provider_api_key_updates = event.remove(PROVIDER_API_KEY_UPDATES_FIELD);
+    event.remove("remote");
     let mut public_event = match redact_gateway_settings_sync_payload(Value::Object(event))? {
         Value::Object(map) => map,
         _ => return Err("gateway settings sync payload must be an object".to_string()),
@@ -1386,7 +1694,7 @@ mod tests {
     use super::{
         build_chat_event_envelope, build_endpoint, build_grpc_url,
         build_local_settings_update_event_payload, merge_settings_sync_snapshot,
-        set_disconnected_status, GatewayStatusSnapshot,
+        required_terminal_project_path_key, set_disconnected_status, GatewayStatusSnapshot,
     };
     use crate::commands::settings::RemoteSettingsPayload;
     use serde_json::{json, Value};
@@ -1471,6 +1779,9 @@ mod tests {
                     "apiKey": "leaked-key"
                 }
             ],
+            "remote": {
+                "enableWebTerminal": true
+            },
             "providerApiKeyUpdates": {
                 "provider-a": "new-key"
             }
@@ -1478,6 +1789,7 @@ mod tests {
 
         let event_payload =
             build_local_settings_update_event_payload(payload).expect("build event payload");
+        assert_eq!(event_payload.get("remote"), None);
         assert_eq!(event_payload["customProviders"][0]["apiKey"], Value::Null);
         assert_eq!(
             event_payload["customProviders"][0]["apiKeyConfigured"],
@@ -1487,6 +1799,15 @@ mod tests {
             event_payload["providerApiKeyUpdates"]["provider-a"],
             "new-key"
         );
+    }
+
+    #[test]
+    fn terminal_project_path_key_is_required_for_gateway_requests() {
+        assert_eq!(
+            required_terminal_project_path_key(" /workspace/project ").as_deref(),
+            Ok("/workspace/project")
+        );
+        assert!(required_terminal_project_path_key(" ").is_err());
     }
 
     #[test]
@@ -1500,6 +1821,7 @@ mod tests {
             agent_id: "agent-new".to_string(),
             auto_reconnect: true,
             heartbeat_interval: 30,
+            enable_web_terminal: false,
         };
         let mut status = GatewayStatusSnapshot {
             online: true,
@@ -1546,6 +1868,7 @@ mod tests {
             agent_id: "agent".to_string(),
             auto_reconnect: true,
             heartbeat_interval: 30,
+            enable_web_terminal: false,
         };
 
         let grpc_url = build_grpc_url(&config).expect("build explicit gRPC endpoint");

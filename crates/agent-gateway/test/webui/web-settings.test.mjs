@@ -198,7 +198,7 @@ test("loadWebSettings forces current gateway URL/token over stale persisted remo
   assert.equal(loaded.remote.enabled, true);
 });
 
-test("gateway settings sync payload excludes remote settings and applies selectedModel null", () => {
+test("gateway settings sync keeps remote connection local and syncs web terminal setting", () => {
   installWindow();
   const current = webSettings.getWebDefaultSettings("token");
   const synced = settingsSync.applyGatewaySettingsSyncPayload(current, {
@@ -235,7 +235,7 @@ test("gateway settings sync payload excludes remote settings and applies selecte
   assert.equal(synced.remote.token, "token");
 
   const payload = settingsSync.buildGatewaySettingsSyncPayload(synced);
-  assert.equal(Object.hasOwn(payload, "remote"), false);
+  assert.deepEqual(payload.remote, { enableWebTerminal: synced.remote.enableWebTerminal });
   assert.deepEqual(payload.chatRuntimeControls, synced.chatRuntimeControls);
 });
 
@@ -271,6 +271,57 @@ test("workspace project selection stays out of synced system workdir", () => {
   );
   assert.equal(Object.hasOwn(payload.system, "activeWorkspaceProjectId"), false);
   assert.equal(payload.system.workdir, "/default-workdir");
+});
+
+test("gateway settings sync preserves active workspace project by path when ids differ", () => {
+  installWindow();
+  const current = settings.normalizeSettings({
+    system: settings.resolveWorkspaceProjects(
+      {
+        ...settings.getDefaultSettings().system,
+        executionMode: "tools",
+        workdir: "/default-workdir",
+        workspaceProjects: [
+          {
+            id: "web-project-a",
+            name: "Project A",
+            path: "/project-a",
+            kind: "folder",
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+        activeWorkspaceProjectId: "web-project-a",
+      },
+      "/default-workdir",
+    ),
+  });
+  const incoming = settingsSync.buildGatewaySettingsSyncPayload(
+    settings.normalizeSettings({
+      system: settings.resolveWorkspaceProjects(
+        {
+          ...settings.getDefaultSettings().system,
+          executionMode: "tools",
+          workdir: "/default-workdir",
+          workspaceProjects: [
+            {
+              id: "desktop-project-a",
+              name: "Project A",
+              path: "/project-a",
+              kind: "folder",
+              createdAt: 2,
+              updatedAt: 2,
+            },
+          ],
+        },
+        "/default-workdir",
+      ),
+    }),
+  );
+
+  const synced = settingsSync.applyGatewaySettingsSyncPayload(current, incoming);
+
+  assert.equal(synced.system.activeWorkspaceProjectId, "desktop-project-a");
 });
 
 test("gateway settings sync keeps newer project conversation activity", () => {

@@ -467,7 +467,15 @@ test("gateway settings sync payload redacts provider api keys", () => {
   assert.equal(payload.customProviders[0].apiKey, undefined);
   assert.equal(payload.customProviders[0].apiKeyConfigured, true);
   assert.equal(payload.customProviders[0].nativeWebSearchEnabled, true);
-  assert.deepEqual(payload.customSettings, appSettings.customSettings);
+  assert.deepEqual(payload.customSettings.conversationTitleModel, {
+    customProviderId: "provider-1",
+    model: "gpt-5",
+  });
+  assert.deepEqual(payload.customSettings.chatSidebar, {
+    projectsCollapsed: false,
+    recentCollapsed: false,
+  });
+  assert.equal(Object.hasOwn(payload.customSettings, "terminalPanel"), false);
   assert.deepEqual(payload.chatRuntimeControls, appSettings.chatRuntimeControls);
   assert.equal(payload.providerApiKeyUpdates, undefined);
 
@@ -519,6 +527,88 @@ test("workspace project selection does not rewrite global system workdir or sync
     payload,
   );
   assert.equal(synced.system.activeWorkspaceProjectId, "project-a");
+});
+
+test("gateway settings sync preserves active workspace project by path when ids differ", () => {
+  const current = settings.normalizeSettings({
+    system: settings.resolveWorkspaceProjects(
+      {
+        ...settings.getDefaultSettings().system,
+        executionMode: "tools",
+        workdir: "/default-workdir",
+        workspaceProjects: [
+          {
+            id: "web-project-a",
+            name: "Project A",
+            path: "/project-a",
+            kind: "folder",
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+        activeWorkspaceProjectId: "web-project-a",
+      },
+      "/default-workdir",
+    ),
+  });
+  const incoming = sync.buildGatewaySettingsSyncPayload(
+    settings.normalizeSettings({
+      system: settings.resolveWorkspaceProjects(
+        {
+          ...settings.getDefaultSettings().system,
+          executionMode: "tools",
+          workdir: "/default-workdir",
+          workspaceProjects: [
+            {
+              id: "desktop-project-a",
+              name: "Project A",
+              path: "/project-a",
+              kind: "folder",
+              createdAt: 2,
+              updatedAt: 2,
+            },
+          ],
+        },
+        "/default-workdir",
+      ),
+    }),
+  );
+
+  const synced = sync.applyGatewaySettingsSyncPayload(current, incoming);
+
+  assert.equal(synced.system.activeWorkspaceProjectId, "desktop-project-a");
+});
+
+test("gateway settings sync keeps terminal panel width local", () => {
+  const current = settings.normalizeSettings({
+    customSettings: {
+      terminalPanel: {
+        width: 612,
+      },
+    },
+  });
+  const incoming = settings.normalizeSettings({
+    customSettings: {
+      terminalPanel: {
+        width: 360,
+      },
+    },
+  });
+
+  const payload = sync.buildGatewaySettingsSyncPayload(incoming);
+  assert.equal(Object.hasOwn(payload.customSettings, "terminalPanel"), false);
+
+  const synced = sync.applyGatewaySettingsSyncPayload(current, {
+    ...payload,
+    customSettings: {
+      ...payload.customSettings,
+      terminalPanel: {
+        width: 360,
+      },
+    },
+  });
+
+  assert.equal(synced.customSettings.terminalPanel.width, 612);
 });
 
 test("gateway settings sync keeps newer project conversation activity", () => {

@@ -615,6 +615,8 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.remoteAdvanced": "高级选项",
     "settings.remoteAutoReconnect": "自动重连",
     "settings.remoteAutoReconnectHint": "连接断开后自动尝试重新连接 Gateway",
+    "settings.remoteWebTerminal": "允许 WebUI Terminal",
+    "settings.remoteWebTerminalHint": "开启后，已登录 WebUI 可启动并控制本机项目终端。",
     "settings.remoteHeartbeat": "心跳间隔",
     "settings.remoteHeartbeatUnit": "秒",
 
@@ -1489,6 +1491,8 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.remoteAdvanced": "Advanced Options",
     "settings.remoteAutoReconnect": "Auto Reconnect",
     "settings.remoteAutoReconnectHint": "Automatically reconnect to Gateway after connection drops",
+    "settings.remoteWebTerminal": "Allow WebUI Terminal",
+    "settings.remoteWebTerminalHint": "Allow authenticated WebUI clients to start and control local project terminals.",
     "settings.remoteHeartbeat": "Heartbeat Interval",
     "settings.remoteHeartbeatUnit": "seconds",
 

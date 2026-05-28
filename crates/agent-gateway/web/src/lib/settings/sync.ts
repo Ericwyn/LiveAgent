@@ -20,8 +20,9 @@ export type GatewaySettingsSyncPayload = {
   agents: AppSettings["agents"];
   hooks: AppSettings["hooks"];
   cron: AppSettings["cron"];
+  remote?: Pick<AppSettings["remote"], "enableWebTerminal">;
   memory: AppSettings["memory"];
-  customSettings: AppSettings["customSettings"];
+  customSettings: Partial<AppSettings["customSettings"]>;
   skills: AppSettings["skills"];
   chatRuntimeControls: AppSettings["chatRuntimeControls"];
   selectedModel: AppSettings["selectedModel"] | null;
@@ -83,8 +84,10 @@ function collectProviderApiKeyUpdates(
 }
 
 function syncableCustomSettings(customSettings: AppSettings["customSettings"]) {
+  const syncable = { ...customSettings } as Partial<AppSettings["customSettings"]>;
+  delete syncable.terminalPanel;
   return {
-    ...customSettings,
+    ...syncable,
     chatSidebar: {
       projectsCollapsed: false,
       recentCollapsed: false,
@@ -108,6 +111,48 @@ function readWorkspaceProjectLastConversationAt(
     : 0;
 }
 
+function resolveSyncedActiveWorkspaceProjectId(
+  current: AppSettings["system"],
+  incomingSystem: AppSettings["system"],
+) {
+  const explicitActiveProjectId =
+    typeof incomingSystem.activeWorkspaceProjectId === "string" &&
+    incomingSystem.activeWorkspaceProjectId.trim()
+      ? incomingSystem.activeWorkspaceProjectId.trim()
+      : "";
+  const currentActiveProjectId = current.activeWorkspaceProjectId?.trim() || "";
+  const currentActiveProject = current.workspaceProjects.find(
+    (project) => project.id === currentActiveProjectId,
+  );
+  const currentActivePathKey = workspaceProjectPathKey(currentActiveProject?.path ?? "");
+  const incomingProjects = Array.isArray(incomingSystem.workspaceProjects)
+    ? incomingSystem.workspaceProjects
+    : [];
+
+  if (
+    explicitActiveProjectId &&
+    incomingProjects.some((project) => project.id === explicitActiveProjectId)
+  ) {
+    return explicitActiveProjectId;
+  }
+  if (
+    currentActiveProjectId &&
+    incomingProjects.some((project) => project.id === currentActiveProjectId)
+  ) {
+    return currentActiveProjectId;
+  }
+  if (currentActivePathKey) {
+    const matchingProject = incomingProjects.find(
+      (project) => workspaceProjectPathKey(project.path) === currentActivePathKey,
+    );
+    if (matchingProject?.id?.trim()) {
+      return matchingProject.id.trim();
+    }
+  }
+
+  return explicitActiveProjectId || currentActiveProjectId;
+}
+
 function mergeSyncedSystemSettings(
   current: AppSettings["system"],
   incoming: unknown,
@@ -117,11 +162,10 @@ function mergeSyncedSystemSettings(
   }
 
   const incomingSystem = incoming as AppSettings["system"];
-  const activeWorkspaceProjectId =
-    typeof incomingSystem.activeWorkspaceProjectId === "string" &&
-    incomingSystem.activeWorkspaceProjectId.trim()
-      ? incomingSystem.activeWorkspaceProjectId.trim()
-      : current.activeWorkspaceProjectId;
+  const activeWorkspaceProjectId = resolveSyncedActiveWorkspaceProjectId(
+    current,
+    incomingSystem,
+  );
   if (!Array.isArray(incomingSystem.workspaceProjects)) {
     return {
       ...incomingSystem,
@@ -202,6 +246,20 @@ function mergeSyncedCustomProviders(
   }) as AppSettings["customProviders"];
 }
 
+function mergeSyncedRemoteSettings(
+  current: AppSettings["remote"],
+  incoming: unknown,
+): AppSettings["remote"] {
+  const source = asObject(incoming);
+  if (!Object.prototype.hasOwnProperty.call(source, "enableWebTerminal")) {
+    return current;
+  }
+  return {
+    ...current,
+    enableWebTerminal: source.enableWebTerminal === true,
+  };
+}
+
 export function buildGatewaySettingsSyncPayload(
   settings: AppSettings,
   options: { includeProviderApiKeyUpdates?: boolean } = {},
@@ -213,6 +271,9 @@ export function buildGatewaySettingsSyncPayload(
     agents: settings.agents,
     hooks: settings.hooks,
     cron: settings.cron,
+    remote: {
+      enableWebTerminal: settings.remote.enableWebTerminal,
+    },
     memory: settings.memory,
     customSettings: syncableCustomSettings(settings.customSettings),
     skills: settings.skills,
@@ -266,6 +327,7 @@ export function applyGatewaySettingsSyncPayload(
     customSettings: {
       ...(customSettings as AppSettings["customSettings"]),
       chatSidebar: current.customSettings.chatSidebar,
+      terminalPanel: current.customSettings.terminalPanel,
     },
     skills: (source.skills as AppSettings["skills"] | undefined) ?? current.skills,
     chatRuntimeControls: Object.prototype.hasOwnProperty.call(source, "chatRuntimeControls")
@@ -274,6 +336,8 @@ export function applyGatewaySettingsSyncPayload(
     selectedModel,
     theme: (source.theme as AppSettings["theme"] | undefined) ?? current.theme,
     locale: (source.locale as AppSettings["locale"] | undefined) ?? current.locale,
-    remote: current.remote,
+    remote: Object.prototype.hasOwnProperty.call(source, "remote")
+      ? mergeSyncedRemoteSettings(current.remote, source.remote)
+      : current.remote,
   });
 }

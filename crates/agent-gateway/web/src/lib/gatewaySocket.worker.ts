@@ -1,6 +1,7 @@
 import type { GatewaySettingsSyncPayload } from "@/lib/settings/sync";
 import type { HistoryMessageRef } from "@/lib/chat/conversationState";
 import type { PendingUploadedFile } from "@/lib/chat/uploadedFiles";
+import type { TerminalEvent, TerminalSession, TerminalSnapshot } from "@/lib/terminal/types";
 
 import { GatewayWebSocketClient } from "./gatewaySocket";
 import type {
@@ -80,6 +81,9 @@ type PortState = {
   connectionID: string;
   client: ManagedClient;
   streams: Map<string, AbortController>;
+  terminalAllProjects: boolean;
+  terminalProjectKeys: Set<string>;
+  terminalSessionIds: Set<string>;
 };
 
 type SharedWorkerScope = {
@@ -114,6 +118,43 @@ function broadcast(client: ManagedClient, payload: Record<string, unknown>) {
     }
     postToPort(port, {
       ...payload,
+      connection_id: state.connectionID,
+    });
+  }
+}
+
+function shouldPostTerminalEventToPort(state: PortState, event: TerminalEvent) {
+  const sessionID = event.sessionId.trim();
+  if (event.kind === "output") {
+    return sessionID !== "" && state.terminalSessionIds.has(sessionID);
+  }
+  const projectPathKey = event.projectPathKey.trim();
+  if (sessionID !== "" || projectPathKey !== "") {
+    return true;
+  }
+  if (state.terminalAllProjects) {
+    return true;
+  }
+  return (
+    (sessionID !== "" && state.terminalSessionIds.has(sessionID)) ||
+    (projectPathKey !== "" && state.terminalProjectKeys.has(projectPathKey))
+  );
+}
+
+function broadcastTerminal(client: ManagedClient, event: TerminalEvent) {
+  for (const port of [...client.ports]) {
+    const state = portStates.get(port);
+    if (!state || state.client !== client) {
+      client.ports.delete(port);
+      continue;
+    }
+    if (!shouldPostTerminalEventToPort(state, event)) {
+      continue;
+    }
+    postToPort(port, {
+      type: "event",
+      event_type: "terminal",
+      payload: event,
       connection_id: state.connectionID,
     });
   }
@@ -187,6 +228,9 @@ function getManagedClient(token: string) {
       payload: event,
     });
   });
+  managed.client.subscribeTerminal((event) => {
+    broadcastTerminal(managed, event);
+  });
 
   clients.set(normalizedToken, managed);
   return managed;
@@ -200,6 +244,9 @@ function connectPort(port: MessagePort, message: Extract<WorkerClientRequest, { 
     connectionID: message.connection_id,
     client,
     streams: new Map(),
+    terminalAllProjects: false,
+    terminalProjectKeys: new Set(),
+    terminalSessionIds: new Set(),
   });
   postToPort(port, {
     type: "ready",
@@ -325,6 +372,59 @@ async function resolveRequest(client: GatewayWebSocketClient, method: string, pa
       return client.cronManage(payload as CronManagePayload);
     case "memory.manage":
       return client.memoryManage(payload as MemoryManagePayload);
+    case "terminal.shell_options":
+      return client.terminalShellOptions();
+    case "terminal.list":
+      return client.listTerminals(String(body.project_path_key ?? ""));
+    case "terminal.create":
+      return client.createTerminal({
+        cwd: String(body.cwd ?? ""),
+        projectPathKey: String(body.project_path_key ?? ""),
+        shell: typeof body.shell === "string" ? body.shell : undefined,
+        title: typeof body.title === "string" ? body.title : undefined,
+        cols: typeof body.cols === "number" ? body.cols : undefined,
+        rows: typeof body.rows === "number" ? body.rows : undefined,
+      });
+    case "terminal.attach":
+      return client.snapshotTerminal(
+        String(body.session_id ?? ""),
+        typeof body.max_bytes === "number" ? body.max_bytes : undefined,
+        String(body.project_path_key ?? ""),
+      );
+    case "terminal.input":
+      await client.inputTerminal(
+        String(body.session_id ?? ""),
+        String(body.data ?? ""),
+        String(body.project_path_key ?? ""),
+      );
+      return undefined;
+    case "terminal.resize":
+      await client.resizeTerminal(
+        String(body.session_id ?? ""),
+        typeof body.cols === "number" ? body.cols : 80,
+        typeof body.rows === "number" ? body.rows : 24,
+        String(body.project_path_key ?? ""),
+      );
+      return undefined;
+    case "terminal.rename":
+      return client.renameTerminal(
+        String(body.session_id ?? ""),
+        String(body.title ?? ""),
+        String(body.project_path_key ?? ""),
+      );
+    case "terminal.close":
+      return client.closeTerminal(
+        String(body.session_id ?? ""),
+        String(body.project_path_key ?? ""),
+      );
+    case "terminal.close_project":
+      return client.closeProjectTerminals(String(body.project_path_key ?? ""));
+    case "terminal.detach":
+      await client.detachTerminal(
+        String(body.session_id ?? ""),
+        String(body.project_path_key ?? ""),
+      );
+      return undefined;
     case "provider.models":
       return client.getProviderModels(
         String(body.type ?? ""),
@@ -333,6 +433,77 @@ async function resolveRequest(client: GatewayWebSocketClient, method: string, pa
       );
     default:
       throw new Error(`Unsupported Gateway SharedWorker method: ${method}`);
+  }
+}
+
+function terminalPayloadProjectPathKey(payload: unknown) {
+  const body = (payload ?? {}) as Record<string, unknown>;
+  return typeof body.project_path_key === "string" ? body.project_path_key.trim() : "";
+}
+
+function terminalPayloadSessionId(payload: unknown) {
+  const body = (payload ?? {}) as Record<string, unknown>;
+  return typeof body.session_id === "string" ? body.session_id.trim() : "";
+}
+
+function terminalResponseSession(payload: unknown): TerminalSession | null {
+  const maybeSnapshot = payload as Partial<TerminalSnapshot> | null | undefined;
+  const session = maybeSnapshot?.session;
+  return session && typeof session.id === "string" ? session : null;
+}
+
+function updatePortTerminalInterest(
+  state: PortState,
+  method: string,
+  requestPayload: unknown,
+  responsePayload: unknown,
+) {
+  if (!method.startsWith("terminal.")) {
+    return;
+  }
+
+  const requestProjectPathKey = terminalPayloadProjectPathKey(requestPayload);
+  const requestSessionId = terminalPayloadSessionId(requestPayload);
+  const responseSession = terminalResponseSession(responsePayload);
+  const responseProjectPathKey = responseSession?.projectPathKey.trim() ?? "";
+  const responseSessionId = responseSession?.id.trim() ?? "";
+  const projectPathKey = requestProjectPathKey || responseProjectPathKey;
+  const sessionId = requestSessionId || responseSessionId;
+
+  switch (method) {
+    case "terminal.list":
+      if (!projectPathKey) {
+        state.terminalAllProjects = true;
+        return;
+      }
+      state.terminalProjectKeys.add(projectPathKey);
+      return;
+    case "terminal.create":
+    case "terminal.close_project":
+      if (projectPathKey) {
+        state.terminalProjectKeys.add(projectPathKey);
+      }
+      return;
+    case "terminal.attach":
+      if (projectPathKey) {
+        state.terminalProjectKeys.add(projectPathKey);
+      }
+      if (sessionId) {
+        state.terminalSessionIds.add(sessionId);
+      }
+      return;
+    case "terminal.detach":
+      if (sessionId) {
+        state.terminalSessionIds.delete(sessionId);
+      } else if (projectPathKey) {
+        state.terminalProjectKeys.delete(projectPathKey);
+      }
+      return;
+    case "terminal.close":
+      if (sessionId) {
+        state.terminalSessionIds.delete(sessionId);
+      }
+      return;
   }
 }
 
@@ -359,6 +530,7 @@ async function handleRequest(
 ) {
   try {
     const payload = await resolveRequest(state.client.client, message.method, message.payload);
+    updatePortTerminalInterest(state, message.method, message.payload, payload);
     respond(port, state.connectionID, message.request_id, payload);
   } catch (error) {
     respond(

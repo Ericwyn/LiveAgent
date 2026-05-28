@@ -140,6 +140,8 @@ pub struct RemoteSettingsPayload {
     pub auto_reconnect: bool,
     #[serde(default = "default_remote_heartbeat_interval")]
     pub heartbeat_interval: u64,
+    #[serde(default)]
+    pub enable_web_terminal: bool,
 }
 
 fn default_remote_grpc_port() -> u16 {
@@ -165,6 +167,7 @@ impl Default for RemoteSettingsPayload {
             agent_id: String::new(),
             auto_reconnect: default_remote_auto_reconnect(),
             heartbeat_interval: default_remote_heartbeat_interval(),
+            enable_web_terminal: false,
         }
     }
 }
@@ -185,6 +188,7 @@ pub(crate) fn normalize_remote_settings_payload(
         agent_id: payload.agent_id.trim().to_string(),
         auto_reconnect: payload.auto_reconnect,
         heartbeat_interval: payload.heartbeat_interval.max(1),
+        enable_web_terminal: payload.enable_web_terminal,
     }
 }
 
@@ -1238,6 +1242,13 @@ pub(crate) fn load_gateway_settings_sync_snapshot(conn: &Connection) -> Result<V
         "memory".to_string(),
         load_memory(conn)?.unwrap_or(Value::Object(Map::new())),
     );
+    let remote = load_remote_settings(conn)?;
+    snapshot.insert(
+        "remote".to_string(),
+        json!({
+            "enableWebTerminal": remote.enable_web_terminal,
+        }),
+    );
     snapshot.insert("customSettings".to_string(), Value::Object(Map::new()));
     snapshot.insert("skills".to_string(), Value::Object(Map::new()));
     snapshot.insert(
@@ -1269,7 +1280,22 @@ pub(crate) fn redact_gateway_settings_sync_payload(payload: Value) -> Result<Val
             redact_provider_credentials(providers)?,
         );
     }
+    if let Some(remote) = snapshot.remove("remote") {
+        snapshot.insert("remote".to_string(), redact_remote_settings(remote)?);
+    }
     Ok(Value::Object(snapshot))
+}
+
+fn redact_remote_settings(remote: Value) -> Result<Value, String> {
+    let remote = expect_object(remote, "remote settings payload")?;
+    let enable_web_terminal = remote
+        .get("enableWebTerminal")
+        .or_else(|| remote.get("enable_web_terminal"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(json!({
+        "enableWebTerminal": enable_web_terminal,
+    }))
 }
 
 pub(crate) fn redact_provider_credentials(providers: Value) -> Result<Value, String> {
@@ -1964,6 +1990,7 @@ mod tests {
             agent_id: " mac-mini ".to_string(),
             auto_reconnect: true,
             heartbeat_interval: 30,
+            enable_web_terminal: false,
         });
 
         assert_eq!(normalized.gateway_url, "https://agent.cnweb.org");

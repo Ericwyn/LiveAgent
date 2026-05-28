@@ -6,11 +6,7 @@ use std::time::{Duration, Instant};
 #[cfg(all(target_os = "macos", not(test)))]
 use std::process::{Child, Command, Stdio};
 #[cfg(all(windows, not(test)))]
-use std::{
-    io,
-    sync::mpsc,
-    thread::JoinHandle,
-};
+use std::{io, sync::mpsc, thread::JoinHandle};
 
 #[derive(Default)]
 pub struct PowerActivityManager {
@@ -131,9 +127,7 @@ fn normalize_ttl(ttl_ms: Option<u64>) -> Duration {
 
 fn prune_expired_requests(state: &mut PowerActivityState) {
     let now = Instant::now();
-    state
-        .requests
-        .retain(|_, request| request.expires_at > now);
+    state.requests.retain(|_, request| request.expires_at > now);
 }
 
 fn spawn_watchdog(state: Arc<Mutex<PowerActivityState>>) -> bool {

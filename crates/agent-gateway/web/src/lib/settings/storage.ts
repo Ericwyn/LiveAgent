@@ -61,11 +61,23 @@ function readLocalUiSettings(): {
     const chatSidebar = (obj.chatSidebar && typeof obj.chatSidebar === "object"
       ? obj.chatSidebar
       : {}) as Record<string, unknown>;
+    const terminalPanel = (obj.terminalPanel && typeof obj.terminalPanel === "object"
+      ? obj.terminalPanel
+      : {}) as Record<string, unknown>;
+    const terminalPanelWidth =
+      typeof terminalPanel.width === "number" || typeof terminalPanel.width === "string"
+        ? Number(terminalPanel.width)
+        : 420;
     return {
       conversationTitleModel: normalizeSelectedModel(obj.conversationTitleModel),
       chatSidebar: {
         projectsCollapsed: chatSidebar.projectsCollapsed === true,
         recentCollapsed: chatSidebar.recentCollapsed === true,
+      },
+      terminalPanel: {
+        width: Number.isFinite(terminalPanelWidth)
+          ? Math.min(720, Math.max(320, Math.floor(terminalPanelWidth)))
+          : 420,
       },
     };
   }

@@ -50,6 +50,18 @@ type websocketChatDetachPayload struct {
 	RequestID string `json:"request_id"`
 }
 
+type websocketTerminalRequestPayload struct {
+	SessionID      string `json:"session_id"`
+	ProjectPathKey string `json:"project_path_key"`
+	Cwd            string `json:"cwd"`
+	Shell          string `json:"shell"`
+	Title          string `json:"title"`
+	Data           string `json:"data"`
+	Cols           *int   `json:"cols"`
+	Rows           *int   `json:"rows"`
+	MaxBytes       *int   `json:"max_bytes"`
+}
+
 type websocketChatState struct {
 	cancel          context.CancelFunc
 	conversationID  string
@@ -71,6 +83,8 @@ type websocketConnection struct {
 	historyEventsCleanup  func()
 	settingsEvents        <-chan *gatewayv1.SettingsSyncEvent
 	settingsEventsCleanup func()
+	terminalEvents        <-chan *gatewayv1.TerminalEvent
+	terminalEventsCleanup func()
 	chatEvents            <-chan *session.ChatBroadcastEvent
 	chatEventsCleanup     func()
 	heartbeatOnce         sync.Once
@@ -81,6 +95,10 @@ type websocketConnection struct {
 
 	activeChatAttachmentsMu sync.Mutex
 	activeChatAttachments   map[string]context.CancelFunc
+
+	terminalInterestMu           sync.RWMutex
+	terminalProjectSubscriptions map[string]struct{}
+	terminalSessionSubscriptions map[string]struct{}
 }
 
 const recentActiveChatRetention = 5 * time.Second
@@ -95,13 +113,15 @@ func NewWebSocketServer(cfg *config.Config, sm *session.Manager) http.Handler {
 		},
 		Handler: websocket.Handler(func(conn *websocket.Conn) {
 			state := &websocketConnection{
-				cfg:                   cfg,
-				sm:                    sm,
-				conn:                  conn,
-				done:                  make(chan struct{}),
-				activeChats:           make(map[string]*websocketChatState),
-				recentChats:           make(map[string]time.Time),
-				activeChatAttachments: make(map[string]context.CancelFunc),
+				cfg:                          cfg,
+				sm:                           sm,
+				conn:                         conn,
+				done:                         make(chan struct{}),
+				activeChats:                  make(map[string]*websocketChatState),
+				recentChats:                  make(map[string]time.Time),
+				activeChatAttachments:        make(map[string]context.CancelFunc),
+				terminalProjectSubscriptions: make(map[string]struct{}),
+				terminalSessionSubscriptions: make(map[string]struct{}),
 			}
 			defer state.close()
 			state.serve()
@@ -159,6 +179,10 @@ func (c *websocketConnection) close() {
 			c.settingsEventsCleanup()
 			c.settingsEventsCleanup = nil
 		}
+		if c.terminalEventsCleanup != nil {
+			c.terminalEventsCleanup()
+			c.terminalEventsCleanup = nil
+		}
 		if c.chatEventsCleanup != nil {
 			c.chatEventsCleanup()
 			c.chatEventsCleanup = nil
@@ -193,6 +217,7 @@ func (c *websocketConnection) handleAuth(req websocketRequest) {
 	c.authorized = true
 	c.startHistorySyncForwarder()
 	c.startSettingsSyncForwarder()
+	c.startTerminalEventForwarder()
 	c.startChatEventForwarder()
 	c.startWebSocketHeartbeat()
 	_ = c.writeResponse(req.ID, map[string]any{"ok": true})
@@ -286,6 +311,97 @@ func (c *websocketConnection) startSettingsSyncForwarder() {
 	}()
 }
 
+func (c *websocketConnection) startTerminalEventForwarder() {
+	if c.terminalEvents != nil || c.terminalEventsCleanup != nil {
+		return
+	}
+
+	terminalEvents, cleanup := c.sm.SubscribeTerminalEvents()
+	c.terminalEvents = terminalEvents
+	c.terminalEventsCleanup = cleanup
+
+	go func() {
+		for {
+			select {
+			case <-c.done:
+				return
+			case event, ok := <-terminalEvents:
+				if !ok {
+					return
+				}
+				if !c.sm.WebTerminalEnabled() {
+					continue
+				}
+				if !c.shouldForwardTerminalEvent(event) {
+					continue
+				}
+				if err := c.writeTerminalEvent(websocketTerminalEventPayload(event)); err != nil {
+					c.close()
+					return
+				}
+			}
+		}
+	}()
+}
+
+func (c *websocketConnection) rememberTerminalProject(projectPathKey string) {
+	projectPathKey = strings.TrimSpace(projectPathKey)
+	if projectPathKey == "" {
+		return
+	}
+	c.terminalInterestMu.Lock()
+	c.terminalProjectSubscriptions[projectPathKey] = struct{}{}
+	c.terminalInterestMu.Unlock()
+}
+
+func (c *websocketConnection) rememberTerminalSession(sessionID string, projectPathKey string) {
+	sessionID = strings.TrimSpace(sessionID)
+	projectPathKey = strings.TrimSpace(projectPathKey)
+	if sessionID == "" && projectPathKey == "" {
+		return
+	}
+	c.terminalInterestMu.Lock()
+	if sessionID != "" {
+		c.terminalSessionSubscriptions[sessionID] = struct{}{}
+	}
+	if projectPathKey != "" {
+		c.terminalProjectSubscriptions[projectPathKey] = struct{}{}
+	}
+	c.terminalInterestMu.Unlock()
+}
+
+func (c *websocketConnection) forgetTerminalInterest(sessionID string, projectPathKey string) {
+	sessionID = strings.TrimSpace(sessionID)
+	projectPathKey = strings.TrimSpace(projectPathKey)
+	c.terminalInterestMu.Lock()
+	if sessionID != "" {
+		delete(c.terminalSessionSubscriptions, sessionID)
+	}
+	if sessionID == "" && projectPathKey != "" {
+		delete(c.terminalProjectSubscriptions, projectPathKey)
+	}
+	c.terminalInterestMu.Unlock()
+}
+
+func (c *websocketConnection) shouldForwardTerminalEvent(event *gatewayv1.TerminalEvent) bool {
+	if event == nil {
+		return false
+	}
+	sessionID := strings.TrimSpace(event.GetSessionId())
+	projectPathKey := strings.TrimSpace(event.GetProjectPathKey())
+	kind := strings.TrimSpace(event.GetKind())
+
+	if kind != "output" {
+		return sessionID != "" || projectPathKey != ""
+	}
+
+	c.terminalInterestMu.RLock()
+	_, sessionSubscribed := c.terminalSessionSubscriptions[sessionID]
+	c.terminalInterestMu.RUnlock()
+
+	return sessionID != "" && sessionSubscribed
+}
+
 func (c *websocketConnection) startWebSocketHeartbeat() {
 	c.heartbeatOnce.Do(func() {
 		period := c.cfg.WebSocketHeartbeatPeriod
@@ -375,6 +491,10 @@ func (c *websocketConnection) dispatch(req websocketRequest) {
 		c.handleUploadedImagePreview(req)
 	case "memory.manage":
 		c.handleMemoryManage(req)
+	case "terminal.shell_options", "terminal.list", "terminal.create", "terminal.attach", "terminal.input", "terminal.resize", "terminal.rename", "terminal.close", "terminal.close_project":
+		c.handleTerminalRequest(req)
+	case "terminal.detach":
+		c.handleTerminalDetach(req)
 	case "cron.manage":
 		c.handleCronManage(req)
 	case "provider.models":
@@ -1543,6 +1663,110 @@ func (c *websocketConnection) handleMemoryManage(req websocketRequest) {
 	_ = c.writeResponse(req.ID, payloadValue)
 }
 
+func terminalActionFromRequestType(requestType string) string {
+	return strings.TrimPrefix(strings.TrimSpace(requestType), "terminal.")
+}
+
+func (c *websocketConnection) handleTerminalRequest(req websocketRequest) {
+	action := terminalActionFromRequestType(req.Type)
+	if !c.sm.WebTerminalEnabled() {
+		_ = c.writeError(req.ID, "web terminal is disabled in desktop Remote settings")
+		return
+	}
+
+	var body websocketTerminalRequestPayload
+	if err := decodeWebSocketPayload(req.Payload, &body); err != nil {
+		_ = c.writeError(req.ID, "invalid "+req.Type+" payload")
+		return
+	}
+
+	cols, err := websocketOptionalUint32(body.Cols, "cols")
+	if err != nil {
+		_ = c.writeError(req.ID, err.Error())
+		return
+	}
+	rows, err := websocketOptionalUint32(body.Rows, "rows")
+	if err != nil {
+		_ = c.writeError(req.ID, err.Error())
+		return
+	}
+	maxBytes, err := websocketOptionalUint32(body.MaxBytes, "max_bytes")
+	if err != nil {
+		_ = c.writeError(req.ID, err.Error())
+		return
+	}
+
+	response, err := c.awaitAgentResponse(req.ID, &gatewayv1.GatewayEnvelope{
+		RequestId: req.ID,
+		Timestamp: time.Now().Unix(),
+		Payload: &gatewayv1.GatewayEnvelope_TerminalRequest{
+			TerminalRequest: &gatewayv1.TerminalRequest{
+				Action:         action,
+				SessionId:      strings.TrimSpace(body.SessionID),
+				ProjectPathKey: strings.TrimSpace(body.ProjectPathKey),
+				Cwd:            strings.TrimSpace(body.Cwd),
+				Shell:          strings.TrimSpace(body.Shell),
+				Title:          strings.TrimSpace(body.Title),
+				Data:           body.Data,
+				Cols:           cols,
+				Rows:           rows,
+				MaxBytes:       maxBytes,
+			},
+		},
+	})
+	if err != nil {
+		_ = c.writeError(req.ID, websocketErrorMessage(err))
+		return
+	}
+	if errResp := response.GetError(); errResp != nil {
+		_ = c.writeError(req.ID, errResp.GetMessage())
+		return
+	}
+
+	resp := response.GetTerminalResponse()
+	if resp == nil {
+		_ = c.writeError(req.ID, "unexpected agent response")
+		return
+	}
+	c.rememberTerminalInterest(action, body, resp)
+
+	_ = c.writeResponse(req.ID, websocketTerminalResponsePayload(resp))
+}
+
+func (c *websocketConnection) rememberTerminalInterest(action string, body websocketTerminalRequestPayload, resp *gatewayv1.TerminalResponse) {
+	projectPathKey := strings.TrimSpace(body.ProjectPathKey)
+	sessionID := strings.TrimSpace(body.SessionID)
+	if respSession := resp.GetSession(); respSession != nil {
+		if projectPathKey == "" {
+			projectPathKey = strings.TrimSpace(respSession.GetProjectPathKey())
+		}
+		if sessionID == "" {
+			sessionID = strings.TrimSpace(respSession.GetId())
+		}
+	}
+
+	switch action {
+	case "list", "create", "close_project":
+		c.rememberTerminalProject(projectPathKey)
+	case "attach", "snapshot":
+		c.rememberTerminalSession(sessionID, projectPathKey)
+	}
+}
+
+func (c *websocketConnection) handleTerminalDetach(req websocketRequest) {
+	if !c.sm.WebTerminalEnabled() {
+		_ = c.writeError(req.ID, "web terminal is disabled in desktop Remote settings")
+		return
+	}
+	var body websocketTerminalRequestPayload
+	if err := decodeWebSocketPayload(req.Payload, &body); err != nil {
+		_ = c.writeError(req.ID, "invalid terminal.detach payload")
+		return
+	}
+	c.forgetTerminalInterest(body.SessionID, body.ProjectPathKey)
+	_ = c.writeResponse(req.ID, map[string]any{"action": "detach"})
+}
+
 func (c *websocketConnection) handleCronManage(req websocketRequest) {
 	var body handler.CronManageRequestBody
 	if err := decodeWebSocketPayload(req.Payload, &body); err != nil {
@@ -1644,6 +1868,7 @@ func (c *websocketConnection) handleSettingsGet(req websocketRequest) {
 		_ = c.writeError(req.ID, err.Error())
 		return
 	}
+	c.sm.ApplySettingsJSON(settingsResp.GetSettingsJson())
 
 	_ = c.writeResponse(req.ID, payload)
 }
@@ -1677,6 +1902,9 @@ func (c *websocketConnection) handleSettingsUpdate(req websocketRequest) {
 	if settingsResp == nil {
 		_ = c.writeError(req.ID, "unexpected agent response")
 		return
+	}
+	if settingsResp.GetAccepted() {
+		c.sm.ApplySettingsJSONPreservingRemote(payloadJSON)
 	}
 
 	_ = c.writeResponse(req.ID, map[string]any{
@@ -2017,6 +2245,13 @@ func (c *websocketConnection) writeSettingsEvent(payload any) error {
 	})
 }
 
+func (c *websocketConnection) writeTerminalEvent(payload any) error {
+	return c.writeEnvelope(websocketEnvelope{
+		Type:    "terminal.event",
+		Payload: payload,
+	})
+}
+
 func (c *websocketConnection) writeEnvelope(envelope websocketEnvelope) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -2114,6 +2349,85 @@ func websocketSettingsJSONPayload(raw string) (map[string]any, error) {
 		return map[string]any{}, nil
 	}
 	return payload, nil
+}
+
+func websocketTerminalSessionPayload(session *gatewayv1.TerminalSession) map[string]any {
+	if session == nil {
+		return nil
+	}
+	payload := map[string]any{
+		"id":               strings.TrimSpace(session.GetId()),
+		"project_path_key": strings.TrimSpace(session.GetProjectPathKey()),
+		"cwd":              strings.TrimSpace(session.GetCwd()),
+		"shell":            strings.TrimSpace(session.GetShell()),
+		"title":            strings.TrimSpace(session.GetTitle()),
+		"pid":              session.GetPid(),
+		"cols":             session.GetCols(),
+		"rows":             session.GetRows(),
+		"created_at":       session.GetCreatedAt(),
+		"updated_at":       session.GetUpdatedAt(),
+		"finished_at":      session.GetFinishedAt(),
+		"exit_code":        session.GetExitCode(),
+		"running":          session.GetRunning(),
+	}
+	if session.GetPid() == 0 {
+		payload["pid"] = nil
+	}
+	if session.GetFinishedAt() == 0 {
+		payload["finished_at"] = nil
+	}
+	return payload
+}
+
+func websocketTerminalShellOptionPayload(option *gatewayv1.TerminalShellOption) map[string]any {
+	if option == nil {
+		return nil
+	}
+	return map[string]any{
+		"id":      strings.TrimSpace(option.GetId()),
+		"label":   strings.TrimSpace(option.GetLabel()),
+		"command": strings.TrimSpace(option.GetCommand()),
+	}
+}
+
+func websocketTerminalResponsePayload(resp *gatewayv1.TerminalResponse) map[string]any {
+	sessions := make([]map[string]any, 0, len(resp.GetSessions()))
+	for _, session := range resp.GetSessions() {
+		if payload := websocketTerminalSessionPayload(session); payload != nil {
+			sessions = append(sessions, payload)
+		}
+	}
+	shellOptions := make([]map[string]any, 0, len(resp.GetShellOptions()))
+	for _, option := range resp.GetShellOptions() {
+		if payload := websocketTerminalShellOptionPayload(option); payload != nil {
+			shellOptions = append(shellOptions, payload)
+		}
+	}
+	payload := map[string]any{
+		"action":        strings.TrimSpace(resp.GetAction()),
+		"sessions":      sessions,
+		"output":        resp.GetOutput(),
+		"truncated":     resp.GetTruncated(),
+		"shell_options": shellOptions,
+		"default_shell": resp.GetDefaultShell(),
+	}
+	if session := websocketTerminalSessionPayload(resp.GetSession()); session != nil {
+		payload["session"] = session
+	}
+	return payload
+}
+
+func websocketTerminalEventPayload(event *gatewayv1.TerminalEvent) map[string]any {
+	payload := map[string]any{
+		"kind":             strings.TrimSpace(event.GetKind()),
+		"session_id":       strings.TrimSpace(event.GetSessionId()),
+		"project_path_key": strings.TrimSpace(event.GetProjectPathKey()),
+		"data":             event.GetData(),
+	}
+	if session := websocketTerminalSessionPayload(event.GetSession()); session != nil {
+		payload["session"] = session
+	}
+	return payload
 }
 
 func websocketMemoryResultPayload(raw string) (any, error) {

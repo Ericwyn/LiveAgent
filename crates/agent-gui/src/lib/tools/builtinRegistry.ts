@@ -33,6 +33,7 @@ import { createMemoryTools } from "./memoryTools";
 import { createShellTools } from "./shellTools";
 import type { SkillAccessPolicy } from "./skillAccessPolicy";
 import { createSkillTools } from "./skillTools";
+import { createTerminalTools } from "./terminalTools";
 
 export type BuiltinToolRegistry = {
   tools: BuiltinToolBundle["tools"];
@@ -216,6 +217,13 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
       workdir: params.workdir,
       mode: params.memoryToolMode ?? "rw",
     }),
+    ...(params.runtimeScope === "chat"
+      ? [
+          createTerminalTools({
+            workdir: params.workdir,
+          }),
+        ]
+      : []),
   ];
 
   if (params.enabledMcpServerIds.length > 0) {

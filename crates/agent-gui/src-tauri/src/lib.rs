@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::Emitter;
 use tauri::Manager;
 use tauri::WindowEvent;
 
@@ -16,6 +17,13 @@ const TRAY_SHOW_ID: &str = "tray-show";
 const TRAY_QUIT_ID: &str = "tray-quit";
 const TRAY_DOUBLE_CLICK_INTERVAL_MS: u64 = 500;
 const TRAY_SHOW_MENU_ON_LEFT_CLICK: bool = !cfg!(target_os = "windows");
+const TERMINAL_EXIT_REQUESTED_EVENT: &str = "terminal:exit-requested";
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalExitRequestedEvent {
+    running_count: usize,
+}
 
 pub fn app_version() -> &'static str {
     env!("LIVEAGENT_APP_VERSION")
@@ -108,6 +116,7 @@ macro_rules! app_invoke_handler {
             commands::update::app_update_check,
             commands::update::app_update_install,
             commands::update::app_restart,
+            commands::app::app_confirmed_exit,
             // Hooks
             commands::hook::hook_run_script,
             commands::hook::hook_run_http_requests,
@@ -124,6 +133,16 @@ macro_rules! app_invoke_handler {
             commands::process::managed_process_status,
             commands::process::managed_process_stop,
             commands::process::managed_process_read_log,
+            commands::terminal::terminal_shell_options,
+            commands::terminal::terminal_list,
+            commands::terminal::terminal_create,
+            commands::terminal::terminal_snapshot,
+            commands::terminal::terminal_input,
+            commands::terminal::terminal_resize,
+            commands::terminal::terminal_rename,
+            commands::terminal::terminal_close,
+            commands::terminal::terminal_close_project,
+            commands::terminal::terminal_read_tail,
             commands::system::system_pick_folder,
             commands::system::system_create_project_folder,
             commands::system::system_import_pasted_texts,
@@ -176,7 +195,11 @@ fn record_tray_left_click(last_click_at: &Mutex<Option<Instant>>) -> bool {
     is_double_click
 }
 
-fn configure_system_tray(app: &tauri::App, allow_exit: Arc<AtomicBool>) -> tauri::Result<()> {
+fn configure_system_tray(
+    app: &tauri::App,
+    allow_exit: Arc<AtomicBool>,
+    terminal_registry: Arc<runtime::terminal::TerminalSessionRegistry>,
+) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, TRAY_SHOW_ID, "显示", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
@@ -193,8 +216,23 @@ fn configure_system_tray(app: &tauri::App, allow_exit: Arc<AtomicBool>) -> tauri
                 }
             }
             TRAY_QUIT_ID => {
-                allow_exit.store(true, Ordering::SeqCst);
-                app.exit(0);
+                let running_count = terminal_registry.running_session_count();
+                if running_count > 0 {
+                    if let Err(error) = show_main_window(app) {
+                        eprintln!(
+                            "failed to show LiveAgent window before terminal exit confirm: {error}"
+                        );
+                    }
+                    if let Err(error) = app.emit(
+                        TERMINAL_EXIT_REQUESTED_EVENT,
+                        TerminalExitRequestedEvent { running_count },
+                    ) {
+                        eprintln!("failed to request terminal exit confirmation: {error}");
+                    }
+                } else {
+                    allow_exit.store(true, Ordering::SeqCst);
+                    app.exit(0);
+                }
             }
             _ => {}
         })
@@ -270,6 +308,7 @@ pub fn run() {
         services::memory::MemoryStore::open().expect("failed to initialize LiveAgent memory store"),
     );
     let power_activity = Arc::new(services::power_activity::PowerActivityManager::default());
+    let terminal_registry = Arc::new(runtime::terminal::TerminalSessionRegistry::default());
     let allow_exit = Arc::new(AtomicBool::new(false));
 
     let app = tauri::Builder::default()
@@ -283,12 +322,19 @@ pub fn run() {
         .manage(Arc::new(
             runtime::managed_process::ManagedProcessRegistry::default(),
         ))
+        .manage(Arc::clone(&terminal_registry))
+        .manage(Arc::clone(&allow_exit))
         .manage(Arc::clone(&cron_manager))
         .setup({
             let allow_exit = Arc::clone(&allow_exit);
+            let terminal_registry = Arc::clone(&terminal_registry);
             move |app| {
                 commands::history_db::initialize_history_db()?;
-                configure_system_tray(app, Arc::clone(&allow_exit))?;
+                configure_system_tray(
+                    app,
+                    Arc::clone(&allow_exit),
+                    Arc::clone(&terminal_registry),
+                )?;
                 #[cfg(target_os = "windows")]
                 configure_windows_window_chrome(app)?;
                 app.manage(services::proxy::start_proxy_server()?);
@@ -296,12 +342,14 @@ pub fn run() {
                     eprintln!("failed to seed builtin skills: {error}");
                 }
                 cron_manager.attach_app_handle(app.handle().clone())?;
+                terminal_registry.attach_app_handle(app.handle().clone());
                 Arc::clone(&cron_manager).start();
                 cron_manager.request_reload();
                 let gateway_controller = Arc::new(services::gateway::GatewayController::new(
                     app.handle().clone(),
                     Arc::clone(&cron_manager),
                     Arc::clone(&memory_store),
+                    Arc::clone(&terminal_registry),
                 ));
                 cron_manager
                     .attach_settings_sync_controller(Arc::downgrade(&gateway_controller))?;
@@ -345,6 +393,20 @@ pub fn run() {
         }
         tauri::RunEvent::ExitRequested { api, .. } => {
             if !allow_exit.load(Ordering::SeqCst) {
+                let running_count = terminal_registry.running_session_count();
+                if running_count > 0 {
+                    if let Err(error) = show_main_window(_app) {
+                        eprintln!(
+                            "failed to show LiveAgent window before terminal exit confirm: {error}"
+                        );
+                    }
+                    if let Err(error) = _app.emit(
+                        TERMINAL_EXIT_REQUESTED_EVENT,
+                        TerminalExitRequestedEvent { running_count },
+                    ) {
+                        eprintln!("failed to request terminal exit confirmation: {error}");
+                    }
+                }
                 api.prevent_exit();
             } else {
                 power_activity.clear_all();

@@ -1,6 +1,12 @@
 import type { GatewaySettingsSyncPayload } from "@/lib/settings/sync";
 import type { HistoryMessageRef } from "@/lib/chat/conversationState";
 import type { PendingUploadedFile } from "@/lib/chat/uploadedFiles";
+import type {
+  TerminalEvent,
+  TerminalSession,
+  TerminalShellOptions,
+  TerminalSnapshot,
+} from "@/lib/terminal/types";
 
 import type {
   AgentStatus,
@@ -32,6 +38,7 @@ type StatusListener = (status: AgentStatus | null, error: string | null) => void
 type HistoryListener = (event: GatewayHistoryEvent) => void;
 type ConversationListener = (event: ChatEvent) => void;
 type SettingsListener = (event: GatewaySettingsSyncPayload) => void;
+type TerminalListener = (event: TerminalEvent) => void;
 
 type PendingRequest = {
   resolve: (value: any) => void;
@@ -112,6 +119,50 @@ type SkillTextResponse = {
 };
 
 type SkillManagePayload = Record<string, unknown>;
+
+type RawTerminalSession = {
+  id?: string;
+  projectPathKey?: string;
+  project_path_key?: string;
+  cwd?: string;
+  shell?: string;
+  title?: string;
+  pid?: number | null;
+  cols?: number;
+  rows?: number;
+  createdAt?: number;
+  created_at?: number;
+  updatedAt?: number;
+  updated_at?: number;
+  finishedAt?: number | null;
+  finished_at?: number | null;
+  exitCode?: number | null;
+  exit_code?: number | null;
+  running?: boolean;
+};
+
+type RawTerminalResponse = {
+  action?: string;
+  sessions?: RawTerminalSession[];
+  session?: RawTerminalSession;
+  output?: string;
+  truncated?: boolean;
+  options?: Array<{ id?: string; label?: string; command?: string }>;
+  shellOptions?: Array<{ id?: string; label?: string; command?: string }>;
+  shell_options?: Array<{ id?: string; label?: string; command?: string }>;
+  defaultShell?: string;
+  default_shell?: string;
+};
+
+type RawTerminalEvent = {
+  kind?: string;
+  sessionId?: string;
+  session_id?: string;
+  projectPathKey?: string;
+  project_path_key?: string;
+  session?: RawTerminalSession;
+  data?: string | null;
+};
 
 class AsyncEventQueue<T> implements AsyncIterable<T>, AsyncIterator<T> {
   private values: T[] = [];
@@ -267,6 +318,61 @@ function normalizePositiveInteger(value: number, fallback: number) {
   return normalized > 0 ? normalized : fallback;
 }
 
+function normalizeTerminalSession(input: RawTerminalSession): TerminalSession {
+  return {
+    id: input.id ?? "",
+    projectPathKey: input.projectPathKey ?? input.project_path_key ?? "",
+    cwd: input.cwd ?? "",
+    shell: input.shell ?? "",
+    title: input.title ?? "Terminal",
+    pid: input.pid ?? null,
+    cols: Number(input.cols ?? 80),
+    rows: Number(input.rows ?? 24),
+    createdAt: Number(input.createdAt ?? input.created_at ?? 0),
+    updatedAt: Number(input.updatedAt ?? input.updated_at ?? 0),
+    finishedAt: input.finishedAt ?? input.finished_at ?? null,
+    exitCode: input.exitCode ?? input.exit_code ?? null,
+    running: input.running === true,
+  };
+}
+
+function normalizeTerminalSnapshot(input: RawTerminalResponse): TerminalSnapshot {
+  if (!input.session) {
+    throw new Error("Terminal response did not include a session");
+  }
+  return {
+    session: normalizeTerminalSession(input.session),
+    output: input.output ?? "",
+    truncated: input.truncated === true,
+  };
+}
+
+function normalizeTerminalShellOptions(input: RawTerminalResponse): TerminalShellOptions {
+  const options = (input.options ?? input.shellOptions ?? input.shell_options ?? [])
+    .map((option) => ({
+      id: option.id?.trim() ?? "",
+      label: option.label?.trim() ?? "",
+      command: option.command?.trim() ?? "",
+    }))
+    .filter((option) => option.id && option.label);
+  return {
+    options,
+    defaultShell: input.defaultShell ?? input.default_shell ?? options[0]?.id ?? "default",
+  };
+}
+
+function normalizeTerminalEvent(input: RawTerminalEvent): TerminalEvent | null {
+  if (!input.session) return null;
+  const session = normalizeTerminalSession(input.session);
+  return {
+    kind: input.kind ?? "",
+    sessionId: input.sessionId ?? input.session_id ?? session.id,
+    projectPathKey: input.projectPathKey ?? input.project_path_key ?? session.projectPathKey,
+    session,
+    data: input.data ?? undefined,
+  };
+}
+
 function normalizeHistoryListPage(page: number) {
   return normalizePositiveInteger(page, DEFAULT_HISTORY_LIST_PAGE);
 }
@@ -321,6 +427,7 @@ export class GatewayWebSocketClient {
   private historyListeners = new Set<HistoryListener>();
   private conversationListeners = new Set<ConversationListener>();
   private settingsListeners = new Set<SettingsListener>();
+  private terminalListeners = new Set<TerminalListener>();
   private statusPollTimer: number | null = null;
   private lastStatus: AgentStatus | null = null;
   private lastStatusError: string | null = null;
@@ -378,6 +485,13 @@ export class GatewayWebSocketClient {
     this.settingsListeners.add(listener);
     return () => {
       this.settingsListeners.delete(listener);
+    };
+  }
+
+  subscribeTerminal(listener: TerminalListener): () => void {
+    this.terminalListeners.add(listener);
+    return () => {
+      this.terminalListeners.delete(listener);
     };
   }
 
@@ -561,6 +675,118 @@ export class GatewayWebSocketClient {
       return this.requestWithRecovery<T>("memory.manage", payload);
     }
     return this.request<T>("memory.manage", payload);
+  }
+
+  async terminalShellOptions(): Promise<TerminalShellOptions> {
+    return normalizeTerminalShellOptions(
+      await this.requestWithRecovery<RawTerminalResponse>("terminal.shell_options", {}),
+    );
+  }
+
+  async listTerminals(projectPathKey?: string): Promise<TerminalSession[]> {
+    const projectKey = projectPathKey?.trim() ?? "";
+    const response = await this.requestWithRecovery<RawTerminalResponse>(
+      "terminal.list",
+      projectKey ? { project_path_key: projectKey } : {},
+    );
+    return (response.sessions ?? []).map(normalizeTerminalSession);
+  }
+
+  async createTerminal(params: {
+    cwd: string;
+    projectPathKey: string;
+    shell?: string;
+    title?: string;
+    cols?: number;
+    rows?: number;
+  }): Promise<TerminalSnapshot> {
+    return normalizeTerminalSnapshot(
+      await this.request<RawTerminalResponse>("terminal.create", {
+        cwd: params.cwd,
+        project_path_key: params.projectPathKey,
+        shell: params.shell,
+        title: params.title,
+        cols: params.cols,
+        rows: params.rows,
+      }),
+    );
+  }
+
+  async snapshotTerminal(
+    sessionId: string,
+    maxBytes?: number,
+    projectPathKey?: string,
+  ): Promise<TerminalSnapshot> {
+    return normalizeTerminalSnapshot(
+      await this.requestWithRecovery<RawTerminalResponse>("terminal.attach", {
+        session_id: sessionId,
+        project_path_key: projectPathKey,
+        max_bytes: maxBytes,
+      }),
+    );
+  }
+
+  async inputTerminal(sessionId: string, data: string, projectPathKey?: string): Promise<void> {
+    await this.request("terminal.input", {
+      session_id: sessionId,
+      project_path_key: projectPathKey,
+      data,
+    });
+  }
+
+  async resizeTerminal(
+    sessionId: string,
+    cols: number,
+    rows: number,
+    projectPathKey?: string,
+  ): Promise<void> {
+    await this.request("terminal.resize", {
+      session_id: sessionId,
+      project_path_key: projectPathKey,
+      cols,
+      rows,
+    });
+  }
+
+  async renameTerminal(
+    sessionId: string,
+    title: string,
+    projectPathKey?: string,
+  ): Promise<TerminalSession> {
+    const response = await this.request<RawTerminalResponse>("terminal.rename", {
+      session_id: sessionId,
+      project_path_key: projectPathKey,
+      title,
+    });
+    if (!response.session) {
+      throw new Error("Terminal response did not include a session");
+    }
+    return normalizeTerminalSession(response.session);
+  }
+
+  async closeTerminal(sessionId: string, projectPathKey?: string): Promise<TerminalSession> {
+    const response = await this.request<RawTerminalResponse>("terminal.close", {
+      session_id: sessionId,
+      project_path_key: projectPathKey,
+    });
+    if (!response.session) {
+      throw new Error("Terminal response did not include a session");
+    }
+    return normalizeTerminalSession(response.session);
+  }
+
+  async closeProjectTerminals(projectPathKey: string): Promise<TerminalSession[]> {
+    const response = await this.request<RawTerminalResponse>("terminal.close_project", {
+      project_path_key: projectPathKey,
+    });
+    return (response.sessions ?? []).map(normalizeTerminalSession);
+  }
+
+  async detachTerminal(sessionId: string, projectPathKey?: string): Promise<void> {
+    await this.request("terminal.detach", {
+      session_id: sessionId,
+      project_path_key: projectPathKey,
+    });
   }
 
   async listHistory(
@@ -870,7 +1096,8 @@ export class GatewayWebSocketClient {
         this.statusListeners.size > 0 ||
         this.historyListeners.size > 0 ||
         this.conversationListeners.size > 0 ||
-        this.settingsListeners.size > 0
+        this.settingsListeners.size > 0 ||
+        this.terminalListeners.size > 0
       )
     );
   }
@@ -984,6 +1211,12 @@ export class GatewayWebSocketClient {
 
   private emitSettings(event: GatewaySettingsSyncPayload) {
     for (const listener of this.settingsListeners) {
+      listener(event);
+    }
+  }
+
+  private emitTerminal(event: TerminalEvent) {
+    for (const listener of this.terminalListeners) {
       listener(event);
     }
   }
@@ -1274,6 +1507,14 @@ export class GatewayWebSocketClient {
       return;
     }
 
+    if (envelope.type === "terminal.event") {
+      const event = normalizeTerminalEvent(envelope.payload as RawTerminalEvent);
+      if (event) {
+        this.emitTerminal(event);
+      }
+      return;
+    }
+
     if (envelope.type === "chat.event" && requestId) {
       const stream = this.chatStreams.get(requestId);
       if (!stream) {
@@ -1431,12 +1672,13 @@ export class GatewayWebSocketClient {
   }
 }
 
-type GatewayWebSocketClientLike = {
+export type GatewayWebSocketClientLike = {
   getStatus(): Promise<AgentStatus>;
   subscribeStatus(listener: StatusListener): () => void;
   subscribeHistory(listener: HistoryListener): () => void;
   subscribeConversation(listener: ConversationListener): () => void;
   subscribeSettings(listener: SettingsListener): () => void;
+  subscribeTerminal(listener: TerminalListener): () => void;
   chat(
     message: string,
     conversationId?: string,
@@ -1451,6 +1693,36 @@ type GatewayWebSocketClientLike = {
   cancelChat(conversationId: string): Promise<void>;
   cronManage(payload: CronManagePayload): Promise<CronManageResponse>;
   memoryManage<T = unknown>(payload: MemoryManagePayload): Promise<T>;
+  terminalShellOptions(): Promise<TerminalShellOptions>;
+  listTerminals(projectPathKey?: string): Promise<TerminalSession[]>;
+  createTerminal(params: {
+    cwd: string;
+    projectPathKey: string;
+    shell?: string;
+    title?: string;
+    cols?: number;
+    rows?: number;
+  }): Promise<TerminalSnapshot>;
+  snapshotTerminal(
+    sessionId: string,
+    maxBytes?: number,
+    projectPathKey?: string,
+  ): Promise<TerminalSnapshot>;
+  inputTerminal(sessionId: string, data: string, projectPathKey?: string): Promise<void>;
+  resizeTerminal(
+    sessionId: string,
+    cols: number,
+    rows: number,
+    projectPathKey?: string,
+  ): Promise<void>;
+  renameTerminal(
+    sessionId: string,
+    title: string,
+    projectPathKey?: string,
+  ): Promise<TerminalSession>;
+  closeTerminal(sessionId: string, projectPathKey?: string): Promise<TerminalSession>;
+  closeProjectTerminals(projectPathKey: string): Promise<TerminalSession[]>;
+  detachTerminal(sessionId: string, projectPathKey?: string): Promise<void>;
   listHistory(page: number, pageSize: number, filter?: HistoryListFilter): Promise<HistoryList>;
   listHistoryWorkdirs(): Promise<HistoryWorkdirsResponse>;
   listSharedHistory(page: number, pageSize: number): Promise<HistoryList>;
@@ -1516,7 +1788,7 @@ type SharedWorkerClientResponseMessage = {
 type SharedWorkerClientEventMessage = {
   type: "event";
   connection_id: string;
-  event_type: "status" | "history" | "conversation" | "settings";
+  event_type: "status" | "history" | "conversation" | "settings" | "terminal";
   payload: unknown;
 };
 
@@ -1630,6 +1902,7 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
   private historyListeners = new Set<HistoryListener>();
   private conversationListeners = new Set<ConversationListener>();
   private settingsListeners = new Set<SettingsListener>();
+  private terminalListeners = new Set<TerminalListener>();
   private lastStatus: AgentStatus | null = null;
   private lastStatusError: string | null = null;
 
@@ -1706,6 +1979,13 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
     this.settingsListeners.add(listener);
     return () => {
       this.settingsListeners.delete(listener);
+    };
+  }
+
+  subscribeTerminal(listener: TerminalListener): () => void {
+    this.terminalListeners.add(listener);
+    return () => {
+      this.terminalListeners.delete(listener);
     };
   }
 
@@ -1865,6 +2145,118 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
 
   async memoryManage<T = unknown>(payload: MemoryManagePayload): Promise<T> {
     return this.request<T>("memory.manage", payload);
+  }
+
+  async terminalShellOptions(): Promise<TerminalShellOptions> {
+    return normalizeTerminalShellOptions(
+      await this.request<RawTerminalResponse>("terminal.shell_options", {}),
+    );
+  }
+
+  async listTerminals(projectPathKey?: string): Promise<TerminalSession[]> {
+    const projectKey = projectPathKey?.trim() ?? "";
+    const response = await this.request<RawTerminalResponse>(
+      "terminal.list",
+      projectKey ? { project_path_key: projectKey } : {},
+    );
+    return (response.sessions ?? []).map(normalizeTerminalSession);
+  }
+
+  async createTerminal(params: {
+    cwd: string;
+    projectPathKey: string;
+    shell?: string;
+    title?: string;
+    cols?: number;
+    rows?: number;
+  }): Promise<TerminalSnapshot> {
+    return normalizeTerminalSnapshot(
+      await this.request<RawTerminalResponse>("terminal.create", {
+        cwd: params.cwd,
+        project_path_key: params.projectPathKey,
+        shell: params.shell,
+        title: params.title,
+        cols: params.cols,
+        rows: params.rows,
+      }),
+    );
+  }
+
+  async snapshotTerminal(
+    sessionId: string,
+    maxBytes?: number,
+    projectPathKey?: string,
+  ): Promise<TerminalSnapshot> {
+    return normalizeTerminalSnapshot(
+      await this.request<RawTerminalResponse>("terminal.attach", {
+        session_id: sessionId,
+        project_path_key: projectPathKey,
+        max_bytes: maxBytes,
+      }),
+    );
+  }
+
+  async inputTerminal(sessionId: string, data: string, projectPathKey?: string): Promise<void> {
+    await this.request("terminal.input", {
+      session_id: sessionId,
+      project_path_key: projectPathKey,
+      data,
+    });
+  }
+
+  async resizeTerminal(
+    sessionId: string,
+    cols: number,
+    rows: number,
+    projectPathKey?: string,
+  ): Promise<void> {
+    await this.request("terminal.resize", {
+      session_id: sessionId,
+      project_path_key: projectPathKey,
+      cols,
+      rows,
+    });
+  }
+
+  async renameTerminal(
+    sessionId: string,
+    title: string,
+    projectPathKey?: string,
+  ): Promise<TerminalSession> {
+    const response = await this.request<RawTerminalResponse>("terminal.rename", {
+      session_id: sessionId,
+      project_path_key: projectPathKey,
+      title,
+    });
+    if (!response.session) {
+      throw new Error("Terminal response did not include a session");
+    }
+    return normalizeTerminalSession(response.session);
+  }
+
+  async closeTerminal(sessionId: string, projectPathKey?: string): Promise<TerminalSession> {
+    const response = await this.request<RawTerminalResponse>("terminal.close", {
+      session_id: sessionId,
+      project_path_key: projectPathKey,
+    });
+    if (!response.session) {
+      throw new Error("Terminal response did not include a session");
+    }
+    return normalizeTerminalSession(response.session);
+  }
+
+  async closeProjectTerminals(projectPathKey: string): Promise<TerminalSession[]> {
+    const response = await this.request<RawTerminalResponse>("terminal.close_project", {
+      project_path_key: projectPathKey,
+    });
+    return (response.sessions ?? []).map(normalizeTerminalSession);
+  }
+
+  async detachTerminal(sessionId: string, projectPathKey?: string): Promise<void> {
+    await this.request("terminal.detach", {
+      session_id: sessionId,
+      project_path_key: projectPathKey,
+    });
   }
 
   async listHistory(
@@ -2266,6 +2658,13 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
       case "settings":
         this.emitSettings(message.payload as GatewaySettingsSyncPayload);
         return;
+      case "terminal": {
+        const event = normalizeTerminalEvent(message.payload as RawTerminalEvent);
+        if (event) {
+          this.emitTerminal(event);
+        }
+        return;
+      }
     }
   }
 
@@ -2339,6 +2738,12 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
 
   private emitSettings(event: GatewaySettingsSyncPayload) {
     for (const listener of this.settingsListeners) {
+      listener(event);
+    }
+  }
+
+  private emitTerminal(event: TerminalEvent) {
+    for (const listener of this.terminalListeners) {
       listener(event);
     }
   }

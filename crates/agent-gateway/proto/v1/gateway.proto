@@ -54,6 +54,7 @@ message GatewayEnvelope {
     MemoryManageRequest memory_manage = 52;
     SkillManageRequest skill_manage = 53;
     FsCreateProjectFolderRequest fs_create_project_folder = 54;
+    TerminalRequest terminal_request = 55;
   }
 }
 
@@ -91,6 +92,8 @@ message AgentEnvelope {
     MemoryManageResponse memory_manage_resp = 53;
     SkillManageResponse skill_manage_resp = 54;
     FsCreateProjectFolderResponse fs_create_project_folder_resp = 55;
+    TerminalResponse terminal_response = 57;
+    TerminalEvent terminal_event = 58;
     ErrorResponse error = 99;
   }
 }
@@ -148,6 +151,59 @@ message MemoryManageRequest {
 
 message MemoryManageResponse {
   string result_json = 1;
+}
+
+message TerminalRequest {
+  string action = 1;
+  string session_id = 2;
+  string project_path_key = 3;
+  string cwd = 4;
+  string shell = 5;
+  string title = 6;
+  string data = 7;
+  uint32 cols = 8;
+  uint32 rows = 9;
+  uint32 max_bytes = 10;
+}
+
+message TerminalSession {
+  string id = 1;
+  string project_path_key = 2;
+  string cwd = 3;
+  string shell = 4;
+  string title = 5;
+  uint32 pid = 6;
+  uint32 cols = 7;
+  uint32 rows = 8;
+  uint64 created_at = 9;
+  uint64 updated_at = 10;
+  uint64 finished_at = 11;
+  int32 exit_code = 12;
+  bool running = 13;
+}
+
+message TerminalShellOption {
+  string id = 1;
+  string label = 2;
+  string command = 3;
+}
+
+message TerminalResponse {
+  string action = 1;
+  repeated TerminalSession sessions = 2;
+  TerminalSession session = 3;
+  string output = 4;
+  bool truncated = 5;
+  repeated TerminalShellOption shell_options = 6;
+  string default_shell = 7;
+}
+
+message TerminalEvent {
+  string kind = 1;
+  string session_id = 2;
+  string project_path_key = 3;
+  TerminalSession session = 4;
+  string data = 5;
 }
 
 message ChatRequest {

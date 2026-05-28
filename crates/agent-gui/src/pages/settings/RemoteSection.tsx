@@ -381,7 +381,7 @@ export function RemoteSection(props: SettingsSectionProps) {
           {t("settings.remoteAdvanced")}
         </div>
 
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className="grid gap-3 lg:grid-cols-3">
           <div className="flex items-center justify-between gap-4 rounded-lg bg-muted/30 px-4 py-3">
             <div className="min-w-0 flex-1">
               <div className="text-sm font-medium">{t("settings.remoteAutoReconnect")}</div>
@@ -424,6 +424,24 @@ export function RemoteSection(props: SettingsSectionProps) {
                 {t("settings.remoteHeartbeatUnit")}
               </span>
             </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 rounded-lg bg-muted/30 px-4 py-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium">{t("settings.remoteWebTerminal")}</div>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {t("settings.remoteWebTerminalHint")}
+              </p>
+            </div>
+            <AgentActivationSwitch
+              checked={settings.remote.enableWebTerminal}
+              title={t("settings.remoteWebTerminal")}
+              onToggle={() =>
+                updateRemoteSettings(setSettings, {
+                  enableWebTerminal: !settings.remote.enableWebTerminal,
+                })
+              }
+            />
           </div>
         </div>
       </div>

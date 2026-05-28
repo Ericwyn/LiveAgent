@@ -313,6 +313,10 @@ test("Gateway SharedWorker broadcasts events with each port connection id", asyn
       return () => {};
     }
 
+    subscribeTerminal() {
+      return () => {};
+    }
+
     dispose() {}
   }
 
@@ -368,6 +372,145 @@ test("Gateway SharedWorker broadcasts events with each port connection id", asyn
   globalThis.onconnect = previousOnConnect;
 });
 
+test("Gateway SharedWorker terminal metadata reaches every page while output stays scoped", async () => {
+  installBrowser();
+  const loader = createWebModuleLoader();
+  const gatewaySocketPath = loader.resolveLocal("src/lib/gatewaySocket.ts");
+  const clientInstances = [];
+
+  class MockGatewayWebSocketClient {
+    terminalListeners = [];
+    calls = [];
+
+    constructor(token) {
+      this.token = token;
+      clientInstances.push(this);
+    }
+
+    subscribeStatus() {
+      return () => {};
+    }
+
+    subscribeHistory() {
+      return () => {};
+    }
+
+    subscribeConversation() {
+      return () => {};
+    }
+
+    subscribeSettings() {
+      return () => {};
+    }
+
+    subscribeTerminal(listener) {
+      this.terminalListeners.push(listener);
+      return () => {};
+    }
+
+    async listTerminals(projectPathKey) {
+      this.calls.push(["listTerminals", projectPathKey ?? ""]);
+      return [
+        {
+          id: "terminal-1",
+          projectPathKey: "/workspace/project-a",
+          cwd: "/workspace/project-a",
+          shell: "zsh",
+          title: "Terminal 1",
+          cols: 80,
+          rows: 24,
+          createdAt: 1,
+          updatedAt: 1,
+          running: true,
+        },
+      ];
+    }
+
+    dispose() {}
+  }
+
+  const workerLoader = createWebModuleLoader({
+    mocks: {
+      [gatewaySocketPath]: {
+        GatewayWebSocketClient: MockGatewayWebSocketClient,
+      },
+    },
+  });
+
+  const previousOnConnect = globalThis.onconnect;
+  workerLoader.loadModule("src/lib/gatewaySocket.worker.ts");
+
+  const firstPort = new FakeMessagePort();
+  const secondPort = new FakeMessagePort();
+  globalThis.onconnect({ ports: [firstPort] });
+  globalThis.onconnect({ ports: [secondPort] });
+  firstPort.emit({ type: "connect", connection_id: "connection-1", token: "token" });
+  secondPort.emit({ type: "connect", connection_id: "connection-2", token: "token" });
+
+  firstPort.emit({
+    type: "request",
+    connection_id: "connection-1",
+    request_id: "terminal-list-all",
+    method: "terminal.list",
+    payload: {},
+  });
+  await waitFor(
+    () => firstPort.messages.some((message) => message.request_id === "terminal-list-all"),
+    "terminal list all response",
+  );
+  assert.deepEqual(clientInstances[0].calls, [["listTerminals", ""]]);
+
+  const event = {
+    kind: "created",
+    sessionId: "terminal-2",
+    projectPathKey: "/workspace/project-b",
+    session: {
+      id: "terminal-2",
+      projectPathKey: "/workspace/project-b",
+      cwd: "/workspace/project-b",
+      shell: "zsh",
+      title: "Terminal 2",
+      cols: 80,
+      rows: 24,
+      createdAt: 2,
+      updatedAt: 2,
+      running: true,
+    },
+  };
+  clientInstances[0].terminalListeners[0](event);
+
+  assert.deepEqual(firstPort.messages.at(-1), {
+    type: "event",
+    event_type: "terminal",
+    payload: event,
+    connection_id: "connection-1",
+  });
+  assert.deepEqual(secondPort.messages.at(-1), {
+    type: "event",
+    event_type: "terminal",
+    payload: event,
+    connection_id: "connection-2",
+  });
+
+  const outputEvent = {
+    ...event,
+    kind: "output",
+    data: "secret\n",
+  };
+  clientInstances[0].terminalListeners[0](outputEvent);
+
+  assert.equal(
+    firstPort.messages.some((message) => message.payload === outputEvent),
+    false,
+  );
+  assert.equal(
+    secondPort.messages.some((message) => message.payload === outputEvent),
+    false,
+  );
+
+  globalThis.onconnect = previousOnConnect;
+});
+
 test("Gateway SharedWorker forwards chat metadata and uploaded files", async () => {
   installBrowser();
   const loader = createWebModuleLoader();
@@ -388,6 +531,10 @@ test("Gateway SharedWorker forwards chat metadata and uploaded files", async () 
     }
 
     subscribeSettings() {
+      return () => {};
+    }
+
+    subscribeTerminal() {
       return () => {};
     }
 
@@ -959,6 +1106,10 @@ test("Gateway SharedWorker forwards history share requests", async () => {
       return () => {};
     }
 
+    subscribeTerminal() {
+      return () => {};
+    }
+
     getHistoryShare(conversationID) {
       this.calls.push(["getHistoryShare", conversationID]);
       return {
@@ -1104,6 +1255,10 @@ test("Gateway SharedWorker forwards chat.attach streams to the requesting port",
       return () => {};
     }
 
+    subscribeTerminal() {
+      return () => {};
+    }
+
     async *attachChat(conversationID, options) {
       this.calls.push(["attachChat", conversationID, options.afterSeq]);
       yield {
@@ -1193,6 +1348,10 @@ test("Gateway SharedWorker forwards conversation cancel without a stream id", as
     }
 
     subscribeSettings() {
+      return () => {};
+    }
+
+    subscribeTerminal() {
       return () => {};
     }
 

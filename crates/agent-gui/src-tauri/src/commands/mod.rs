@@ -1,3 +1,4 @@
+pub mod app;
 pub mod chat_history;
 pub mod cron;
 pub mod delegate;
@@ -13,4 +14,5 @@ pub mod shell;
 pub mod subagent_history;
 pub mod system;
 pub mod system_tools;
+pub mod terminal;
 pub mod update;

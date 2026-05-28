@@ -408,6 +408,8 @@ html[data-liveagent-webui="gateway"] [role="textbox"]:focus-visible {
 
 .gateway-main-shell {
   position: relative;
+  display: flex;
+  align-items: stretch;
   min-width: 0;
   flex: 1;
   height: 100%;
@@ -429,6 +431,8 @@ html[data-liveagent-webui="gateway"] [role="textbox"]:focus-visible {
   display: flex;
   height: 100%;
   min-height: 0;
+  min-width: 0;
+  flex: 1;
   flex-direction: column;
   --gateway-chat-column-width: 768px;
   --gateway-chat-column-gutter: 16px;

@@ -130,6 +130,9 @@ export type ChatSidebarSettings = {
 export type CustomSettings = {
   conversationTitleModel?: SelectedModel;
   chatSidebar: ChatSidebarSettings;
+  terminalPanel: {
+    width: number;
+  };
 };
 
 export type UpdateSettings = {
@@ -217,6 +220,7 @@ export type RemoteSettings = {
   agentId: string;
   autoReconnect: boolean;
   heartbeatInterval: number;
+  enableWebTerminal: boolean;
 };
 
 export type AppSettings = {
@@ -959,6 +963,16 @@ function normalizePositiveInteger(input: unknown, fallback: number): number {
   return value > 0 ? value : fallback;
 }
 
+function normalizeIntegerInRange(
+  input: unknown,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  const value = normalizePositiveInteger(input, fallback);
+  return Math.min(max, Math.max(min, value));
+}
+
 function normalizeGrpcEndpoint(input: unknown): string {
   const value = normalizeOptionalText(input);
   if (!value) return "";
@@ -977,6 +991,7 @@ export function normalizeRemoteSettings(input: unknown): RemoteSettings {
     agentId: normalizeOptionalText(obj.agentId),
     autoReconnect: obj.autoReconnect !== false,
     heartbeatInterval: normalizePositiveInteger(obj.heartbeatInterval, 30),
+    enableWebTerminal: obj.enableWebTerminal === true,
   };
 }
 
@@ -1392,6 +1407,9 @@ export function normalizeCustomSettings(
   const chatSidebar = (
     obj.chatSidebar && typeof obj.chatSidebar === "object" ? obj.chatSidebar : {}
   ) as Record<string, unknown>;
+  const terminalPanel = (
+    obj.terminalPanel && typeof obj.terminalPanel === "object" ? obj.terminalPanel : {}
+  ) as Record<string, unknown>;
   return {
     conversationTitleModel: normalizeSelectedModelForProviders(
       normalizeSelectedModel(obj.conversationTitleModel),
@@ -1400,6 +1418,9 @@ export function normalizeCustomSettings(
     chatSidebar: {
       projectsCollapsed: chatSidebar.projectsCollapsed === true,
       recentCollapsed: chatSidebar.recentCollapsed === true,
+    },
+    terminalPanel: {
+      width: normalizeIntegerInRange(obj.terminalPanelWidth ?? terminalPanel.width, 320, 720, 420),
     },
   };
 }
@@ -1440,6 +1461,7 @@ export function getDefaultSettings(): AppSettings {
       agentId: "",
       autoReconnect: true,
       heartbeatInterval: 30,
+      enableWebTerminal: false,
     },
     memory: normalizeMemorySettings({}, customProviders),
     customSettings: normalizeCustomSettings({}, customProviders),

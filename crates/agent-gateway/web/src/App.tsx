@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { flushSync } from "react-dom";
-import { Ban, ChevronDown, Loader2, LogOut, Upload, User } from "./components/icons";
+import {
+  Ban,
+  ChevronDown,
+  Loader2,
+  LogOut,
+  PanelRightClose,
+  PanelRightOpen,
+  Upload,
+  User,
+} from "./components/icons";
 
 import type { ChatHistorySummary } from "@/lib/chat/chatHistory";
 import type { HistoryMessageRef } from "@/lib/chat/conversationState";
@@ -12,6 +21,7 @@ import {
 import { registerLocalUploadedImagePreviews } from "@/lib/chat/uploadedImagePreview";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { ProjectTerminalPanel } from "@/components/terminal/ProjectTerminalPanel";
 import { LocaleContext, t as translate } from "@/i18n";
 import type {
   MentionComposerDraft,
@@ -66,6 +76,13 @@ import {
   getGatewayWebSocketClient,
   resetGatewayWebSocketClient,
 } from "./lib/gatewaySocket";
+import { createGatewayTerminalClient } from "./lib/terminal/gatewayTerminalClient";
+import {
+  applyTerminalEventToSessions,
+  replaceTerminalSessionsForProject,
+  terminalSessionBelongsToProject,
+} from "./lib/terminal/sessionStore";
+import type { TerminalSession } from "./lib/terminal/types";
 import type {
   AgentStatus,
   ChatEvent,
@@ -655,6 +672,7 @@ export default function App() {
     () => (token ? getGatewayWebSocketClient(token) : null),
     [token],
   );
+  const terminalClient = useMemo(() => (api ? createGatewayTerminalClient(api) : null), [api]);
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatEntry[]>([]);
@@ -765,6 +783,9 @@ export default function App() {
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const [isFileDropActive, setIsFileDropActive] = useState(false);
   const [activeView, setActiveView] = useState<"chat" | "skills-hub" | "mcp-hub">("chat");
+  const [terminalPanelOpen, setTerminalPanelOpen] = useState(false);
+  const [terminalSessions, setTerminalSessions] = useState<TerminalSession[]>([]);
+  const terminalProjectVersionsRef = useRef<Map<string, number>>(new Map());
   const {
     scrollAreaRef: transcriptScrollAreaRef,
     showJumpToBottom: showTranscriptJumpToBottom,
@@ -2306,7 +2327,6 @@ export default function App() {
         return;
       }
       applyGatewaySettings(payload);
-      setSettingsSyncReady(true);
       setSettingsSyncError(null);
     });
 
@@ -4120,6 +4140,20 @@ export default function App() {
             return;
           }
 
+          let terminalSessionsToClose: TerminalSession[] = [];
+          if (terminalClient && settings.remote.enableWebTerminal && pathKey) {
+            terminalSessionsToClose = await terminalClient.list(pathKey);
+            const runningTerminalCount = terminalSessionsToClose.filter((session) => session.running).length;
+            if (
+              runningTerminalCount > 0 &&
+              !window.confirm(
+                `项目 "${project.name}" 中仍有 ${runningTerminalCount} 个 Terminal 正在运行。删除项目会关闭这些 Terminal，是否继续？`,
+              )
+            ) {
+              return;
+            }
+          }
+
           const visibleConversationId = resolveVisibleConversationId(
             selectedHistoryIdRef.current,
             conversationIdRef.current,
@@ -4159,6 +4193,12 @@ export default function App() {
               clearCachedComposerDraft(conversationId);
             }
           }
+          if (terminalSessionsToClose.length > 0 && terminalClient) {
+            await terminalClient.closeProject(pathKey);
+            setTerminalSessions((current) =>
+              current.filter((session) => !terminalSessionBelongsToProject(session, pathKey)),
+            );
+          }
 
           const shouldResetVisibleConversation =
             Boolean(visibleConversationId && deletedConversationIds.has(visibleConversationId)) ||
@@ -4186,8 +4226,10 @@ export default function App() {
       isAgentMode,
       refreshHistoryWorkdirs,
       removeWorkspaceProjectFromSettings,
+      settings.remote.enableWebTerminal,
       settings.system,
       startNewConversation,
+      terminalClient,
       unlockHistoryTitlePosition,
       updateHistoryItems,
     ],
@@ -4963,6 +5005,8 @@ export default function App() {
     setRemoteRunningConversationIds(new Set());
     setRemoteRunningConversationRuntime(new Map());
     setProjectActivityUpdatedAtOverrides(new Map());
+    setTerminalSessions([]);
+    terminalProjectVersionsRef.current.clear();
     clearAllConversationLiveStreams();
     setSelectedHistoryId("");
     setSelectedHistory(null);
@@ -5180,6 +5224,115 @@ export default function App() {
     currentConversationRuntimeWorkdir ||
     (isAgentMode ? activeWorkspaceProjectPath || settings.system.workdir.trim() : "");
   displayedConversationWorkdirRef.current = displayedConversationWorkdir;
+  const terminalProjectPath = isAgentMode ? activeWorkspaceProjectPath.trim() : "";
+  const terminalProjectPathKey = terminalProjectPath ? workspaceProjectPathKey(terminalProjectPath) : "";
+  const terminalDisabledMessage = !settingsSyncReady
+    ? "Syncing desktop settings..."
+    : !isAgentMode
+      ? "Terminal requires Agent project mode."
+      : !terminalProjectPath
+        ? "Select a project to use Terminal."
+        : !settings.remote.enableWebTerminal
+          ? "Enable WebUI Terminal in desktop Remote settings."
+          : undefined;
+  const projectTerminalSessions = useMemo(
+    () =>
+      terminalProjectPathKey
+        ? terminalSessions.filter((session) =>
+            terminalSessionBelongsToProject(session, terminalProjectPathKey),
+          )
+        : [],
+    [terminalProjectPathKey, terminalSessions],
+  );
+  const handleProjectTerminalSessionsChange = useCallback(
+    (sessions: TerminalSession[]) => {
+      const key = workspaceProjectPathKey(terminalProjectPathKey);
+      if (key) {
+        terminalProjectVersionsRef.current.set(
+          key,
+          (terminalProjectVersionsRef.current.get(key) ?? 0) + 1,
+        );
+      }
+      setTerminalSessions((current) =>
+        replaceTerminalSessionsForProject(current, terminalProjectPathKey, sessions),
+      );
+    },
+    [terminalProjectPathKey],
+  );
+
+  useEffect(() => {
+    if (!terminalClient) {
+      setTerminalSessions([]);
+      return;
+    }
+    if (terminalDisabledMessage) {
+      if (!settingsSyncReady) {
+        return;
+      }
+      if (terminalProjectPathKey) {
+        setTerminalSessions((current) =>
+          replaceTerminalSessionsForProject(current, terminalProjectPathKey, []),
+        );
+      } else {
+        setTerminalSessions([]);
+      }
+      return;
+    }
+    if (status?.online === false) {
+      return;
+    }
+    if (!terminalProjectPathKey) {
+      setTerminalSessions([]);
+      return;
+    }
+    let cancelled = false;
+    const projectPathKey = terminalProjectPathKey;
+    const requestVersion = terminalProjectVersionsRef.current.get(projectPathKey) ?? 0;
+    void terminalClient
+      .list(projectPathKey)
+      .then((sessions) => {
+        if (
+          !cancelled &&
+          (terminalProjectVersionsRef.current.get(projectPathKey) ?? 0) === requestVersion
+        ) {
+          setTerminalSessions((current) =>
+            sessions.length === 0 &&
+            current.some((session) => terminalSessionBelongsToProject(session, projectPathKey))
+              ? current
+              : replaceTerminalSessionsForProject(current, projectPathKey, sessions),
+          );
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    settingsSyncReady,
+    status?.online,
+    status?.session_id,
+    terminalClient,
+    terminalDisabledMessage,
+    terminalPanelOpen,
+    terminalProjectPathKey,
+  ]);
+
+  useEffect(() => {
+    if (!terminalClient || terminalDisabledMessage) return;
+    return terminalClient.subscribe((event) => {
+      if (event.kind === "output") return;
+      const projectPathKey = workspaceProjectPathKey(
+        event.projectPathKey || event.session.projectPathKey || event.session.cwd,
+      );
+      if (projectPathKey) {
+        terminalProjectVersionsRef.current.set(
+          projectPathKey,
+          (terminalProjectVersionsRef.current.get(projectPathKey) ?? 0) + 1,
+        );
+      }
+      setTerminalSessions((current) => applyTerminalEventToSessions(current, event));
+    });
+  }, [terminalClient, terminalDisabledMessage]);
 
   useEffect(() => {
     if (activeView !== "chat") {
@@ -5810,8 +5963,35 @@ export default function App() {
                 </span>
               }
               trailingActions={
-                <DropdownMenu open={userMenuOpen} onOpenChange={setUserMenuOpen}>
-                  <DropdownMenuTrigger asChild>
+                <>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setTerminalPanelOpen((open) => !open)}
+                    disabled={Boolean(terminalDisabledMessage) && !terminalPanelOpen}
+                    aria-expanded={terminalPanelOpen}
+                    title={
+                      terminalPanelOpen
+                        ? "Collapse terminal panel"
+                        : (terminalDisabledMessage ?? "Expand terminal panel")
+                    }
+                    className={`relative h-8 w-8 rounded-lg text-muted-foreground transition-[background-color,color,transform] duration-150 hover:text-foreground active:scale-95 ${
+                      terminalPanelOpen ? "bg-muted text-foreground" : ""
+                    }`}
+                  >
+                    {terminalPanelOpen ? (
+                      <PanelRightClose className="h-4.5 w-4.5" />
+                    ) : (
+                      <PanelRightOpen className="h-4.5 w-4.5" />
+                    )}
+                    {projectTerminalSessions.length > 0 ? (
+                      <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[10px] font-semibold leading-none text-white">
+                        {projectTerminalSessions.length}
+                      </span>
+                    ) : null}
+                  </Button>
+                  <DropdownMenu open={userMenuOpen} onOpenChange={setUserMenuOpen}>
+                    <DropdownMenuTrigger asChild>
                     <Button
                       variant="ghost"
                       className="h-8 gap-1 rounded-full border border-border/60 bg-background/70 px-1.5 text-foreground shadow-sm hover:bg-muted/70"
@@ -5822,28 +6002,29 @@ export default function App() {
                       </span>
                       <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
                     </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    align="end"
-                    sideOffset={8}
-                    className="min-w-[12rem] rounded-xl border-border/70 bg-popover/95 backdrop-blur supports-[backdrop-filter]:bg-popover/90"
-                  >
-                    <DropdownMenuLabel className="px-3 py-2">
-                      <div className="text-sm font-medium text-foreground">{userMenuLabel}</div>
-                      <div className="mt-0.5 text-xs font-normal text-muted-foreground">
-                        Session {status?.session_id || "N/A"}
-                      </div>
-                    </DropdownMenuLabel>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      onSelect={handleLogout}
-                      className="gap-2 text-destructive focus:bg-destructive/10 focus:text-destructive"
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="end"
+                      sideOffset={8}
+                      className="min-w-[12rem] rounded-xl border-border/70 bg-popover/95 backdrop-blur supports-[backdrop-filter]:bg-popover/90"
                     >
-                      <LogOut className="h-3.5 w-3.5" />
-                      退出登录
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                      <DropdownMenuLabel className="px-3 py-2">
+                        <div className="text-sm font-medium text-foreground">{userMenuLabel}</div>
+                        <div className="mt-0.5 text-xs font-normal text-muted-foreground">
+                          Session {status?.session_id || "N/A"}
+                        </div>
+                      </DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        onSelect={handleLogout}
+                        className="gap-2 text-destructive focus:bg-destructive/10 focus:text-destructive"
+                      >
+                        <LogOut className="h-3.5 w-3.5" />
+                        退出登录
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </>
               }
             />
 
@@ -6060,6 +6241,29 @@ export default function App() {
           </div>
           )}
         </main>
+
+        {terminalClient ? (
+          <ProjectTerminalPanel
+            isOpen={terminalPanelOpen}
+            projectPathKey={terminalProjectPathKey}
+            cwd={terminalProjectPath}
+            sessions={projectTerminalSessions}
+            width={settings.customSettings.terminalPanel.width}
+            theme={settings.theme}
+            disabledMessage={terminalDisabledMessage}
+            client={terminalClient}
+            onWidthChange={(nextWidth) =>
+              setSettings((prev) =>
+                updateCustomSettings(prev, {
+                  terminalPanel: {
+                    width: nextWidth,
+                  },
+                }),
+              )
+            }
+            onSessionsChange={handleProjectTerminalSessionsChange}
+          />
+        ) : null}
 
         {settingsOpen ? (
           <div

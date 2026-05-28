@@ -13,8 +13,8 @@ fn main() {
         .unwrap_or_else(|| {
             let package_json_text =
                 std::fs::read_to_string(&package_json).expect("read app package.json for version");
-            let package_json_value: serde_json::Value =
-                serde_json::from_str(&package_json_text).expect("parse app package.json for version");
+            let package_json_value: serde_json::Value = serde_json::from_str(&package_json_text)
+                .expect("parse app package.json for version");
             package_json_value
                 .get("version")
                 .and_then(serde_json::Value::as_str)
