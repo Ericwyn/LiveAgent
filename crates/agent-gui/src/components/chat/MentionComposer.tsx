@@ -15,8 +15,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/shared/utils";
-import { fileIconSvg, folderIconSvg } from "../icons";
-import { getFileTypeIcon } from "./fileTypeIcons";
+import { getFileTypeIcon, getFileTypeIconSvg } from "./fileTypeIcons";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -400,8 +399,11 @@ function createMentionIcon(svgMarkup: string) {
   icon.setAttribute("width", "12");
   icon.setAttribute("height", "12");
   icon.style.flexShrink = "0";
-  icon.style.opacity = "0.7";
   return icon;
+}
+
+function createFileTypeMentionIcon(path: string, kind: "file" | "dir") {
+  return createMentionIcon(getFileTypeIconSvg(path, kind));
 }
 
 function isComposerChipElement(node: Node | null): node is HTMLElement {
@@ -416,12 +418,13 @@ function isComposerChipElement(node: Node | null): node is HTMLElement {
 function createCaretAnchorText(afterRaw: string, options?: { ensureLeadingSpace?: boolean }) {
   const cleaned = removeCaretAnchors(afterRaw);
   const matchedWhitespace = cleaned.match(/^\s+/)?.[0] ?? "";
-  const leadingWhitespace =
-    matchedWhitespace || (options?.ensureLeadingSpace === true ? " " : "");
+  const leadingWhitespace = matchedWhitespace || (options?.ensureLeadingSpace === true ? " " : "");
   const rest = cleaned.slice(matchedWhitespace.length);
+  const caretOffset =
+    leadingWhitespace.length > 0 ? leadingWhitespace.length : CARET_ANCHOR_TEXT.length;
   return {
     text: `${leadingWhitespace}${CARET_ANCHOR_TEXT}${rest}`,
-    caretOffset: leadingWhitespace.length + CARET_ANCHOR_TEXT.length,
+    caretOffset,
   };
 }
 
@@ -616,7 +619,7 @@ function createFileMentionChip(path: string, kind: "file" | "dir") {
       : "mention-chip inline-flex items-center gap-1 rounded bg-blue-500/15 px-1.5 mx-0.5 text-blue-700 dark:text-blue-300 align-baseline whitespace-nowrap select-none";
   chip.title = path;
 
-  chip.appendChild(createMentionIcon(kind === "dir" ? folderIconSvg : fileIconSvg));
+  chip.appendChild(createFileTypeMentionIcon(path, kind));
 
   const fileName = path.split("/").pop() || path;
   chip.appendChild(document.createTextNode(fileName));
@@ -689,7 +692,7 @@ function createLargePasteChip(paste: MentionComposerLargePaste) {
     ? `${paste.label}\n${paste.preview}`
     : `${paste.label} (${paste.charCount} chars)`;
 
-  chip.appendChild(createMentionIcon(fileIconSvg));
+  chip.appendChild(createFileTypeMentionIcon("pasted.txt", "file"));
 
   chip.appendChild(
     document.createTextNode(

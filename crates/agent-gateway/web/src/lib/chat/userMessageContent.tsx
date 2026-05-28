@@ -1,4 +1,4 @@
-import { File, Folder } from "../../components/icons";
+import { getFileTypeIcon } from "../../components/chat/fileTypeIcons";
 
 import {
   parsePastedTextDisplayReferences,
@@ -251,13 +251,14 @@ function PastedTextChip({
   const chipText = hasCounts
     ? `${label} · ${formatPastedTextCount(file.displayCharCount ?? 0)} chars · ${formatPastedTextCount(file.displayLineCount ?? 0)} lines`
     : label;
+  const Icon = getFileTypeIcon(file.relativePath || "pasted.txt", "file");
 
   return (
     <span
       title={file.relativePath}
       className="mention-chip mx-0.5 inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 text-emerald-700 align-baseline whitespace-nowrap select-none dark:text-emerald-300"
     >
-      <File className="h-3 w-3 shrink-0 opacity-70" />
+      <Icon className="h-3 w-3 shrink-0" />
       {chipText}
     </span>
   );
@@ -271,6 +272,7 @@ function MentionChip({
   isDir: boolean;
 }) {
   const fileName = path.split("/").pop() || path;
+  const Icon = getFileTypeIcon(path, isDir ? "dir" : "file");
   return (
     <span
       title={isDir ? `${path}/` : path}
@@ -280,11 +282,7 @@ function MentionChip({
           : "mention-chip mx-0.5 inline-flex items-center gap-1 rounded bg-blue-500/20 px-1.5 align-baseline whitespace-nowrap"
       }
     >
-      {isDir ? (
-        <Folder className="h-3 w-3 shrink-0 opacity-70" />
-      ) : (
-        <File className="h-3 w-3 shrink-0 opacity-70" />
-      )}
+      <Icon className="h-3 w-3 shrink-0" />
       {fileName}
     </span>
   );
