@@ -144,6 +144,12 @@ export type ChatSidebarSettings = {
 
 export type ProjectToolsPanelTab = "terminal" | "fileTree";
 
+export type ProjectToolsPanelSettings = {
+  width: number;
+  activeTab: ProjectToolsPanelTab;
+  tabOrders: Record<string, string[]>;
+};
+
 export type ProjectToolsFileTreeProjectState = {
   query: string;
   selectedPath: string;
@@ -166,10 +172,7 @@ export type ProjectToolsFileTreeStatePatch = Partial<ProjectToolsFileTreeProject
 export type CustomSettings = {
   conversationTitleModel?: SelectedModel;
   chatSidebar: ChatSidebarSettings;
-  projectToolsPanel: {
-    width: number;
-    activeTab: ProjectToolsPanelTab;
-  };
+  projectToolsPanel: ProjectToolsPanelSettings;
   projectToolsFileTree: ProjectToolsFileTreeSettings;
 };
 
@@ -1506,6 +1509,37 @@ export function normalizeProjectToolsFileTreeSettings(
   };
 }
 
+export function normalizeProjectToolsPanelTabOrder(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    if (typeof item !== "string") continue;
+    const id = item.trim();
+    if (!id || id.length > 160 || seen.has(id)) continue;
+    seen.add(id);
+    order.push(id);
+    if (order.length >= 128) break;
+  }
+  return order;
+}
+
+export function normalizeProjectToolsPanelTabOrders(input: unknown): Record<string, string[]> {
+  const rawOrders = (
+    input && typeof input === "object" && !Array.isArray(input) ? input : {}
+  ) as Record<string, unknown>;
+  const orders: Record<string, string[]> = {};
+  for (const [pathKey, value] of Object.entries(rawOrders)) {
+    const normalizedPathKey = workspaceProjectPathKey(pathKey);
+    if (!normalizedPathKey) continue;
+    const order = normalizeProjectToolsPanelTabOrder(value);
+    if (order.length === 0) continue;
+    orders[normalizedPathKey] = order;
+    if (Object.keys(orders).length >= 100) break;
+  }
+  return orders;
+}
+
 export function normalizeCustomSettings(
   input: unknown,
   customProviders: CustomProvider[],
@@ -1544,6 +1578,7 @@ export function normalizeCustomSettings(
         420,
       ),
       activeTab: projectToolsPanelActiveTab,
+      tabOrders: normalizeProjectToolsPanelTabOrders(projectToolsPanel.tabOrders),
     },
     projectToolsFileTree: normalizeProjectToolsFileTreeSettings(projectToolsFileTree),
   };
@@ -1709,6 +1744,45 @@ export function updateCustomSettings(
     customSettings: {
       ...prev.customSettings,
       ...patch,
+    },
+  });
+}
+
+export function getProjectToolsPanelTabOrder(
+  customSettings: CustomSettings,
+  projectPathKey: string,
+): string[] {
+  const normalizedPathKey = workspaceProjectPathKey(projectPathKey);
+  if (!normalizedPathKey) return [];
+  return customSettings.projectToolsPanel.tabOrders[normalizedPathKey] ?? [];
+}
+
+function projectToolsPanelTabOrderEqual(left: readonly string[], right: readonly string[]) {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+export function updateProjectToolsPanelTabOrder(
+  prev: AppSettings,
+  projectPathKey: string,
+  tabOrder: readonly string[],
+): AppSettings {
+  const normalizedPathKey = workspaceProjectPathKey(projectPathKey);
+  if (!normalizedPathKey) return prev;
+  const nextOrder = normalizeProjectToolsPanelTabOrder(tabOrder);
+  const currentOrder = getProjectToolsPanelTabOrder(prev.customSettings, normalizedPathKey);
+  if (projectToolsPanelTabOrderEqual(currentOrder, nextOrder)) return prev;
+
+  const tabOrders = { ...prev.customSettings.projectToolsPanel.tabOrders };
+  if (nextOrder.length > 0) {
+    tabOrders[normalizedPathKey] = nextOrder;
+  } else {
+    delete tabOrders[normalizedPathKey];
+  }
+
+  return updateCustomSettings(prev, {
+    projectToolsPanel: {
+      ...prev.customSettings.projectToolsPanel,
+      tabOrders,
     },
   });
 }

@@ -620,12 +620,45 @@ test("normalizes project tools panel from current and legacy terminal panel sett
       projectToolsPanel: {
         width: 544,
         activeTab: "terminal",
+        tabOrders: {
+          " /workspace/app ": [
+            "terminal-2",
+            "",
+            "terminal-1",
+            "terminal-2",
+            "x".repeat(200),
+            "__file_tree__",
+          ],
+          " ": ["ignored"],
+        },
       },
     },
   });
 
   assert.equal(currentShape.customSettings.projectToolsPanel.width, 544);
   assert.equal(currentShape.customSettings.projectToolsPanel.activeTab, "terminal");
+  assert.deepEqual(currentShape.customSettings.projectToolsPanel.tabOrders, {
+    "/workspace/app": ["terminal-2", "terminal-1", "__file_tree__"],
+  });
+});
+
+test("updates project tools panel tab order per project", () => {
+  const base = settings.normalizeSettings({});
+  const updated = settings.updateProjectToolsPanelTabOrder(base, "/workspace/app", [
+    "terminal-2",
+    "terminal-1",
+    "terminal-2",
+    "__file_tree__",
+  ]);
+
+  assert.deepEqual(settings.getProjectToolsPanelTabOrder(updated.customSettings, "/workspace/app"), [
+    "terminal-2",
+    "terminal-1",
+    "__file_tree__",
+  ]);
+
+  const cleared = settings.updateProjectToolsPanelTabOrder(updated, "/workspace/app", []);
+  assert.deepEqual(settings.getProjectToolsPanelTabOrder(cleared.customSettings, "/workspace/app"), []);
 });
 
 test("updates project file tree synced state per project", () => {
@@ -664,6 +697,9 @@ test("gateway settings sync keeps project tools panel state local", () => {
       projectToolsPanel: {
         width: 612,
         activeTab: "terminal",
+        tabOrders: {
+          "/desktop/project": ["desktop-terminal", "__file_tree__"],
+        },
       },
       projectToolsFileTree: {
         openProjectPathKeys: ["/desktop/project"],
@@ -683,6 +719,9 @@ test("gateway settings sync keeps project tools panel state local", () => {
       projectToolsPanel: {
         width: 360,
         activeTab: "fileTree",
+        tabOrders: {
+          "/web/project": ["web-terminal", "__file_tree__"],
+        },
       },
       projectToolsFileTree: {
         openProjectPathKeys: ["/web/project"],
@@ -714,6 +753,9 @@ test("gateway settings sync keeps project tools panel state local", () => {
 
   assert.equal(synced.customSettings.projectToolsPanel.width, 612);
   assert.equal(synced.customSettings.projectToolsPanel.activeTab, "terminal");
+  assert.deepEqual(synced.customSettings.projectToolsPanel.tabOrders, {
+    "/desktop/project": ["desktop-terminal", "__file_tree__"],
+  });
   assert.deepEqual(synced.customSettings.projectToolsFileTree.openProjectPathKeys, [
     "/web/project",
   ]);

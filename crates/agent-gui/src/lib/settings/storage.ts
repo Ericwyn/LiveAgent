@@ -7,6 +7,7 @@ import {
   getDefaultSettings,
   normalizeChatRuntimeControls,
   normalizeProjectToolsFileTreeSettings,
+  normalizeProjectToolsPanelTabOrders,
   normalizeSelectedModel,
   normalizeSettings,
   normalizeSkillsSettings,
@@ -104,6 +105,7 @@ function readLocalUiSettings(): {
           ? Math.min(720, Math.max(320, Math.floor(projectToolsPanelWidth)))
           : 420,
         activeTab: projectToolsPanelActiveTab,
+        tabOrders: normalizeProjectToolsPanelTabOrders(projectToolsPanel.tabOrders),
       },
       projectToolsFileTree: normalizeProjectToolsFileTreeSettings({}),
     });

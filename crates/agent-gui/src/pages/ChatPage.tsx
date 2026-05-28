@@ -84,6 +84,7 @@ import {
   findProviderModelConfig,
   getChatRuntimeReasoningLevelsForProvider,
   getProjectToolsFileTreeProjectState,
+  getProjectToolsPanelTabOrder,
   isAgentDevMode,
   isAgentExecutionMode,
   isProjectToolsFileTreeOpen,
@@ -98,6 +99,7 @@ import {
   updateCustomSettings,
   updateProjectToolsFileTreeProjectState,
   updateProjectToolsFileTreeOpen,
+  updateProjectToolsPanelTabOrder,
   updateChatRuntimeControlsForProvider,
   updateMcp,
   updateMemorySettings,
@@ -4193,6 +4195,10 @@ export function ChatPage(props: ChatPageProps) {
         theme={settings.theme}
         disabledMessage={terminalDisabledMessage}
         activeTab={settings.customSettings.projectToolsPanel.activeTab}
+        tabOrder={getProjectToolsPanelTabOrder(
+          settings.customSettings,
+          terminalProjectPathKey,
+        )}
         fileTreeOpen={isProjectToolsFileTreeOpen(
           settings.customSettings,
           terminalProjectPathKey,
@@ -4220,6 +4226,11 @@ export function ChatPage(props: ChatPageProps) {
                 activeTab,
               },
             }),
+          )
+        }
+        onTabOrderChange={(tabOrder) =>
+          setSettings((prev) =>
+            updateProjectToolsPanelTabOrder(prev, terminalProjectPathKey, tabOrder),
           )
         }
         onFileTreeOpenChange={(open) =>

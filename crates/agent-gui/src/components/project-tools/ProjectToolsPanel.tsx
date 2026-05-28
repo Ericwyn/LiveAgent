@@ -4,7 +4,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XTerm } from "@xterm/xterm";
 import {
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -25,7 +27,7 @@ import type {
   TerminalShellOption,
   TerminalSnapshot,
 } from "../../lib/terminal/types";
-import { Check, FolderTree, Plus, Terminal, X } from "../icons";
+import { Check, FolderTree, GripVertical, Plus, Terminal, X } from "../icons";
 import { Button } from "../ui/button";
 import {
   DropdownMenu,
@@ -39,6 +41,7 @@ const MIN_PANEL_WIDTH = 320;
 const MAX_PANEL_WIDTH = 720;
 const DEFAULT_TERMINAL_COLS = 80;
 const DEFAULT_TERMINAL_ROWS = 24;
+const FILE_TREE_TAB_ID = "__file_tree__";
 
 type ProjectToolsPanelProps = {
   isOpen: boolean;
@@ -49,11 +52,13 @@ type ProjectToolsPanelProps = {
   theme: "light" | "dark";
   disabledMessage?: string;
   activeTab: ProjectToolsPanelTab;
+  tabOrder?: string[];
   fileTreeOpen: boolean;
   fileTreeState: ProjectToolsFileTreeProjectState;
   client: TerminalClient;
   onWidthChange: (width: number) => void;
   onActiveTabChange: (tab: ProjectToolsPanelTab) => void;
+  onTabOrderChange?: (tabOrder: string[]) => void;
   onFileTreeOpenChange: (open: boolean) => void;
   onFileTreeStateChange: (patch: ProjectToolsFileTreeStatePatch) => void;
   onSessionsChange?: (sessions: TerminalSession[]) => void;
@@ -92,6 +97,124 @@ function formatTerminalSessionTitle(title: string, terminalLabel: string) {
   const match = /^Terminal(?:\s+(\d+))?$/.exec(title.trim());
   if (!match) return title;
   return match[1] ? `${terminalLabel} ${match[1]}` : terminalLabel;
+}
+
+type ProjectToolsTab =
+  | {
+      id: string;
+      kind: "terminal";
+      session: TerminalSession;
+    }
+  | {
+      id: typeof FILE_TREE_TAB_ID;
+      kind: "fileTree";
+    };
+
+type TabDragState = {
+  pointerId: number;
+  draggedId: string;
+  startX: number;
+  startY: number;
+  hasMoved: boolean;
+  order: string[];
+  previousUserSelect: string;
+  captureElement: HTMLElement;
+};
+
+function tabOrderIdsEqual(left: readonly string[], right: readonly string[]) {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function orderProjectToolsTabs(tabs: ProjectToolsTab[], tabOrder: readonly string[]) {
+  const byId = new Map(tabs.map((tab) => [tab.id, tab]));
+  const used = new Set<string>();
+  const ordered: ProjectToolsTab[] = [];
+  for (const id of tabOrder) {
+    const tab = byId.get(id);
+    if (!tab || used.has(id)) continue;
+    used.add(id);
+    ordered.push(tab);
+  }
+  for (const tab of tabs) {
+    if (used.has(tab.id)) continue;
+    ordered.push(tab);
+  }
+  return ordered;
+}
+
+function getReorderedTabIdsFromPointer(
+  container: HTMLElement | null,
+  draggedId: string,
+  clientX: number,
+) {
+  if (!container) return null;
+  const tabElements = Array.from(
+    container.querySelectorAll<HTMLElement>("[data-project-tools-tab-id]"),
+  );
+  const currentIds = tabElements
+    .map((element) => element.dataset.projectToolsTabId ?? "")
+    .filter(Boolean);
+  if (!currentIds.includes(draggedId)) return null;
+
+  const idsWithoutDragged = currentIds.filter((id) => id !== draggedId);
+  let insertIndex = idsWithoutDragged.length;
+  let visibleIndex = 0;
+  for (const element of tabElements) {
+    const id = element.dataset.projectToolsTabId ?? "";
+    if (!id || id === draggedId) continue;
+    const rect = element.getBoundingClientRect();
+    if (clientX < rect.left + rect.width / 2) {
+      insertIndex = visibleIndex;
+      break;
+    }
+    visibleIndex += 1;
+  }
+  return [
+    ...idsWithoutDragged.slice(0, insertIndex),
+    draggedId,
+    ...idsWithoutDragged.slice(insertIndex),
+  ];
+}
+
+function autoScrollTabsForPointer(container: HTMLElement | null, clientX: number) {
+  if (!container) return;
+  const maxScrollLeft = container.scrollWidth - container.clientWidth;
+  if (maxScrollLeft <= 1) return;
+  const rect = container.getBoundingClientRect();
+  const edgeSize = 32;
+  const scrollStep = 18;
+  if (clientX < rect.left + edgeSize) {
+    container.scrollLeft = Math.max(0, container.scrollLeft - scrollStep);
+  } else if (clientX > rect.right - edgeSize) {
+    container.scrollLeft = Math.min(maxScrollLeft, container.scrollLeft + scrollStep);
+  }
+}
+
+function reorderTabIdsByKeyboard(tabIds: readonly string[], tabId: string, key: string) {
+  const currentIndex = tabIds.indexOf(tabId);
+  if (currentIndex < 0) return null;
+
+  let targetIndex = currentIndex;
+  if (key === "ArrowLeft") {
+    targetIndex = currentIndex - 1;
+  } else if (key === "ArrowRight") {
+    targetIndex = currentIndex + 1;
+  } else if (key === "Home") {
+    targetIndex = 0;
+  } else if (key === "End") {
+    targetIndex = tabIds.length - 1;
+  } else {
+    return null;
+  }
+
+  targetIndex = Math.max(0, Math.min(tabIds.length - 1, targetIndex));
+  if (targetIndex === currentIndex) return null;
+
+  const nextTabIds = [...tabIds];
+  const [movedTabId] = nextTabIds.splice(currentIndex, 1);
+  if (!movedTabId) return null;
+  nextTabIds.splice(targetIndex, 0, movedTabId);
+  return nextTabIds;
 }
 
 function terminalTheme(theme: "light" | "dark") {
@@ -376,11 +499,13 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
     theme,
     disabledMessage,
     activeTab,
+    tabOrder = [],
     fileTreeOpen,
     fileTreeState,
     client,
     onWidthChange,
     onActiveTabChange,
+    onTabOrderChange,
     onFileTreeOpenChange,
     onFileTreeStateChange,
     onSessionsChange,
@@ -409,6 +534,9 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
   const resizeFrameRef = useRef<number | null>(null);
   const resizingRef = useRef(false);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
+  const tabsScrollRef = useRef<HTMLDivElement | null>(null);
+  const tabDragRef = useRef<TabDragState | null>(null);
+  const suppressedTabClickRef = useRef("");
   const panelWidth = Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, draftWidth));
   const panelStyle = { "--project-tools-panel-width": `${panelWidth}px` } as CSSProperties;
   const isControlled = externalSessions !== undefined;
@@ -425,6 +553,28 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
     () => sessions.find((session) => session.id === pendingCloseSessionId) ?? null,
     [pendingCloseSessionId, sessions],
   );
+  const [draftTabOrder, setDraftTabOrder] = useState<string[] | null>(null);
+  const [draggingTabId, setDraggingTabId] = useState("");
+  const visibleTabs = useMemo<ProjectToolsTab[]>(() => {
+    const terminalTabs: ProjectToolsTab[] = sessions.map((session) => ({
+      id: session.id,
+      kind: "terminal",
+      session,
+    }));
+    return fileTreeInitialized
+      ? [...terminalTabs, { id: FILE_TREE_TAB_ID, kind: "fileTree" }]
+      : terminalTabs;
+  }, [fileTreeInitialized, sessions]);
+  const effectiveTabOrder = draftTabOrder ?? tabOrder;
+  const orderedProjectTabs = useMemo(
+    () => orderProjectToolsTabs(visibleTabs, effectiveTabOrder),
+    [effectiveTabOrder, visibleTabs],
+  );
+  const orderedProjectTabIds = useMemo(
+    () => orderedProjectTabs.map((tab) => tab.id),
+    [orderedProjectTabs],
+  );
+  const canReorderTabs = orderedProjectTabIds.length > 1;
 
   useEffect(() => {
     const previousFileTreeInitialized = previousFileTreeInitializedRef.current;
@@ -492,6 +642,11 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
 
   useEffect(() => {
     return () => {
+      const dragState = tabDragRef.current;
+      if (dragState?.hasMoved) {
+        document.body.style.userSelect = dragState.previousUserSelect;
+      }
+      tabDragRef.current = null;
       resizeCleanupRef.current?.();
       if (resizeFrameRef.current !== null) {
         window.cancelAnimationFrame(resizeFrameRef.current);
@@ -572,7 +727,17 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
     lastProjectPathKeyRef.current = projectPathKey;
     setPendingCloseSessionId("");
     setClosingSessionId("");
+    setDraftTabOrder(null);
+    setDraggingTabId("");
+    tabDragRef.current = null;
   }, [projectPathKey]);
+
+  useEffect(() => {
+    if (!draftTabOrder) return;
+    if (tabOrderIdsEqual(draftTabOrder, tabOrder)) {
+      setDraftTabOrder(null);
+    }
+  }, [draftTabOrder, tabOrder]);
 
   const setFileTreeInitialized = useCallback(
     (initialized: boolean) => {
@@ -658,6 +823,131 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
       closeSession(session);
     },
     [closeSession, pendingCloseSessionId],
+  );
+
+  const consumeSuppressedTabClick = useCallback((tabId: string) => {
+    if (suppressedTabClickRef.current !== tabId) return false;
+    suppressedTabClickRef.current = "";
+    return true;
+  }, []);
+
+  const handleTabPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLElement>, tabId: string) => {
+      if (event.button !== 0 || orderedProjectTabIds.length < 2) return;
+      event.stopPropagation();
+      tabDragRef.current = {
+        pointerId: event.pointerId,
+        draggedId: tabId,
+        startX: event.clientX,
+        startY: event.clientY,
+        hasMoved: false,
+        order: orderedProjectTabIds,
+        previousUserSelect: "",
+        captureElement: event.currentTarget,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [orderedProjectTabIds],
+  );
+
+  const handleTabReorderKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLButtonElement>, tabId: string) => {
+      if (orderedProjectTabIds.length < 2) return;
+      const nextOrder = reorderTabIdsByKeyboard(orderedProjectTabIds, tabId, event.key);
+      if (!nextOrder) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      setDraftTabOrder(nextOrder);
+      onTabOrderChange?.(nextOrder);
+
+      const tabElement = event.currentTarget.closest("[data-project-tools-tab-id]");
+      if (tabElement instanceof HTMLElement) {
+        window.requestAnimationFrame(() => {
+          tabElement.scrollIntoView({ block: "nearest", inline: "nearest" });
+        });
+      }
+    },
+    [onTabOrderChange, orderedProjectTabIds],
+  );
+
+  const handleTabPointerMove = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    const dragState = tabDragRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+
+    const deltaX = event.clientX - dragState.startX;
+    const deltaY = event.clientY - dragState.startY;
+    if (!dragState.hasMoved && Math.hypot(deltaX, deltaY) < 5) return;
+    if (!dragState.hasMoved) {
+      dragState.hasMoved = true;
+      dragState.previousUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = "none";
+      setDraggingTabId(dragState.draggedId);
+    }
+
+    event.preventDefault();
+    autoScrollTabsForPointer(tabsScrollRef.current, event.clientX);
+    const nextOrder = getReorderedTabIdsFromPointer(
+      tabsScrollRef.current,
+      dragState.draggedId,
+      event.clientX,
+    );
+    if (!nextOrder || tabOrderIdsEqual(nextOrder, dragState.order)) return;
+    dragState.order = nextOrder;
+    setDraftTabOrder(nextOrder);
+  }, []);
+
+  const finishTabDrag = useCallback(
+    (event: ReactPointerEvent<HTMLElement>) => {
+      const dragState = tabDragRef.current;
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+
+      tabDragRef.current = null;
+      if (dragState.captureElement.hasPointerCapture(event.pointerId)) {
+        dragState.captureElement.releasePointerCapture(event.pointerId);
+      }
+      if (dragState.hasMoved) {
+        document.body.style.userSelect = dragState.previousUserSelect;
+        suppressedTabClickRef.current = dragState.draggedId;
+        onTabOrderChange?.(dragState.order);
+      }
+      setDraggingTabId("");
+    },
+    [onTabOrderChange],
+  );
+
+  const renderTabDragHandle = useCallback(
+    (tabId: string, label: string) => (
+      <button
+        type="button"
+        data-project-tools-tab-action="drag"
+        aria-label={`${t("projectTools.reorderTab")} ${label}`}
+        title={t("projectTools.reorderTabHint")}
+        disabled={!canReorderTabs}
+        tabIndex={canReorderTabs ? 0 : -1}
+        className={cn(
+          "flex h-6 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/45 opacity-70 transition-[background-color,color,opacity] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          canReorderTabs
+            ? "cursor-grab touch-none hover:bg-background/80 hover:text-foreground hover:opacity-100 focus-visible:bg-background focus-visible:text-foreground focus-visible:opacity-100 active:cursor-grabbing"
+            : "cursor-default opacity-30",
+        )}
+        onKeyDown={(event) => handleTabReorderKeyDown(event, tabId)}
+        onPointerCancel={finishTabDrag}
+        onPointerDown={(event) => handleTabPointerDown(event, tabId)}
+        onPointerMove={handleTabPointerMove}
+        onPointerUp={finishTabDrag}
+      >
+        <GripVertical className="h-3.5 w-3.5" />
+      </button>
+    ),
+    [
+      canReorderTabs,
+      finishTabDrag,
+      handleTabPointerDown,
+      handleTabPointerMove,
+      handleTabReorderKeyDown,
+      t,
+    ],
   );
 
   const handleResizeStart = useCallback(
@@ -770,8 +1060,63 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
               onMouseDown={handleResizeStart}
             />
             <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
-              <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-                {sessions.map((session) => {
+              <div
+                ref={tabsScrollRef}
+                className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+              >
+                {orderedProjectTabs.map((tab) => {
+                  if (tab.kind === "fileTree") {
+                    return (
+                      <div
+                        key={tab.id}
+                        data-project-tools-tab-id={tab.id}
+                        className={cn(
+                          "group flex h-8 max-w-[12rem] shrink-0 select-none items-center gap-1 rounded-md border border-transparent px-1.5 text-xs text-muted-foreground transition-[background-color,border-color,color,opacity,transform,box-shadow] hover:bg-muted/80 hover:text-foreground",
+                          currentActiveTab === "fileTree" &&
+                            "border-border bg-muted text-foreground shadow-sm",
+                          draggingTabId === tab.id &&
+                            "z-10 scale-[0.98] opacity-80 shadow-md ring-1 ring-ring",
+                        )}
+                        title={t("projectTools.fileTreeTitle")}
+                      >
+                        {renderTabDragHandle(tab.id, t("projectTools.fileTreeTitle"))}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (consumeSuppressedTabClick(tab.id)) return;
+                            onActiveTabChange("fileTree");
+                          }}
+                          className="flex min-w-0 flex-1 items-center gap-1.5 bg-transparent p-0 text-left text-inherit"
+                        >
+                          <FolderTree className="h-3.5 w-3.5 shrink-0" />
+                          <span className="min-w-0 truncate">
+                            {t("projectTools.fileTreeTitle")}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          data-project-tools-tab-action="close"
+                          aria-label={t("projectTools.closeFileTree")}
+                          title={t("projectTools.closeFileTree")}
+                          className="ml-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-background hover:text-foreground focus-visible:bg-background focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
+                          onPointerDown={(event) => {
+                            event.stopPropagation();
+                          }}
+                          onMouseDown={(event) => {
+                            event.stopPropagation();
+                          }}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            closeFileTree();
+                          }}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    );
+                  }
+
+                  const session = tab.session;
                   const isPendingClose = pendingCloseSessionId === session.id;
                   const isClosing = closingSessionId === session.id;
                   const sessionTitle = formatTerminalSessionTitle(
@@ -781,19 +1126,24 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
                   return (
                     <div
                       key={session.id}
+                      data-project-tools-tab-id={session.id}
                       className={cn(
-                        "group flex h-8 max-w-[12rem] shrink-0 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+                        "group flex h-8 max-w-[12rem] shrink-0 select-none items-center gap-1 rounded-md border border-transparent px-1.5 text-xs text-muted-foreground transition-[background-color,border-color,color,opacity,transform,box-shadow] hover:bg-muted/80 hover:text-foreground",
                         currentActiveTab === "terminal" &&
                           activeSession?.id === session.id &&
-                          "bg-muted text-foreground",
+                          "border-border bg-muted text-foreground shadow-sm",
                         isPendingClose &&
                           "bg-destructive/10 text-destructive hover:bg-destructive/15",
+                        draggingTabId === session.id &&
+                          "z-10 scale-[0.98] opacity-80 shadow-md ring-1 ring-ring",
                       )}
                       title={sessionTitle}
                     >
+                      {renderTabDragHandle(session.id, sessionTitle)}
                       <button
                         type="button"
                         onClick={() => {
+                          if (consumeSuppressedTabClick(session.id)) return;
                           setActiveSessionId(session.id);
                           onActiveTabChange("terminal");
                         }}
@@ -809,6 +1159,7 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
                       </button>
                       <button
                         type="button"
+                        data-project-tools-tab-action="close"
                         aria-label={`${isPendingClose ? t("projectTools.confirmClose") : t("projectTools.close")} ${sessionTitle}`}
                         title={
                           isPendingClose
@@ -822,6 +1173,9 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
                             ? "bg-destructive/10 text-destructive hover:bg-destructive hover:text-destructive-foreground md:opacity-100"
                             : "md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100",
                         )}
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                        }}
                         onMouseDown={(event) => {
                           event.stopPropagation();
                         }}
@@ -835,39 +1189,6 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
                     </div>
                   );
                 })}
-                {fileTreeInitialized ? (
-                  <div
-                    className={cn(
-                      "group flex h-8 max-w-[12rem] shrink-0 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-                      currentActiveTab === "fileTree" && "bg-muted text-foreground",
-                    )}
-                    title={t("projectTools.fileTreeTitle")}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => onActiveTabChange("fileTree")}
-                      className="flex min-w-0 flex-1 items-center gap-1.5 bg-transparent p-0 text-left text-inherit"
-                    >
-                      <FolderTree className="h-3.5 w-3.5 shrink-0" />
-                      <span className="min-w-0 truncate">{t("projectTools.fileTreeTitle")}</span>
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={t("projectTools.closeFileTree")}
-                      title={t("projectTools.closeFileTree")}
-                      className="ml-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-background hover:text-foreground focus-visible:bg-background focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
-                      onMouseDown={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        closeFileTree();
-                      }}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </div>
-                ) : null}
               </div>
               {shellOptions.length > 1 ? (
                 <select
@@ -992,9 +1313,7 @@ export function ProjectToolsPanel(props: ProjectToolsPanelProps) {
                   </div>
                 ) : null}
                 {error ? (
-                  <div className="col-span-full text-center text-xs text-destructive">
-                    {error}
-                  </div>
+                  <div className="col-span-full text-center text-xs text-destructive">{error}</div>
                 ) : null}
               </div>
             ) : (

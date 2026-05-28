@@ -51,6 +51,7 @@ import {
   findProviderModelConfig,
   getChatRuntimeReasoningLevelsForProvider,
   getProjectToolsFileTreeProjectState,
+  getProjectToolsPanelTabOrder,
   isAgentDevMode,
   isProjectToolsFileTreeOpen,
   normalizeChatRuntimeControlsForProvider,
@@ -61,6 +62,7 @@ import {
   updateCustomSettings,
   updateProjectToolsFileTreeProjectState,
   updateProjectToolsFileTreeOpen,
+  updateProjectToolsPanelTabOrder,
   type AppSettings,
   type ChatRuntimeControls,
   type CustomProvider,
@@ -6236,6 +6238,10 @@ export default function App() {
             theme={settings.theme}
             disabledMessage={terminalDisabledMessage}
             activeTab={settings.customSettings.projectToolsPanel.activeTab}
+            tabOrder={getProjectToolsPanelTabOrder(
+              settings.customSettings,
+              terminalProjectPathKey,
+            )}
             fileTreeOpen={isProjectToolsFileTreeOpen(
               settings.customSettings,
               terminalProjectPathKey,
@@ -6263,6 +6269,11 @@ export default function App() {
                     activeTab,
                   },
                 }),
+              )
+            }
+            onTabOrderChange={(tabOrder) =>
+              setSettings((prev) =>
+                updateProjectToolsPanelTabOrder(prev, terminalProjectPathKey, tabOrder),
               )
             }
             onFileTreeOpenChange={(open) =>
