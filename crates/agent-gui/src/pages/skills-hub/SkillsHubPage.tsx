@@ -561,13 +561,15 @@ export function SkillsHubPage(props: SkillsHubPageProps) {
                 <div className="flex shrink-0 items-center gap-2">
                   <button
                     type="button"
+                    role="switch"
+                    aria-checked={skillsEnabled}
                     disabled={lockedByChatMode}
                     onClick={() => setSkillsEnabled(!skillsEnabled)}
                     className={cn(
                       "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full ring-1 transition-all",
                       "disabled:cursor-not-allowed disabled:opacity-50",
                       skillsEnabled
-                        ? "bg-foreground/80 ring-foreground/30 shadow-[0_2px_8px_-3px_rgba(15,23,42,0.4)]"
+                        ? "bg-emerald-500 ring-emerald-400/45 shadow-[0_2px_10px_-3px_rgba(16,185,129,0.65)] dark:bg-emerald-400 dark:ring-emerald-300/45"
                         : "bg-muted-foreground/25 ring-border/40",
                     )}
                     title={skillsEnabled ? "禁用 Skills" : "启用 Skills"}
