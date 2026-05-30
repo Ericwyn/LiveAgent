@@ -42,9 +42,13 @@ const GATEWAY_SETTINGS_SYNC_EVENT = "gateway:settings-sync";
 
 function AppChrome(props: { children: ReactNode }) {
   return (
-    <div className="relative flex h-full w-full flex-col overflow-hidden">
+    <div className="relative flex h-full w-full flex-col overflow-hidden bg-[hsl(220_13%_91%)] dark:bg-[hsl(224_22%_5%)]">
       <WindowsTitleBar />
-      <div className="relative min-h-0 flex-1">{props.children}</div>
+      <div className="relative min-h-0 flex-1 p-1.5">
+        <div className="relative h-full w-full overflow-hidden rounded-xl bg-background shadow-[0_0_0_0.5px_hsl(var(--border)/0.6)]">
+          {props.children}
+        </div>
+      </div>
     </div>
   );
 }

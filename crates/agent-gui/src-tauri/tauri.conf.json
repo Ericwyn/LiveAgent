@@ -19,7 +19,8 @@
         "minWidth": 1200,
         "minHeight": 720,
         "backgroundThrottling": "disabled",
-        "titleBarStyle": "Overlay"
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": { "x": 18, "y": 18 }
       }
     ],
     "security": {

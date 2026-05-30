@@ -38,7 +38,7 @@ export function MacOsTitleBarToggle({
   const [show] = useState(isMacOsTauri);
   if (!show) return null;
   return (
-    <div className="fixed left-[76px] top-0 z-49 flex h-[32px] items-center gap-0.5">
+    <div className="fixed left-[82px] top-[4px] z-49 flex h-[32px] items-center gap-0.5">
       <button
         type="button"
         onClick={onToggle}

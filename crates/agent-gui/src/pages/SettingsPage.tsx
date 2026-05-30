@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
-import { isMacOsTauri } from "../components/MacOsTitleBarSpacer";
+import { isMacOsTauri, MacOsTitleBarSpacer } from "../components/MacOsTitleBarSpacer";
 import {
   ArrowLeft,
   BookOpen,
@@ -187,35 +187,21 @@ export function SettingsPage(props: SettingsPageProps) {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      {onMac && (
-        <div data-tauri-drag-region className="flex h-[38px] shrink-0 items-center">
-          <div data-tauri-drag-region className="w-[76px] shrink-0" />
-          <button
-            type="button"
-            onClick={onBack}
-            className="flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
-          >
-            <ArrowLeft className="h-3.5 w-3.5 shrink-0" />
-            <span>{t("settings.backToChat")}</span>
-          </button>
-          <div data-tauri-drag-region className="flex-1" />
-        </div>
-      )}
-
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-52 shrink-0 flex-col border-r bg-muted/20">
-          {!onMac && (
-            <div className="px-3 pb-1 pt-3">
-              <button
-                type="button"
-                onClick={onBack}
-                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
-              >
-                <ArrowLeft className="h-4 w-4 shrink-0" />
-                <span>{t("settings.backToChat")}</span>
-              </button>
-            </div>
+          {onMac && (
+            <div data-tauri-drag-region className="h-[38px] shrink-0" />
           )}
+          <div className="px-3 pb-1 pt-3">
+            <button
+              type="button"
+              onClick={onBack}
+              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+            >
+              <ArrowLeft className="h-4 w-4 shrink-0" />
+              <span>{t("settings.backToChat")}</span>
+            </button>
+          </div>
 
           <nav className="flex-1 space-y-0.5 px-3 py-2">
             {navItems.map((item) => (
@@ -241,6 +227,7 @@ export function SettingsPage(props: SettingsPageProps) {
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">
+          <MacOsTitleBarSpacer />
           <div className="border-b px-6 py-3.5">
             <div key={section} className="settings-section-title-enter text-base font-semibold">
               {sectionLabels[section]}
