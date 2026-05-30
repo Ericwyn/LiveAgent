@@ -982,7 +982,7 @@ fn resolve_shell(shell: Option<String>) -> Result<ShellSpec, String> {
                 args: powershell_args,
             }),
             "cmd" => Ok(ShellSpec {
-                label: "cmd".to_string(),
+                label: "Cmd".to_string(),
                 command: "cmd.exe".to_string(),
                 args: Vec::new(),
             }),
@@ -1045,7 +1045,7 @@ pub fn terminal_shell_options() -> TerminalShellOptionsResponse {
             },
             TerminalShellOption {
                 id: "cmd".to_string(),
-                label: "cmd".to_string(),
+                label: "Cmd".to_string(),
                 command: "cmd.exe".to_string(),
             },
         ];
