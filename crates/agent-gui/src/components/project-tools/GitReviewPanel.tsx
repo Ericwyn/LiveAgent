@@ -17,7 +17,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useLocale } from "../../i18n";
-import { computeGitGraph, GRAPH_COLORS, type GraphRow } from "../../lib/git/gitGraph";
+import { computeGitGraph, GRAPH_COLORS, type GraphColor, type GraphRow } from "../../lib/git/gitGraph";
 import type {
   GitClient,
   GitCommitDetails,
@@ -430,7 +430,7 @@ const CHANGES_MENU_HEIGHT = 170;
 const HISTORY_CONTEXT_MENU_WIDTH = 232;
 const HISTORY_CONTEXT_MENU_HEIGHT = 270;
 const HISTORY_FILE_CONTEXT_MENU_HEIGHT = 90;
-const GIT_HISTORY_LIMIT = 120;
+const GIT_HISTORY_LIMIT = 200;
 const CHANGE_CONTEXT_MENU_ITEM_CLASS =
   "flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-45";
 const GIT_REVIEW_POLL_INTERVAL_MS = 1500;
@@ -1542,77 +1542,79 @@ function assertGitOperationResult(value: unknown, fallbackMessage: string) {
   }
 }
 
-const GRAPH_COL_WIDTH = 16;
-const GRAPH_ROW_HEIGHT = 28;
-const GRAPH_DOT_Y = 14;
-const GRAPH_DOT_R = 3.5;
-const GRAPH_LOCAL_ONLY_DOT_R = GRAPH_DOT_R + 0.9;
-const GRAPH_ANCHOR_R = 5.2;
-const GRAPH_ANCHOR_CENTER_R = 1.9;
-const GRAPH_LINE_W = 2;
-const GRAPH_CURVE_HORIZONTAL_TENSION = 0.7;
-const GRAPH_CURVE_VERTICAL_TENSION = 0.82;
-const GRAPH_MERGE_BRANCH_HORIZONTAL_TENSION = 0.92;
-const GRAPH_MERGE_BRANCH_VERTICAL_TENSION = 0.55;
+const GRAPH_SWIMLANE_WIDTH = 11;
+const GRAPH_SVG_HEIGHT = 22;
+const GRAPH_DOT_Y = GRAPH_SWIMLANE_WIDTH;
+const GRAPH_DOT_R = 4;
+const GRAPH_STROKE_W = 2;
+const GRAPH_LINE_W = 1;
+const GRAPH_CURVE_R = 5;
 const COMMIT_REF_TAG_LIMIT = 1;
 const COMMIT_DETAIL_REF_TAG_LIMIT = 3;
 
 function graphLayoutWidth(row: GraphRow) {
-  return graphDrawWidth(row);
+  return graphLaneWidth(graphColumnCount(row));
 }
 
-function graphDrawWidth(row: GraphRow) {
-  const maxPipeCol = Math.max(
-    row.commitCol,
-    ...row.topPipes.flatMap((pipe) => [pipe.fromCol, pipe.toCol]),
-    ...row.bottomPipes.flatMap((pipe) => [pipe.fromCol, pipe.toCol]),
-  );
-  return (maxPipeCol + 1) * GRAPH_COL_WIDTH;
+function graphColumnCount(row: GraphRow) {
+  return Math.max(row.inputLanes.length, row.outputLanes.length, row.commitCol + 1, 1);
 }
 
-function graphContinuationWidth(row: GraphRow) {
-  const maxPipeCol = Math.max(
-    row.commitCol,
-    ...row.bottomPipes.flatMap((pipe) => [pipe.fromCol, pipe.toCol]),
-  );
-  return (maxPipeCol + 1) * GRAPH_COL_WIDTH;
+function graphLaneWidth(columnCount: number) {
+  return GRAPH_SWIMLANE_WIDTH * (columnCount + 1);
 }
 
 function graphLaneX(col: number) {
-  return col * GRAPH_COL_WIDTH + GRAPH_COL_WIDTH / 2;
+  return GRAPH_SWIMLANE_WIDTH * (col + 1);
 }
 
-function graphAnchorSideX(cx: number, targetX: number) {
-  if (targetX === cx) return cx;
-  return cx + (targetX > cx ? GRAPH_ANCHOR_R : -GRAPH_ANCHOR_R);
+function graphColor(color: GraphColor) {
+  if (typeof color === "string") return color;
+  return GRAPH_COLORS[((color % GRAPH_COLORS.length) + GRAPH_COLORS.length) % GRAPH_COLORS.length];
 }
 
-function graphBezierPath(
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  commitAnchor: "from" | "to",
-) {
-  const xDirection = x2 > x1 ? 1 : -1;
-  const yDirection = y2 > y1 ? 1 : -1;
-  const xHandle = Math.abs(x2 - x1) * GRAPH_CURVE_HORIZONTAL_TENSION;
-  const yHandle = Math.abs(y2 - y1) * GRAPH_CURVE_VERTICAL_TENSION;
-
-  if (commitAnchor === "from") {
-    return `M${x1} ${y1}C${x1 + xDirection * xHandle} ${y1},${x2} ${y2 - yDirection * yHandle},${x2} ${y2}`;
+function findLastGraphLaneIndex(lanes: GraphRow["outputLanes"], id: string) {
+  for (let index = lanes.length - 1; index >= 0; index--) {
+    if (lanes[index].id === id) return index;
   }
-
-  return `M${x1} ${y1}C${x1} ${y1 + yDirection * yHandle},${x2 - xDirection * xHandle} ${y2},${x2} ${y2}`;
+  return -1;
 }
 
-function graphMergeBranchPath(x1: number, y1: number, x2: number, y2: number) {
-  const xDirection = x2 > x1 ? 1 : -1;
-  const yDirection = y2 > y1 ? 1 : -1;
-  const xHandle = Math.abs(x2 - x1) * GRAPH_MERGE_BRANCH_HORIZONTAL_TENSION;
-  const yHandle = Math.abs(y2 - y1) * GRAPH_MERGE_BRANCH_VERTICAL_TENSION;
+function graphVerticalPath(col: number, y1 = 0, y2 = GRAPH_SVG_HEIGHT) {
+  const x = graphLaneX(col);
+  return `M ${x} ${y1} V ${y2}`;
+}
 
-  return `M${x1} ${y1}C${x1 + xDirection * xHandle} ${y1},${x2} ${y2 - yDirection * yHandle},${x2} ${y2}`;
+function graphCommitJoinPath(fromCol: number, toCol: number) {
+  if (fromCol === toCol) return graphVerticalPath(fromCol, 0, GRAPH_DOT_Y);
+  const x1 = graphLaneX(fromCol);
+  const x2 = graphLaneX(toCol);
+  const direction = toCol > fromCol ? 1 : -1;
+  return [
+    `M ${x1} 0`,
+    `A ${GRAPH_SWIMLANE_WIDTH} ${GRAPH_SWIMLANE_WIDTH} 0 0 ${direction > 0 ? 0 : 1} ${
+      x1 + direction * GRAPH_SWIMLANE_WIDTH
+    } ${GRAPH_DOT_Y}`,
+    `H ${x2}`,
+  ].join(" ");
+}
+
+function graphParentBranchPath(fromCol: number, toCol: number) {
+  if (fromCol === toCol) return "";
+  const circleX = graphLaneX(fromCol);
+  const branchX = GRAPH_SWIMLANE_WIDTH * toCol;
+  const parentX = graphLaneX(toCol);
+  return [
+    `M ${branchX} ${GRAPH_DOT_Y}`,
+    `A ${GRAPH_SWIMLANE_WIDTH} ${GRAPH_SWIMLANE_WIDTH} 0 0 1 ${parentX} ${GRAPH_SVG_HEIGHT}`,
+    `M ${branchX} ${GRAPH_DOT_Y}`,
+    `H ${circleX}`,
+  ].join(" ");
+}
+
+function graphCircleColor(row: GraphRow) {
+  const lane = row.outputLanes[row.commitCol] ?? row.inputLanes[row.commitCol];
+  return graphColor(lane?.color ?? row.commitColor);
 }
 
 function orderedCommitRefs(refs: readonly string[]) {
@@ -1689,23 +1691,46 @@ function CommitRefTags({
 function GitGraphCommitMarker({
   cx,
   color,
+  isHead,
   isMerge,
-  localOnly,
 }: {
   cx: number;
   color: string;
+  isHead: boolean;
   isMerge: boolean;
-  localOnly: boolean;
 }) {
+  if (isHead) {
+    return (
+      <g>
+        <circle
+          cx={cx}
+          cy={GRAPH_DOT_Y}
+          r={GRAPH_DOT_R + 3}
+          fill={color}
+          stroke="var(--git-review-graph-background)"
+          strokeWidth={GRAPH_STROKE_W}
+        />
+        <circle
+          cx={cx}
+          cy={GRAPH_DOT_Y}
+          r={GRAPH_DOT_R - 2}
+          fill="var(--git-review-graph-background)"
+          stroke="var(--git-review-graph-background)"
+          strokeWidth={GRAPH_DOT_R}
+        />
+      </g>
+    );
+  }
+
   if (!isMerge) {
     return (
       <circle
         cx={cx}
         cy={GRAPH_DOT_Y}
-        r={localOnly ? GRAPH_LOCAL_ONLY_DOT_R : GRAPH_DOT_R}
-        fill={localOnly ? "none" : color}
-        stroke={localOnly ? color : "var(--background)"}
-        strokeWidth={2}
+        r={GRAPH_DOT_R + 1}
+        fill={color}
+        stroke="var(--git-review-graph-background)"
+        strokeWidth={GRAPH_STROKE_W}
       />
     );
   }
@@ -1715,140 +1740,190 @@ function GitGraphCommitMarker({
       <circle
         cx={cx}
         cy={GRAPH_DOT_Y}
-        r={GRAPH_ANCHOR_R}
-        fill="none"
-        stroke={color}
-        strokeWidth={1.7}
+        r={GRAPH_DOT_R + 2}
+        fill={color}
+        stroke="var(--git-review-graph-background)"
+        strokeWidth={GRAPH_STROKE_W}
       />
-      <path
-        d={`M${cx} ${GRAPH_DOT_Y - GRAPH_ANCHOR_R - 2.2}V${GRAPH_DOT_Y - GRAPH_ANCHOR_R - 0.2}M${cx} ${GRAPH_DOT_Y + GRAPH_ANCHOR_R + 0.2}V${GRAPH_DOT_Y + GRAPH_ANCHOR_R + 2.2}`}
-        fill="none"
-        stroke={color}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth={1.7}
+      <circle
+        cx={cx}
+        cy={GRAPH_DOT_Y}
+        r={GRAPH_DOT_R - 1}
+        fill={color}
+        stroke="var(--git-review-graph-background)"
+        strokeWidth={GRAPH_STROKE_W}
       />
-      {localOnly ? null : (
-        <circle cx={cx} cy={GRAPH_DOT_Y} r={GRAPH_ANCHOR_CENTER_R} fill={color} />
-      )}
     </g>
   );
 }
 
-function GitGraphSvgCell({
-  row,
-  isFirst,
-  isLast,
-  isMerge,
-  localOnly,
-}: {
-  row: GraphRow;
-  isFirst: boolean;
-  isLast: boolean;
-  isMerge: boolean;
-  localOnly: boolean;
-}) {
-  const drawW = graphDrawWidth(row);
+function GitGraphSvgCell({ row }: { row: GraphRow }) {
   const layoutW = graphLayoutWidth(row);
   const cx = graphLaneX(row.commitCol);
-  const commitColor = GRAPH_COLORS[row.commitColor % GRAPH_COLORS.length];
+  const commitColor = graphCircleColor(row);
+  const commitInputColor = graphColor(row.commitColor);
+  let outputIndex = 0;
 
   return (
-    <div className="h-7 shrink-0 overflow-visible" style={{ width: layoutW, minWidth: layoutW }}>
+    <div
+      className="shrink-0 self-center overflow-visible"
+      style={{ width: layoutW, minWidth: layoutW, height: GRAPH_SVG_HEIGHT }}
+    >
       <svg
-        width={drawW}
-        height={GRAPH_ROW_HEIGHT}
+        width={layoutW}
+        height={GRAPH_SVG_HEIGHT}
         className="block overflow-visible"
         aria-hidden="true"
         style={{ shapeRendering: "geometricPrecision" }}
       >
-        {row.topPipes.map((p, i) => {
-          const x1 = graphLaneX(p.fromCol);
-          const x2 = graphLaneX(p.toCol);
-          const isMergeBranch = isMerge && p.toCol === row.commitCol && p.fromCol !== row.commitCol;
-          const branchX2 = isMergeBranch ? graphAnchorSideX(x2, x1) : x2;
-          const y2 =
-            isMerge && p.toCol === row.commitCol && !isMergeBranch
-              ? GRAPH_DOT_Y - GRAPH_ANCHOR_R
-              : localOnly && !isMerge && p.toCol === row.commitCol
-                ? GRAPH_DOT_Y - GRAPH_LOCAL_ONLY_DOT_R
-                : GRAPH_DOT_Y;
-          const c = GRAPH_COLORS[p.color % GRAPH_COLORS.length];
-          if (isFirst) return null;
+        {row.inputLanes.map((lane, index) => {
+          if (lane.id === row.sha) {
+            if (index !== row.commitCol) {
+              return (
+                <path
+                  key={`join-${index}-${lane.id}`}
+                  d={graphCommitJoinPath(index, row.commitCol)}
+                  fill="none"
+                  stroke={graphColor(lane.color)}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={GRAPH_LINE_W}
+                />
+              );
+            }
+
+            outputIndex++;
+            return null;
+          }
+
+          if (
+            outputIndex < row.outputLanes.length &&
+            lane.id === row.outputLanes[outputIndex].id
+          ) {
+            if (index === outputIndex) {
+              outputIndex++;
+              return (
+                <path
+                  key={`lane-${index}-${lane.id}`}
+                  d={graphVerticalPath(index)}
+                  fill="none"
+                  stroke={graphColor(lane.color)}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={GRAPH_LINE_W}
+                />
+              );
+            }
+
+            const d: string[] = [];
+            d.push(`M ${graphLaneX(index)} 0`);
+            d.push(`V 6`);
+            d.push(
+              `A ${GRAPH_CURVE_R} ${GRAPH_CURVE_R} 0 0 1 ${graphLaneX(index) - GRAPH_CURVE_R} ${GRAPH_DOT_Y}`,
+            );
+            d.push(`H ${graphLaneX(outputIndex) + GRAPH_CURVE_R}`);
+            d.push(
+              `A ${GRAPH_CURVE_R} ${GRAPH_CURVE_R} 0 0 0 ${graphLaneX(outputIndex)} ${
+                GRAPH_DOT_Y + GRAPH_CURVE_R
+              }`,
+            );
+            d.push(`V ${GRAPH_SVG_HEIGHT}`);
+
+            outputIndex++;
+            return (
+              <path
+                key={`lane-${index}-${lane.id}`}
+                d={d.join(" ")}
+                fill="none"
+                stroke={graphColor(lane.color)}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={GRAPH_LINE_W}
+              />
+            );
+          }
+
+          return null;
+        })}
+
+        {row.parents.slice(1).map((parentId, index) => {
+          const parentIndex = findLastGraphLaneIndex(row.outputLanes, parentId);
+          if (parentIndex === -1 || parentIndex === row.commitCol) {
+            return null;
+          }
+
           return (
             <path
-              key={`t${i}`}
-              d={graphBezierPath(x1, 0, branchX2, y2, "to")}
+              key={`parent-${index}-${parentId}`}
+              d={graphParentBranchPath(row.commitCol, parentIndex)}
               fill="none"
-              stroke={c}
-              strokeWidth={GRAPH_LINE_W}
+              stroke={graphColor(row.outputLanes[parentIndex].color)}
               strokeLinecap="round"
               strokeLinejoin="round"
+              strokeWidth={GRAPH_LINE_W}
             />
           );
         })}
 
-        {row.bottomPipes.map((p, i) => {
-          const x1 = graphLaneX(p.fromCol);
-          const x2 = graphLaneX(p.toCol);
-          const isMergeBranch = isMerge && p.fromCol === row.commitCol && p.toCol !== row.commitCol;
-          const branchX1 = isMergeBranch ? graphAnchorSideX(x1, x2) : x1;
-          const y1 =
-            isMerge && p.fromCol === row.commitCol && !isMergeBranch
-              ? GRAPH_DOT_Y + GRAPH_ANCHOR_R
-              : localOnly && !isMerge && p.fromCol === row.commitCol
-                ? GRAPH_DOT_Y + GRAPH_LOCAL_ONLY_DOT_R
-                : GRAPH_DOT_Y;
-          const c = GRAPH_COLORS[p.color % GRAPH_COLORS.length];
-          if (isLast) return null;
-          return (
-            <path
-              key={`b${i}`}
-              d={
-                isMergeBranch
-                  ? graphMergeBranchPath(branchX1, y1, x2, GRAPH_ROW_HEIGHT)
-                  : graphBezierPath(x1, y1, x2, GRAPH_ROW_HEIGHT, "from")
-              }
-              fill="none"
-              stroke={c}
-              strokeWidth={GRAPH_LINE_W}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          );
-        })}
+        {row.inputLanes.some((lane) => lane.id === row.sha) ? (
+          <path
+            d={graphVerticalPath(row.commitCol, 0, GRAPH_DOT_Y)}
+            fill="none"
+            stroke={commitInputColor}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={GRAPH_LINE_W}
+          />
+        ) : null}
 
-        <GitGraphCommitMarker cx={cx} color={commitColor} isMerge={isMerge} localOnly={localOnly} />
+        {row.parents.length > 0 ? (
+          <path
+            d={graphVerticalPath(row.commitCol, GRAPH_DOT_Y, GRAPH_SVG_HEIGHT)}
+            fill="none"
+            stroke={commitColor}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={GRAPH_LINE_W}
+          />
+        ) : null}
+
+        <GitGraphCommitMarker
+          cx={cx}
+          color={commitColor}
+          isHead={row.isHead}
+          isMerge={row.isMerge}
+        />
       </svg>
     </div>
   );
 }
 
-function GitGraphContinuationCell({ row, isLast }: { row: GraphRow; isLast: boolean }) {
-  const layoutW = graphContinuationWidth(row);
-  const pipes = isLast ? [] : row.bottomPipes;
+function GitGraphContinuationCell({ row }: { row: GraphRow }) {
+  const layoutW = graphLayoutWidth(row);
 
   return (
     <div
-      className="relative shrink-0 self-stretch overflow-visible"
-      style={{ width: layoutW, minWidth: layoutW }}
+      className="shrink-0 self-center overflow-visible"
+      style={{ width: layoutW, minWidth: layoutW, height: GRAPH_SVG_HEIGHT }}
       aria-hidden="true"
     >
-      {pipes.map((pipe, index) => {
-        const x = graphLaneX(pipe.toCol);
-        return (
-          <span
-            key={`c${index}:${pipe.toCol}:${pipe.color}`}
-            className="absolute bottom-0 top-0"
-            style={{
-              backgroundColor: GRAPH_COLORS[pipe.color % GRAPH_COLORS.length],
-              borderRadius: GRAPH_LINE_W,
-              left: x - GRAPH_LINE_W / 2,
-              width: GRAPH_LINE_W,
-            }}
+      <svg
+        width={layoutW}
+        height={GRAPH_SVG_HEIGHT}
+        className="block overflow-visible"
+        style={{ shapeRendering: "geometricPrecision" }}
+      >
+        {row.outputLanes.map((lane, index) => (
+          <path
+            key={`c${index}:${lane.id}:${lane.color}`}
+            d={graphVerticalPath(index)}
+            fill="none"
+            stroke={graphColor(lane.color)}
+            strokeLinecap="round"
+            strokeWidth={GRAPH_LINE_W}
           />
-        );
-      })}
+        ))}
+      </svg>
     </div>
   );
 }
@@ -2735,7 +2810,15 @@ export function GitReviewPanel(props: {
     ? gitHubCommitUrl(state.remoteUrl, historyContextCommit.sha)
     : "";
 
-  const gitGraph = useMemo(() => computeGitGraph(historyCommits), [historyCommits]);
+  const gitGraph = useMemo(
+    () =>
+      computeGitGraph(historyCommits, {
+        currentRef: state.head,
+        remoteRef: state.upstream,
+        remoteName: state.remoteName,
+      }),
+    [historyCommits, state.head, state.remoteName, state.upstream],
+  );
   const historyRows = useMemo<GitHistoryRow[]>(() => {
     const rows: GitHistoryRow[] = [];
     historyCommits.forEach((commit, commitIndex) => {
@@ -2751,7 +2834,7 @@ export function GitReviewPanel(props: {
   const historyVirtualizer = useVirtualizer({
     count: historyRows.length,
     getScrollElement: () => historyListRef.current,
-    estimateSize: (index) => (historyRows[index]?.type === "file" ? 26 : 28),
+    estimateSize: () => 22,
     overscan: 8,
     getItemKey: (index) => {
       const row = historyRows[index];
@@ -3856,53 +3939,40 @@ export function GitReviewPanel(props: {
                           className="absolute left-0 top-0 w-full"
                           style={{ transform: `translateY(${virtualRow.start}px)` }}
                         >
-                          <div
-                            className="flex min-w-0"
+                          <button
+                            type="button"
+                            className="git-review-history-row flex h-[22px] w-full min-w-0 select-none items-center gap-1.5 px-1.5 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            data-selected={fileSelected || undefined}
+                            data-context-open={fileContextMenuOpen || undefined}
+                            title={
+                              row.file.oldPath
+                                ? `${row.file.oldPath} -> ${row.file.path}`
+                                : row.file.path
+                            }
                             onContextMenu={(event) =>
                               openHistoryFileContextMenu(event, row.commit, row.file)
                             }
+                            onClick={() => selectCommitFile(row.commit, row.file)}
                           >
                             {graphRow ? (
-                              <GitGraphContinuationCell
-                                row={graphRow}
-                                isLast={row.commitIndex === historyCommits.length - 1}
-                              />
+                              <GitGraphContinuationCell row={graphRow} />
                             ) : null}
-                            <button
-                              type="button"
+                            <TypeIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
+                            <span className="min-w-0 flex-1 truncate">
+                              <span className="font-medium">{fileName}</span>
+                              <span className="ml-1 text-[10px] text-muted-foreground">
+                                {filePath}
+                              </span>
+                            </span>
+                            <span
                               className={cn(
-                                "mr-1 flex h-6 min-w-0 flex-1 select-none items-center gap-1.5 rounded px-1.5 text-left text-xs transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                                fileSelected && "bg-accent text-accent-foreground",
-                                fileContextMenuOpen &&
-                                  "bg-primary/10 text-foreground ring-1 ring-inset ring-primary/35",
+                                "shrink-0 text-[10px] font-semibold",
+                                commitFileStatusTone(row.file),
                               )}
-                              title={
-                                row.file.oldPath
-                                  ? `${row.file.oldPath} -> ${row.file.path}`
-                                  : row.file.path
-                              }
-                              onContextMenu={(event) =>
-                                openHistoryFileContextMenu(event, row.commit, row.file)
-                              }
-                              onClick={() => selectCommitFile(row.commit, row.file)}
                             >
-                              <TypeIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
-                              <span className="min-w-0 flex-1 truncate">
-                                <span className="font-medium">{fileName}</span>
-                                <span className="ml-1 text-[10px] text-muted-foreground">
-                                  {filePath}
-                                </span>
-                              </span>
-                              <span
-                                className={cn(
-                                  "shrink-0 text-[10px] font-semibold",
-                                  commitFileStatusTone(row.file),
-                                )}
-                              >
-                                {commitFileStatusLabel(row.file)}
-                              </span>
-                            </button>
-                          </div>
+                              {commitFileStatusLabel(row.file)}
+                            </span>
+                          </button>
                         </div>
                       );
                     }
@@ -3921,38 +3991,24 @@ export function GitReviewPanel(props: {
                         className="absolute left-0 top-0 w-full"
                         style={{ transform: `translateY(${virtualRow.start}px)` }}
                       >
-                        <div
-                          className="flex min-w-0"
+                        <button
+                          type="button"
+                          className="git-review-history-row flex h-[22px] w-full min-w-0 select-none items-center gap-1 px-1.5 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          data-selected={commitSelected || undefined}
+                          data-context-open={commitContextMenuOpen || undefined}
+                          title={commitHistoryTitle(commit)}
+                          aria-expanded={commitExpanded}
                           onContextMenu={(event) => openHistoryCommitContextMenu(event, commit)}
+                          onClick={() => selectCommit(commit)}
                         >
                           {graphRow ? (
-                            <GitGraphSvgCell
-                              row={graphRow}
-                              isFirst={row.commitIndex === 0}
-                              isLast={row.commitIndex === historyCommits.length - 1}
-                              isMerge={commit.parents.length > 1}
-                              localOnly={commit.localOnly}
-                            />
+                            <GitGraphSvgCell row={graphRow} />
                           ) : null}
-                          <button
-                            type="button"
-                            className={cn(
-                              "flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 pr-1 text-left text-xs transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                              commitSelected && "bg-accent/80 text-accent-foreground",
-                              commitContextMenuOpen &&
-                                "bg-primary/10 text-foreground ring-1 ring-inset ring-primary/35",
-                            )}
-                            title={commitHistoryTitle(commit)}
-                            aria-expanded={commitExpanded}
-                            onContextMenu={(event) => openHistoryCommitContextMenu(event, commit)}
-                            onClick={() => selectCommit(commit)}
-                          >
-                            <span className="min-w-0 flex-1 truncate text-[12px] font-medium">
-                              {commit.subject || commit.shortSha}
-                            </span>
-                            <CommitRefTags refs={commit.refs} selected={commitSelected} />
-                          </button>
-                        </div>
+                          <span className="min-w-0 flex-1 truncate text-[12px] font-medium">
+                            {commit.subject || commit.shortSha}
+                          </span>
+                          <CommitRefTags refs={commit.refs} selected={commitSelected} />
+                        </button>
                       </div>
                     );
                   })}
