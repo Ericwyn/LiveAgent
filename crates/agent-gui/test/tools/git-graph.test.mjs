@@ -341,6 +341,54 @@ for (const [surface, graph] of Object.entries(graphModules)) {
     ]);
   });
 
+  test(`${surface} git graph keeps current and base refs separate around an upstream merge`, () => {
+    const result = graph.computeGitGraph(
+      [
+        { sha: "features-tip", parents: ["feature-work"], refs: ["features", "origin/features"] },
+        { sha: "feature-work", parents: ["restore-recent"] },
+        {
+          sha: "merge-52",
+          parents: ["merge-51", "feature-work"],
+          refs: ["origin/main"],
+        },
+        { sha: "restore-recent", parents: ["merge-51"] },
+        { sha: "merge-51", parents: ["main-parent", "sidebar"] },
+      ],
+      {
+        currentRef: "features",
+        remoteRef: "origin/features",
+        baseRef: "origin/main",
+      },
+    );
+
+    assert.equal(result.maxCols, 3);
+    const rows = simplifyRows(result.rows);
+    const merge52 = rows.find((row) => row.sha === "merge-52");
+    assert.deepEqual(merge52, {
+      sha: "merge-52",
+      parents: ["merge-51", "feature-work"],
+      commitCol: 1,
+      commitColor: graph.GRAPH_REF_COLORS.base,
+      inputLanes: [{ id: "restore-recent", color: graph.GRAPH_REF_COLORS.local }],
+      outputLanes: [
+        { id: "restore-recent", color: graph.GRAPH_REF_COLORS.local },
+        { id: "merge-51", color: graph.GRAPH_REF_COLORS.base },
+        { id: "feature-work", color: 0 },
+      ],
+      isHead: false,
+      isMerge: true,
+    });
+
+    const restoreRecent = rows.find((row) => row.sha === "restore-recent");
+    assert.equal(restoreRecent.commitCol, 0);
+    assert.equal(restoreRecent.commitColor, graph.GRAPH_REF_COLORS.local);
+    assert.deepEqual(restoreRecent.inputLanes, [
+      { id: "restore-recent", color: graph.GRAPH_REF_COLORS.local },
+      { id: "merge-51", color: graph.GRAPH_REF_COLORS.base },
+      { id: "feature-work", color: 0 },
+    ]);
+  });
+
   test(`${surface} git graph normalizes duplicate parent ids`, () => {
     const result = graph.computeGitGraph([{ sha: "m", parents: ["a", "a", "b", ""] }]);
 

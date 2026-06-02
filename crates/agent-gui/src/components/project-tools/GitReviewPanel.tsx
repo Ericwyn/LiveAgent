@@ -525,7 +525,7 @@ type GitReviewStackedPane = "list" | "detail";
 type GitHistoryMarkerKind = Extract<GraphRow["kind"], "incoming-changes" | "outgoing-changes">;
 type GitHistoryGraphState = Pick<
   GitLogResponse,
-  "historyBaseRef" | "historyAhead" | "historyBehind" | "mergeBase"
+  "historyBaseRef" | "historyRemoteRef" | "historyAhead" | "historyBehind" | "mergeBase"
 >;
 type GitHistoryRow =
   | {
@@ -2254,7 +2254,7 @@ function gitHistorySignature(
       ].join("\x1e"),
     )
     .join("\x1f");
-  return `${gitRepositoryStateSignature(state)}\x1d${historyGraphState.historyBaseRef}\x1e${historyGraphState.historyAhead}\x1e${historyGraphState.historyBehind}\x1e${historyGraphState.mergeBase}\x1c${commitsSignature}`;
+  return `${gitRepositoryStateSignature(state)}\x1d${historyGraphState.historyBaseRef}\x1e${historyGraphState.historyRemoteRef}\x1e${historyGraphState.historyAhead}\x1e${historyGraphState.historyBehind}\x1e${historyGraphState.mergeBase}\x1c${commitsSignature}`;
 }
 
 function gitDiffSignature(diff: GitDiffResponse) {
@@ -2380,13 +2380,14 @@ function commitHistoryTitle(commit: GitCommitSummary) {
 function gitHistoryMarkerRef(
   kind: GitHistoryMarkerKind,
   state: Pick<GitRepositoryState, "head">,
-  historyBaseRef: string,
+  historyRemoteRef: string,
 ) {
-  return kind === "outgoing-changes" ? state.head : historyBaseRef;
+  return kind === "outgoing-changes" ? state.head : historyRemoteRef;
 }
 
 const EMPTY_GIT_HISTORY_GRAPH_STATE: GitHistoryGraphState = {
   historyBaseRef: "",
+  historyRemoteRef: "",
   historyAhead: 0,
   historyBehind: 0,
   mergeBase: "",
@@ -2395,6 +2396,7 @@ const EMPTY_GIT_HISTORY_GRAPH_STATE: GitHistoryGraphState = {
 function gitHistoryGraphStateFromResponse(response: GitLogResponse): GitHistoryGraphState {
   return {
     historyBaseRef: response.historyBaseRef,
+    historyRemoteRef: response.historyRemoteRef,
     historyAhead: response.historyAhead,
     historyBehind: response.historyBehind,
     mergeBase: response.mergeBase,
@@ -3743,7 +3745,8 @@ export const GitReviewPanel = memo(function GitReviewPanel(props: GitReviewPanel
     () =>
       computeGitGraph(historyCommits, {
         currentRef: state.head,
-        remoteRef: historyGraphState.historyBaseRef,
+        remoteRef: historyGraphState.historyRemoteRef,
+        baseRef: historyGraphState.historyBaseRef,
         remoteName: state.remoteName,
         showRemoteChangeMarkers: true,
         ahead: historyGraphState.historyAhead,
@@ -4929,7 +4932,7 @@ export const GitReviewPanel = memo(function GitReviewPanel(props: GitReviewPanel
                       const refLabel = gitHistoryMarkerRef(
                         row.kind,
                         state,
-                        historyGraphState.historyBaseRef,
+                        historyGraphState.historyRemoteRef,
                       );
                       const title = refLabel ? `${label} ${refLabel}` : label;
                       return (
