@@ -131,6 +131,7 @@ import {
   isChatStreamNotAvailableMessage,
   resolveChatStreamUnavailableRecoveryAction,
 } from "./lib/chatStreamRecovery";
+import { memoryDeleteProject } from "./lib/memory/api";
 import {
   appendCommittedLiveEntries,
   hasEquivalentTailEntries,
@@ -4288,6 +4289,13 @@ export default function App() {
             Boolean(visibleConversationId && deletedConversationIds.has(visibleConversationId)) ||
             Boolean(pathKey && workspaceProjectPathKey(visibleWorkdir) === pathKey);
 
+          if (path) {
+            await memoryDeleteProject({
+              workdir: path,
+              actor: "tool",
+              reason: "workspace project removed",
+            });
+          }
           removeWorkspaceProjectFromSettings(project);
           if (shouldResetVisibleConversation) {
             startNewConversation({
