@@ -4,6 +4,7 @@ import { math } from "@streamdown/math";
 import { mermaid } from "@streamdown/mermaid";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ComponentProps, memo, useLayoutEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import remarkBreaks from "remark-breaks";
 import {
   type Components,
@@ -164,8 +165,8 @@ const streamdownTranslations = {
   viewFullscreen: "全屏查看",
 } satisfies Partial<StreamdownTranslations>;
 
-function ExternalLinkModal({ isOpen, onClose, onConfirm, url }: LinkSafetyModalProps) {
-  if (!isOpen) {
+export function ExternalLinkModal({ isOpen, onClose, onConfirm, url }: LinkSafetyModalProps) {
+  if (!isOpen || typeof document === "undefined") {
     return null;
   }
 
@@ -188,15 +189,20 @@ function ExternalLinkModal({ isOpen, onClose, onConfirm, url }: LinkSafetyModalP
     }
   };
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/18 px-4 py-6 backdrop-blur-sm"
-      onClick={onClose}
+      className="fixed inset-0 z-[100] flex items-center justify-center px-4 py-6"
       role="presentation"
     >
+      <button
+        type="button"
+        tabIndex={-1}
+        className="absolute inset-0 cursor-default bg-black/18 backdrop-blur-sm"
+        onClick={onClose}
+        aria-label={streamdownTranslations.close}
+      />
       <div
-        className="w-full max-w-[34rem] rounded-[22px] border border-border/70 bg-background/98 shadow-[0_24px_80px_-28px_rgba(15,23,42,0.38)]"
-        onClick={(event) => event.stopPropagation()}
+        className="relative z-10 w-full max-w-[34rem] rounded-[22px] border border-border/70 bg-background/98 shadow-[0_24px_80px_-28px_rgba(15,23,42,0.38)]"
         role="dialog"
         aria-modal="true"
         aria-label={streamdownTranslations.openExternalLink}
@@ -245,7 +251,8 @@ function ExternalLinkModal({ isOpen, onClose, onConfirm, url }: LinkSafetyModalP
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

@@ -30,6 +30,11 @@ const loader = createTsModuleLoader({
         throw new Error("openUrl mock was not expected to be called");
       },
     },
+    "react-dom": {
+      createPortal(children, container) {
+        return { type: "portal", children, container };
+      },
+    },
     "./ui/button": {
       Button(props) {
         return { type: "Button", props };
@@ -121,6 +126,34 @@ test("markdown image syntax falls back to alt text instead of rendering a real i
 
   const empty = markdownModule.markdownComponents.img({});
   assert.equal(empty, null);
+});
+
+test("external link safety modal renders through document body portal", () => {
+  const previousDocument = globalThis.document;
+  const body = { nodeType: 1 };
+  globalThis.document = { body };
+
+  try {
+    const portal = markdownModule.ExternalLinkModal({
+      isOpen: true,
+      onClose() {},
+      onConfirm() {},
+      url: "https://example.com/dashboard",
+    });
+
+    assert.ok(portal);
+    assert.equal(portal.type, "portal");
+    assert.equal(portal.container, body);
+    assert.equal(portal.children.type, "div");
+    assert.match(portal.children.props.className, /\bfixed\b/);
+    assert.match(portal.children.props.className, /\binset-0\b/);
+  } finally {
+    if (typeof previousDocument === "undefined") {
+      delete globalThis.document;
+    } else {
+      globalThis.document = previousDocument;
+    }
+  }
 });
 
 test("agent tool rules require Image for chat-visible images", () => {
