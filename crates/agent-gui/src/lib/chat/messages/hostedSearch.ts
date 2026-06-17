@@ -558,22 +558,3 @@ export function appendHostedSearchBlocksToAssistant<TMessage extends { content: 
   };
   return applyHostedSearchOrderToAssistant(nextMessage, options?.orderedBlocks);
 }
-
-export function hostedSearchBlockToContextText(block: HostedSearchBlock): string {
-  const lines = [
-    `Provider-hosted web search ${block.status}.`,
-    block.provider ? `Provider: ${block.provider}` : "",
-    block.queries.length > 0 ? `Queries: ${block.queries.join(" | ")}` : "",
-  ].filter(Boolean);
-
-  if (block.sources.length > 0) {
-    lines.push("Sources:");
-    block.sources.slice(0, 12).forEach((source, index) => {
-      const title = source.title ? `${source.title} ` : "";
-      const cited = source.citedText ? ` — ${source.citedText}` : "";
-      lines.push(`${index + 1}. ${title}${source.url}${cited}`);
-    });
-  }
-
-  return lines.join("\n");
-}

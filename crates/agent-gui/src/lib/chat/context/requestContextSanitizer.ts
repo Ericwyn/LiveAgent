@@ -1,9 +1,6 @@
 import type { Context, Message, TextContent, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { DisplayImageItemDetails, DisplayImageResultDetails } from "../../tools/builtinTypes";
-import {
-  hostedSearchBlockToContextText,
-  normalizeHostedSearchBlock,
-} from "../messages/hostedSearch";
+import { normalizeHostedSearchBlock } from "../messages/hostedSearch";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object";
@@ -106,10 +103,6 @@ export function sanitizeMessageForModelContext(message: Message): Message {
     for (const block of message.content as unknown[]) {
       const hostedSearch = normalizeHostedSearchBlock(block);
       if (hostedSearch) {
-        nextContent.push({
-          type: "text",
-          text: hostedSearchBlockToContextText(hostedSearch),
-        } satisfies TextContent);
         changed = true;
         continue;
       }
@@ -140,7 +133,13 @@ export function sanitizeMessageForModelContext(message: Message): Message {
 }
 
 export function sanitizeMessagesForModelContext(messages: Message[]): Message[] {
-  return messages.map(sanitizeMessageForModelContext);
+  return messages
+    .map(sanitizeMessageForModelContext)
+    .filter(
+      (message) =>
+        message.role !== "assistant" ||
+        (Array.isArray(message.content) && message.content.length > 0),
+    );
 }
 
 export function stripAbortedMessagesForModelContext(messages: Message[]): Message[] {

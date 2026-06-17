@@ -1450,6 +1450,9 @@ test("tool call summaries and argument display avoid dumping large payloads", ()
 test("seed tool call recovery converts XML-like markup into structured tool calls", () => {
   const assistant = {
     role: "assistant",
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "deepseek-chat",
     content: [
       {
         type: "text",
@@ -1480,6 +1483,306 @@ After`,
   });
   assert.equal(recovered.assistant.content[0].text, "Before\n\nAfter");
   assert.equal(seedToolCalls.stripSeedToolCallMarkup(assistant.content[0].text), "Before\n\nAfter");
+});
+
+test("seed tool call recovery converts flattened DeepSeek tool request text", () => {
+  const assistant = {
+    role: "assistant",
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "deepseek-chat",
+    content: [
+      {
+        type: "text",
+        text: `Before
+
+Previous assistant tool request:
+tool_call_id: call_00_recovered
+tool_name: Read
+arguments:
+{
+  "path": "src/App.tsx",
+  "line": 12,
+  "flags": {
+    "raw": true
+  }
+}
+
+After`,
+      },
+    ],
+    timestamp: 1,
+  };
+
+  const recovered = seedToolCalls.recoverAssistantSeedToolCalls(assistant);
+  assert.ok(recovered);
+  assert.equal(recovered.toolCalls.length, 1);
+  assert.equal(recovered.toolCalls[0].id, "call_00_recovered");
+  assert.equal(recovered.toolCalls[0].name, "Read");
+  assert.deepEqual(recovered.toolCalls[0].arguments, {
+    path: "src/App.tsx",
+    line: 12,
+    flags: { raw: true },
+  });
+  assert.equal(recovered.assistant.content[0].text, "Before\n\nAfter");
+  assert.equal(
+    seedToolCalls.stripSeedToolCallMarkup(assistant.content[0].text, {
+      recoverFlattenedText: true,
+    }),
+    "Before\n\nAfter",
+  );
+});
+
+test("seed tool call recovery strips repeated historical tool call text without duplicating native calls", () => {
+  const assistant = {
+    role: "assistant",
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "deepseek-chat",
+    content: [
+      {
+        type: "text",
+        text: `Before
+
+Historical tool call (read-only, not repeating):
+tool_name: Grep
+arguments: {"pattern": "express", "file_pattern": "**/*.js", "root": "workspace", "ignore_case": true}
+
+After`,
+      },
+      {
+        type: "toolCall",
+        id: "call_00_native_grep",
+        name: "Grep",
+        arguments: {
+          pattern: "express",
+          file_pattern: "**/*.js",
+          root: "workspace",
+          ignore_case: true,
+        },
+      },
+    ],
+    timestamp: 1,
+  };
+
+  const recovered = seedToolCalls.recoverAssistantSeedToolCalls(assistant);
+  assert.ok(recovered);
+  assert.equal(recovered.toolCalls.length, 0);
+  assert.equal(recovered.assistant.content.length, 2);
+  assert.equal(recovered.assistant.content[0].text, "Before\n\nAfter");
+  assert.equal(recovered.assistant.content[1].id, "call_00_native_grep");
+  assert.equal(
+    seedToolCalls.stripSeedToolCallMarkup(assistant.content[0].text, {
+      recoverFlattenedText: true,
+    }),
+    "Before\n\nAfter",
+  );
+});
+
+test("seed tool call recovery strips bare tool_name text without duplicating native calls", () => {
+  const assistant = {
+    role: "assistant",
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "deepseek-chat",
+    content: [
+      {
+        type: "text",
+        text: `Before
+
+tool_name: Grep
+arguments:
+{
+"pattern": "express|route|api",
+"file_pattern": "*.js",
+"output_mode": "content",
+"ignore_case": true
+}
+
+After`,
+      },
+      {
+        type: "toolCall",
+        id: "call_00_native_route_grep",
+        name: "Grep",
+        arguments: {
+          pattern: "express|route|api",
+          file_pattern: "*.js",
+          output_mode: "content",
+          ignore_case: true,
+        },
+      },
+    ],
+    timestamp: 1,
+  };
+
+  const recovered = seedToolCalls.recoverAssistantSeedToolCalls(assistant);
+  assert.ok(recovered);
+  assert.equal(recovered.toolCalls.length, 0);
+  assert.equal(recovered.assistant.content.length, 2);
+  assert.equal(recovered.assistant.content[0].text, "Before\n\nAfter");
+  assert.equal(recovered.assistant.content[1].id, "call_00_native_route_grep");
+  assert.equal(
+    seedToolCalls.stripSeedToolCallMarkup(assistant.content[0].text, {
+      recoverFlattenedText: true,
+    }),
+    "Before\n\nAfter",
+  );
+});
+
+test("seed tool call recovery strips malformed labeled DeepSeek historical tool text", () => {
+  const assistant = {
+    role: "assistant",
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "deepseek-v4-flash",
+    content: [
+      {
+        type: "text",
+        text: `**Edit / Write 正常。** 继续测试 **Bash、MemoryManager 和管道类工具**：
+
+
+
+Historical assistant tool request (read-only context; do not repeat):
+tool_call_id: call_00_malformed_bash
+tool_name: Bash
+arguments:
+{
+  "root": "workspace",
+  "command": "echo 'Node: $(node --version 2>/dev/null || echo "未安装")'"
+}
+`,
+      },
+      {
+        type: "toolCall",
+        id: "call_01_native_bash",
+        name: "Bash",
+        arguments: {
+          root: "workspace",
+          command: "ls -la tool-test/",
+          cwd: ".",
+        },
+      },
+    ],
+    timestamp: 1,
+  };
+
+  const recovered = seedToolCalls.recoverAssistantSeedToolCalls(assistant);
+  assert.ok(recovered);
+  assert.equal(recovered.toolCalls.length, 0);
+  assert.equal(recovered.assistant.content.length, 2);
+  assert.equal(recovered.assistant.content[0].text.includes("Historical assistant"), false);
+  assert.equal(recovered.assistant.content[0].text.includes("tool_name: Bash"), false);
+  assert.equal(
+    recovered.assistant.content[0].text,
+    "**Edit / Write 正常。** 继续测试 **Bash、MemoryManager 和管道类工具**：",
+  );
+  assert.equal(recovered.assistant.content[1].id, "call_01_native_bash");
+});
+
+test("seed tool call recovery strips DeepSeek orphan DSML close text after native calls", () => {
+  const dsml = "\uFF5C\uFF5CDSML\uFF5C\uFF5C";
+  const assistant = {
+    role: "assistant",
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "deepseek-v4-pro",
+    content: [
+      {
+        type: "text",
+        text: "Bash 正常。继续：\n\n## 五、Edit — 精确字符串替换\n\n",
+      },
+      {
+        type: "toolCall",
+        id: "call_00_native_edit",
+        name: "Edit",
+        arguments: {
+          path: "README.md",
+          old_string: "old",
+          new_string: "new",
+        },
+      },
+      {
+        type: "text",
+        text: `\n</${dsml}parameter>\n</${dsml}invoke>\n</${dsml}tool_calls>`,
+      },
+    ],
+    timestamp: 1,
+  };
+
+  const recovered = seedToolCalls.recoverAssistantSeedToolCalls(assistant);
+  assert.ok(recovered);
+  assert.equal(recovered.toolCalls.length, 0);
+  assert.deepEqual(
+    recovered.assistant.content.map((block) => block.type),
+    ["text", "toolCall"],
+  );
+  assert.equal(recovered.assistant.content[0].text.includes("DSML"), false);
+  assert.equal(recovered.assistant.content[1].id, "call_00_native_edit");
+});
+
+test("seed tool call recovery preserves non-DeepSeek flattened tool text", () => {
+  const assistant = {
+    role: "assistant",
+    api: "openai-responses",
+    provider: "openai",
+    model: "gpt-5",
+    content: [
+      {
+        type: "text",
+        text: `Before
+
+tool_name: Grep
+arguments:
+{
+"pattern": "express|route|api",
+"file_pattern": "*.js",
+"output_mode": "content",
+"ignore_case": true
+}
+
+After`,
+      },
+    ],
+    timestamp: 1,
+  };
+
+  const recovered = seedToolCalls.recoverAssistantSeedToolCalls(assistant);
+  assert.equal(recovered, null);
+  assert.equal(
+    seedToolCalls.stripSeedToolCallMarkup(assistant.content[0].text),
+    assistant.content[0].text,
+  );
+});
+
+test("seed tool call recovery preserves non-json DeepSeek tool_name prose", () => {
+  const assistant = {
+    role: "assistant",
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "deepseek-chat",
+    content: [
+      {
+        type: "text",
+        text: `Before
+
+tool_name: is just a field name in this explanation
+arguments: are described in prose, not JSON
+
+After`,
+      },
+    ],
+    timestamp: 1,
+  };
+
+  const recovered = seedToolCalls.recoverAssistantSeedToolCalls(assistant);
+  assert.equal(recovered, null);
+  assert.equal(
+    seedToolCalls.stripSeedToolCallMarkup(assistant.content[0].text, {
+      recoverFlattenedText: true,
+    }),
+    assistant.content[0].text,
+  );
 });
 
 test("chat page helpers keep model options stable and normalize status/title edge cases", () => {

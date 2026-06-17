@@ -757,6 +757,297 @@ After`),
   );
 });
 
+test("runAssistantWithTools recovers flattened DeepSeek tool request text as a next-turn path", async () => {
+  resetFakeStreams(
+    createTextAssistant(
+      `Checking before execution.
+
+Historical assistant tool request (read-only context; do not repeat):
+tool_call_id: call_00_flattened_read
+tool_name: Read
+arguments:
+{
+  "path": "src/App.tsx"
+}
+
+This text should not be shown as a raw tool request.`,
+      "stop",
+      { api: "anthropic-messages", provider: "anthropic", model: "deepseek-chat" },
+    ),
+    createTextAssistant("after recovered flattened tool"),
+  );
+  const beforeNextTurnSnapshots = [];
+  const { params, executedToolCalls } = createBaseParams({
+    onBeforeNextTurn: async (snapshot) => {
+      beforeNextTurnSnapshots.push(snapshot);
+      return null;
+    },
+  });
+
+  const result = await runAssistantWithTools(params);
+
+  assert.equal(executedToolCalls.length, 1);
+  assert.equal(executedToolCalls[0].id, "call_00_flattened_read");
+  assert.equal(executedToolCalls[0].name, "Read");
+  assert.deepEqual(executedToolCalls[0].arguments, { path: "src/App.tsx" });
+  assert.equal(beforeNextTurnSnapshots.length, 1);
+  assert.equal(beforeNextTurnSnapshots[0].assistant.stopReason, "toolUse");
+  assert.equal(beforeNextTurnSnapshots[0].toolResults.length, 1);
+  const recoveredAssistantText = result.emittedMessages[0].content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  assert.equal(recoveredAssistantText.includes("tool_call_id"), false);
+  assert.deepEqual(
+    result.emittedMessages.map((message) => message.role),
+    ["assistant", "toolResult", "assistant"],
+  );
+});
+
+test("runAssistantWithTools strips repeated historical tool call text without duplicate execution", async () => {
+  const grepCall = createToolCall("call_00_native_grep", "Grep", {
+    pattern: "express",
+    file_pattern: "**/*.js",
+    root: "workspace",
+    ignore_case: true,
+  });
+  resetFakeStreams(
+    createAssistant(
+      [
+        {
+          type: "text",
+          text: `✅ JS 文件 2 个：server.js + public/app.js
+
+## 4️⃣ Grep 文本搜索
+
+Historical tool call (read-only, not repeating):
+tool_name: Grep
+arguments: {"pattern": "express", "file_pattern": "**/*.js", "root": "workspace", "ignore_case": true}`,
+        },
+        grepCall,
+      ],
+      "toolUse",
+      { api: "anthropic-messages", provider: "anthropic", model: "deepseek-chat" },
+    ),
+    createTextAssistant("after native grep"),
+  );
+  const beforeNextTurnSnapshots = [];
+  const grepTool = {
+    name: "Grep",
+    description: "Search files",
+    parameters: { type: "object", properties: {} },
+  };
+  const { params, executedToolCalls } = createBaseParams({
+    tools: [grepTool],
+    context: {
+      systemPrompt: "Base system prompt",
+      messages: [{ role: "user", content: "Start", timestamp: 1 }],
+      tools: [grepTool],
+    },
+    onBeforeNextTurn: async (snapshot) => {
+      beforeNextTurnSnapshots.push(snapshot);
+      return null;
+    },
+  });
+
+  const result = await runAssistantWithTools(params);
+
+  assert.equal(executedToolCalls.length, 1);
+  assert.equal(executedToolCalls[0].id, grepCall.id);
+  assert.equal(executedToolCalls[0].name, "Grep");
+  assert.equal(beforeNextTurnSnapshots.length, 1);
+  const recoveredAssistantText = result.emittedMessages[0].content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  assert.equal(recoveredAssistantText.includes("Historical tool call"), false);
+  assert.deepEqual(
+    result.emittedMessages.map((message) => message.role),
+    ["assistant", "toolResult", "assistant"],
+  );
+});
+
+test("runAssistantWithTools strips bare tool_name text without duplicate execution", async () => {
+  const grepCall = createToolCall("call_00_native_route_grep", "Grep", {
+    pattern: "express|route|api",
+    file_pattern: "*.js",
+    output_mode: "content",
+    ignore_case: true,
+  });
+  resetFakeStreams(
+    createAssistant(
+      [
+        {
+          type: "text",
+          text: `继续检查 JS 路由。
+
+tool_name: Grep
+arguments:
+{
+"pattern": "express|route|api",
+"file_pattern": "*.js",
+"output_mode": "content",
+"ignore_case": true
+}`,
+        },
+        grepCall,
+      ],
+      "toolUse",
+      { api: "anthropic-messages", provider: "anthropic", model: "deepseek-chat" },
+    ),
+    createTextAssistant("after native route grep"),
+  );
+  const grepTool = {
+    name: "Grep",
+    description: "Search files",
+    parameters: { type: "object", properties: {} },
+  };
+  const { params, executedToolCalls } = createBaseParams({
+    tools: [grepTool],
+    context: {
+      systemPrompt: "Base system prompt",
+      messages: [{ role: "user", content: "Start", timestamp: 1 }],
+      tools: [grepTool],
+    },
+  });
+
+  const result = await runAssistantWithTools(params);
+
+  assert.equal(executedToolCalls.length, 1);
+  assert.equal(executedToolCalls[0].id, grepCall.id);
+  assert.equal(executedToolCalls[0].name, "Grep");
+  const recoveredAssistantText = result.emittedMessages[0].content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  assert.equal(recoveredAssistantText.includes("tool_name: Grep"), false);
+  assert.equal(recoveredAssistantText.includes("arguments:"), false);
+  assert.deepEqual(
+    result.emittedMessages.map((message) => message.role),
+    ["assistant", "toolResult", "assistant"],
+  );
+});
+
+test("runAssistantWithTools strips malformed historical tool text without guessing execution", async () => {
+  const bashCall = createToolCall("call_01_native_bash", "Bash", {
+    root: "workspace",
+    command: "ls -la tool-test/",
+    cwd: ".",
+  });
+  resetFakeStreams(
+    createAssistant(
+      [
+        {
+          type: "text",
+          text: `**Edit / Write 正常。** 继续测试 **Bash、MemoryManager 和管道类工具**：
+
+Historical assistant tool request (read-only context; do not repeat):
+tool_call_id: call_00_malformed_bash
+tool_name: Bash
+arguments:
+{
+  "root": "workspace",
+  "command": "echo 'Node: $(node --version 2>/dev/null || echo "未安装")'"
+}`,
+        },
+        bashCall,
+      ],
+      "toolUse",
+      { api: "anthropic-messages", provider: "anthropic", model: "deepseek-chat" },
+    ),
+    createTextAssistant("after native bash"),
+  );
+  const bashTool = {
+    name: "Bash",
+    description: "Run shell commands",
+    parameters: { type: "object", properties: {} },
+  };
+  const { params, executedToolCalls } = createBaseParams({
+    tools: [bashTool],
+    context: {
+      systemPrompt: "Base system prompt",
+      messages: [{ role: "user", content: "Start", timestamp: 1 }],
+      tools: [bashTool],
+    },
+  });
+
+  const result = await runAssistantWithTools(params);
+
+  assert.equal(executedToolCalls.length, 1);
+  assert.equal(executedToolCalls[0].id, bashCall.id);
+  assert.equal(executedToolCalls[0].name, "Bash");
+  const recoveredAssistantText = result.emittedMessages[0].content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  assert.equal(recoveredAssistantText.includes("Historical assistant tool request"), false);
+  assert.equal(recoveredAssistantText.includes("tool_name: Bash"), false);
+  assert.deepEqual(
+    result.emittedMessages.map((message) => message.role),
+    ["assistant", "toolResult", "assistant"],
+  );
+});
+
+test("runAssistantWithTools preserves non-DeepSeek bare tool_name text", async () => {
+  const grepCall = createToolCall("call_00_native_route_grep", "Grep", {
+    pattern: "express|route|api",
+    file_pattern: "*.js",
+    output_mode: "content",
+    ignore_case: true,
+  });
+  resetFakeStreams(
+    createAssistant(
+      [
+        {
+          type: "text",
+          text: `继续检查 JS 路由。
+
+tool_name: Grep
+arguments:
+{
+"pattern": "express|route|api",
+"file_pattern": "*.js",
+"output_mode": "content",
+"ignore_case": true
+}`,
+        },
+        grepCall,
+      ],
+      "toolUse",
+      { api: "openai-responses", provider: "openai", model: "gpt-5" },
+    ),
+    createTextAssistant("after native route grep"),
+  );
+  const grepTool = {
+    name: "Grep",
+    description: "Search files",
+    parameters: { type: "object", properties: {} },
+  };
+  const { params, executedToolCalls } = createBaseParams({
+    tools: [grepTool],
+    context: {
+      systemPrompt: "Base system prompt",
+      messages: [{ role: "user", content: "Start", timestamp: 1 }],
+      tools: [grepTool],
+    },
+  });
+
+  const result = await runAssistantWithTools(params);
+
+  assert.equal(executedToolCalls.length, 1);
+  assert.equal(executedToolCalls[0].id, grepCall.id);
+  const assistantText = result.emittedMessages[0].content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  assert.equal(assistantText.includes("tool_name: Grep"), true);
+  assert.equal(assistantText.includes("arguments:"), true);
+  assert.deepEqual(
+    result.emittedMessages.map((message) => message.role),
+    ["assistant", "toolResult", "assistant"],
+  );
+});
+
 test("runAssistantWithTools recovers DSML text tool calls as a next-turn path", async () => {
   const dsml = "\uFF5C\uFF5CDSML\uFF5C\uFF5C";
   resetFakeStreams(

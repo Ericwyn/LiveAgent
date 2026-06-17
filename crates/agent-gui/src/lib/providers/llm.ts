@@ -302,11 +302,7 @@ function isDeepSeekAnthropicModel(model: Model<any>) {
   return modelId.includes("deepseek") || baseUrl.includes("deepseek");
 }
 
-function isDeepSeekAnthropicEndpoint(params: {
-  api?: string;
-  baseUrl?: string;
-  modelId?: string;
-}) {
+function isDeepSeekAnthropicEndpoint(params: { api?: string; baseUrl?: string; modelId?: string }) {
   if (params.api && params.api !== "anthropic-messages") return false;
   const baseUrl = params.baseUrl?.trim().toLowerCase() ?? "";
   const modelId = params.modelId?.trim().toLowerCase() ?? "";
@@ -320,11 +316,7 @@ function isAnthropicPayloadToolUseBlock(block: unknown): block is Record<string,
 function isAnthropicPayloadToolResultBlock(
   block: unknown,
 ): block is Record<string, unknown> & { tool_use_id: string } {
-  return (
-    isRecord(block) &&
-    block.type === "tool_result" &&
-    typeof block.tool_use_id === "string"
-  );
+  return isRecord(block) && block.type === "tool_result" && typeof block.tool_use_id === "string";
 }
 
 function isDeepSeekDsmlRecoveredToolCallId(id: unknown) {
@@ -335,11 +327,11 @@ function anthropicPayloadToolUseToContextText(toolUse: Record<string, unknown>) 
   const name = typeof toolUse.name === "string" ? toolUse.name : "";
   return truncateContextText(
     [
-      "Previous assistant tool request:",
+      "Historical assistant tool request (read-only context; do not repeat):",
       `tool_call_id: ${toolUse.id}`,
       `tool_name: ${name || "unknown"}`,
       "arguments:",
-      safeJsonForContext(isRecord(toolUse.input) ? toolUse.input : toolUse.input ?? {}),
+      safeJsonForContext(isRecord(toolUse.input) ? toolUse.input : (toolUse.input ?? {})),
     ].join("\n"),
   );
 }
@@ -850,7 +842,7 @@ function truncateContextText(value: string, maxLength = 8_000) {
 function toolCallToContextText(toolCall: ToolCall) {
   return truncateContextText(
     [
-      "Previous assistant tool request:",
+      "Historical assistant tool request (read-only context; do not repeat):",
       `tool_call_id: ${toolCall.id}`,
       `tool_name: ${toolCall.name}`,
       "arguments:",
@@ -1401,12 +1393,11 @@ export function finalizeProviderStreamOptions(params: {
   options = attachProviderNativeWebSearch(params.providerId, options, params.nativeWebSearch, {
     baseUrl: params.baseUrl,
   });
-  const isDeepSeekAnthropic =
-    isDeepSeekAnthropicEndpoint({
-      api: params.model?.api,
-      baseUrl: params.baseUrl,
-      modelId: params.model?.id,
-    });
+  const isDeepSeekAnthropic = isDeepSeekAnthropicEndpoint({
+    api: params.model?.api,
+    baseUrl: params.baseUrl,
+    modelId: params.model?.id,
+  });
   if (isDeepSeekAnthropic) {
     options = {
       ...options,
@@ -1760,7 +1751,6 @@ function mapGeminiThinkingLevel(
       return "LOW";
     case "medium":
       return "MEDIUM";
-    case "high":
     default:
       return "HIGH";
   }
@@ -1926,10 +1916,7 @@ export function streamSimpleByApi(model: Model<any>, context: Context, options: 
       const anthropicContext = shouldRepairDeepSeekAnthropic
         ? flattenToolInteractionsForDeepSeekAnthropicContext(repairedAnthropicContext)
         : repairedAnthropicContext;
-      let anthropicOptions = attachAnthropicThinkingPayloadOverride(
-        options,
-        anthropicThinking,
-      );
+      let anthropicOptions = attachAnthropicThinkingPayloadOverride(options, anthropicThinking);
       if (shouldRepairDeepSeekAnthropic) {
         anthropicOptions = attachDeepSeekAnthropicPayloadToolBlockFlattening(anthropicOptions);
       }

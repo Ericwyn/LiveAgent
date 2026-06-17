@@ -4,6 +4,14 @@ import type {
   AssistantMessageEventStream,
   ToolCall,
 } from "@earendil-works/pi-ai";
+import {
+  comparableToolCall,
+  findFlattenedToolRequestOpenStart,
+  findMalformedLabeledFlattenedToolRequestEndAtStart,
+  findPotentialFlattenedToolRequestOpenStart,
+  type ParsedFlattenedToolRequest,
+  parseFlattenedToolRequestAtStart,
+} from "../chat/runner/flattenedToolCallText";
 import { parseDsmlToolCallMarkup } from "../chat/runner/seedToolCalls";
 
 const DSML_TAG_PREFIX = String.raw`(?:\uFF5C{2}|\|{2})\s*DSML\s*(?:\uFF5C{2}|\|{2})`;
@@ -15,8 +23,17 @@ const DSML_TOOL_CALLS_CLOSE_PATTERN = new RegExp(
   String.raw`<\/\s*${DSML_TAG_PREFIX}\s*tool_calls\s*>`,
   "i",
 );
+const DSML_CLOSE_TAG_SCAN_PATTERN = new RegExp(
+  String.raw`<\/\s*${DSML_TAG_PREFIX}\s*(?:parameter|invoke|tool_calls)\s*>`,
+  "gi",
+);
+const DSML_CLOSE_TAG_AT_START_PATTERN = new RegExp(
+  String.raw`^<\/\s*${DSML_TAG_PREFIX}\s*(?:parameter|invoke|tool_calls)\s*>`,
+  "i",
+);
 const DSML_OPEN_HOLD_LIMIT = 96;
 const DSML_SWALLOW_BUFFER_LIMIT = 64 * 1024;
+const FLATTENED_TOOL_REQUEST_SWALLOW_BUFFER_LIMIT = 64 * 1024;
 
 type IndexedAssistantEvent = Extract<AssistantMessageEvent, { contentIndex: number }>;
 
@@ -77,6 +94,40 @@ function findPotentialDsmlOpenStart(value: string) {
   return value.length - index <= DSML_OPEN_HOLD_LIMIT ? index : -1;
 }
 
+function findPotentialDsmlOrphanCloseStart(value: string) {
+  const index = value.lastIndexOf("<");
+  if (index < 0 || value.length - index > DSML_OPEN_HOLD_LIMIT) return -1;
+  const suffix = value.slice(index);
+  if (!"</".startsWith(suffix) && !suffix.startsWith("</")) return -1;
+  return /^\s*$/.test(value.slice(0, index)) ? 0 : index;
+}
+
+function readDsmlCloseRun(value: string, start: number) {
+  let index = start;
+  let seenCloseTag = false;
+
+  while (index < value.length) {
+    const whitespace = /^\s*/.exec(value.slice(index))?.[0] ?? "";
+    index += whitespace.length;
+    const closeTag = DSML_CLOSE_TAG_AT_START_PATTERN.exec(value.slice(index));
+    if (!closeTag) break;
+    index += closeTag[0].length;
+    seenCloseTag = true;
+  }
+
+  return seenCloseTag ? { start, end: index } : null;
+}
+
+function findDsmlOrphanCloseRun(value: string) {
+  DSML_CLOSE_TAG_SCAN_PATTERN.lastIndex = 0;
+  const match = DSML_CLOSE_TAG_SCAN_PATTERN.exec(value);
+  if (!match || match.index === undefined) return null;
+
+  const leadingText = value.slice(0, match.index);
+  const start = /^\s*$/.test(leadingText) ? 0 : match.index;
+  return readDsmlCloseRun(value, start);
+}
+
 function normalizeDoneReason(stopReason: AssistantMessage["stopReason"]) {
   return stopReason === "toolUse" || stopReason === "length" ? stopReason : "stop";
 }
@@ -111,7 +162,10 @@ export function wrapDeepSeekDsmlToolCallStream(
   let activeTextOutputIndex: number | null = null;
   let textBuffer = "";
   let dsmlBuffer = "";
+  let flattenedToolRequestBuffer = "";
+  let pendingFlattenedToolRequests: ToolCall[] = [];
   let inDsml = false;
+  let inFlattenedToolRequest = false;
   let activeDsmlOpenTag = "";
   const sourceToOutputIndex = new Map<number, number>();
 
@@ -197,7 +251,14 @@ export function wrapDeepSeekDsmlToolCallStream(
   };
 
   const hasRecoverableOutput = () =>
-    Boolean(output?.content.length) || Boolean(textBuffer || dsmlBuffer || activeDsmlOpenTag);
+    Boolean(output?.content.length) ||
+    Boolean(
+      textBuffer ||
+        dsmlBuffer ||
+        activeDsmlOpenTag ||
+        flattenedToolRequestBuffer ||
+        pendingFlattenedToolRequests.length,
+    );
 
   const ensureTextBlock = (sourceIndex: number, partial?: AssistantMessage) => {
     const nextOutput = ensureOutput(partial);
@@ -280,6 +341,46 @@ export function wrapDeepSeekDsmlToolCallStream(
     });
   };
 
+  const outputHasComparableToolCall = (toolCall: ToolCall) => {
+    const comparable = comparableToolCall(toolCall);
+    return Boolean(
+      output?.content.some(
+        (block) => block.type === "toolCall" && comparableToolCall(block) === comparable,
+      ),
+    );
+  };
+
+  const outputHasAnyToolCall = () =>
+    Boolean(output?.content.some((block) => block.type === "toolCall"));
+
+  const addPendingFlattenedToolRequest = (toolCall: ToolCall) => {
+    const comparable = comparableToolCall(toolCall);
+    if (
+      pendingFlattenedToolRequests.some((pending) => comparableToolCall(pending) === comparable)
+    ) {
+      return;
+    }
+    pendingFlattenedToolRequests.push(toolCall);
+  };
+
+  const discardPendingMatchingToolCall = (toolCall: ToolCall) => {
+    const comparable = comparableToolCall(toolCall);
+    pendingFlattenedToolRequests = pendingFlattenedToolRequests.filter(
+      (pending) => comparableToolCall(pending) !== comparable,
+    );
+  };
+
+  const emitPendingFlattenedToolRequests = (partial?: AssistantMessage) => {
+    if (pendingFlattenedToolRequests.length === 0) return;
+    const pending = pendingFlattenedToolRequests;
+    pendingFlattenedToolRequests = [];
+    for (const toolCall of pending) {
+      if (outputHasComparableToolCall(toolCall)) continue;
+      extractedToolCalls = true;
+      emitToolCall(toolCall, partial);
+    }
+  };
+
   const drainDsmlBuffer = (sourceIndex: number, partial?: AssistantMessage) => {
     const closeTag = findPattern(DSML_TOOL_CALLS_CLOSE_PATTERN, dsmlBuffer);
     if (!closeTag) {
@@ -312,11 +413,89 @@ export function wrapDeepSeekDsmlToolCallStream(
     textBuffer = remainder;
   };
 
+  const drainFlattenedToolRequestBuffer = (sourceIndex: number, partial?: AssistantMessage) => {
+    const stripMalformedHistoricalRequest = () => {
+      const malformedEnd = findMalformedLabeledFlattenedToolRequestEndAtStart(
+        flattenedToolRequestBuffer,
+      );
+      if (malformedEnd === null) return false;
+      const remainder = flattenedToolRequestBuffer.slice(malformedEnd);
+      textBuffer = /^\s*$/.test(remainder) ? "" : remainder;
+      flattenedToolRequestBuffer = "";
+      inFlattenedToolRequest = false;
+      return true;
+    };
+
+    let parsed: ParsedFlattenedToolRequest | null = null;
+    try {
+      parsed = parseFlattenedToolRequestAtStart(flattenedToolRequestBuffer);
+    } catch {
+      if (stripMalformedHistoricalRequest()) {
+        return;
+      }
+      emitTextDelta(sourceIndex, flattenedToolRequestBuffer, partial);
+      flattenedToolRequestBuffer = "";
+      inFlattenedToolRequest = false;
+      return;
+    }
+
+    if (!parsed) {
+      if (stripMalformedHistoricalRequest()) {
+        return;
+      }
+      if (flattenedToolRequestBuffer.length > FLATTENED_TOOL_REQUEST_SWALLOW_BUFFER_LIMIT) {
+        emitTextDelta(sourceIndex, flattenedToolRequestBuffer, partial);
+        flattenedToolRequestBuffer = "";
+        inFlattenedToolRequest = false;
+      }
+      return;
+    }
+
+    if (parsed.hasExplicitId) {
+      extractedToolCalls = true;
+      emitToolCall(parsed.toolCall, partial);
+    } else {
+      addPendingFlattenedToolRequest(parsed.toolCall);
+    }
+    textBuffer = flattenedToolRequestBuffer.slice(parsed.end);
+    flattenedToolRequestBuffer = "";
+    inFlattenedToolRequest = false;
+  };
+
   const drainTextBuffer = (sourceIndex: number, partial?: AssistantMessage) => {
     while (textBuffer.length > 0) {
       const openTag = findPattern(DSML_TOOL_CALLS_OPEN_PATTERN, textBuffer);
+      const orphanCloseRun = outputHasAnyToolCall() ? findDsmlOrphanCloseRun(textBuffer) : null;
+      const flattenedStart = findFlattenedToolRequestOpenStart(textBuffer);
+      if (
+        orphanCloseRun &&
+        (!openTag || orphanCloseRun.start <= openTag.index) &&
+        (flattenedStart < 0 || orphanCloseRun.start <= flattenedStart)
+      ) {
+        emitTextDelta(sourceIndex, textBuffer.slice(0, orphanCloseRun.start), partial);
+        textBuffer = textBuffer.slice(orphanCloseRun.end);
+        continue;
+      }
+      if (flattenedStart >= 0 && (!openTag || flattenedStart < openTag.index)) {
+        emitTextDelta(sourceIndex, textBuffer.slice(0, flattenedStart), partial);
+        endActiveTextBlock(partial);
+        flattenedToolRequestBuffer = textBuffer.slice(flattenedStart);
+        textBuffer = "";
+        inFlattenedToolRequest = true;
+        drainFlattenedToolRequestBuffer(sourceIndex, partial);
+        if (inFlattenedToolRequest) return;
+        continue;
+      }
       if (!openTag) {
-        const holdIndex = findPotentialDsmlOpenStart(textBuffer);
+        const dsmlHoldIndex = findPotentialDsmlOpenStart(textBuffer);
+        const orphanCloseHoldIndex = outputHasAnyToolCall()
+          ? findPotentialDsmlOrphanCloseStart(textBuffer)
+          : -1;
+        const flattenedHoldIndex = findPotentialFlattenedToolRequestOpenStart(textBuffer);
+        const holdIndexes = [dsmlHoldIndex, orphanCloseHoldIndex, flattenedHoldIndex].filter(
+          (index) => index >= 0,
+        );
+        const holdIndex = holdIndexes.length > 0 ? Math.min(...holdIndexes) : -1;
         if (holdIndex >= 0) {
           emitTextDelta(sourceIndex, textBuffer.slice(0, holdIndex), partial);
           textBuffer = textBuffer.slice(holdIndex);
@@ -339,6 +518,14 @@ export function wrapDeepSeekDsmlToolCallStream(
   };
 
   const flushTextState = (sourceIndex: number, partial?: AssistantMessage) => {
+    if (inFlattenedToolRequest) {
+      drainFlattenedToolRequestBuffer(sourceIndex, partial);
+      if (inFlattenedToolRequest) {
+        emitTextDelta(sourceIndex, flattenedToolRequestBuffer, partial);
+        flattenedToolRequestBuffer = "";
+        inFlattenedToolRequest = false;
+      }
+    }
     if (inDsml) {
       emitTextDelta(sourceIndex, `${activeDsmlOpenTag}${dsmlBuffer}`, partial);
       dsmlBuffer = "";
@@ -376,6 +563,7 @@ export function wrapDeepSeekDsmlToolCallStream(
         switch (event.type) {
           case "start": {
             output = createFallbackAssistant(event.partial);
+            pendingFlattenedToolRequests = [];
             enqueue({ type: "start", partial: buildPartial(event.partial) });
             break;
           }
@@ -384,14 +572,22 @@ export function wrapDeepSeekDsmlToolCallStream(
             activeTextOutputIndex = null;
             textBuffer = "";
             dsmlBuffer = "";
+            flattenedToolRequestBuffer = "";
             inDsml = false;
+            inFlattenedToolRequest = false;
             activeDsmlOpenTag = "";
             ensureOutput(event.partial);
             break;
           }
           case "text_delta": {
             activeTextSourceIndex = event.contentIndex;
-            if (inDsml) {
+            if (inFlattenedToolRequest) {
+              flattenedToolRequestBuffer += event.delta;
+              drainFlattenedToolRequestBuffer(event.contentIndex, event.partial);
+              if (!inFlattenedToolRequest && textBuffer) {
+                drainTextBuffer(event.contentIndex, event.partial);
+              }
+            } else if (inDsml) {
               dsmlBuffer += event.delta;
               drainDsmlBuffer(event.contentIndex, event.partial);
             } else {
@@ -410,6 +606,7 @@ export function wrapDeepSeekDsmlToolCallStream(
               flushTextState(activeTextSourceIndex, event.message);
               activeTextSourceIndex = null;
             }
+            emitPendingFlattenedToolRequests(event.message);
             const message = buildFinalMessage(event.message);
             enqueue({
               type: "done",
@@ -423,6 +620,7 @@ export function wrapDeepSeekDsmlToolCallStream(
               flushTextState(activeTextSourceIndex, event.error);
               activeTextSourceIndex = null;
             }
+            emitPendingFlattenedToolRequests(event.error);
             enqueue({
               type: "error",
               reason: event.reason,
@@ -436,12 +634,16 @@ export function wrapDeepSeekDsmlToolCallStream(
           case "toolcall_start":
           case "toolcall_delta":
           case "toolcall_end": {
+            if (event.type === "toolcall_end") {
+              discardPendingMatchingToolCall(event.toolCall);
+            }
             mirrorIndexedEvent(event);
             break;
           }
         }
       }
       if (!closed) {
+        emitPendingFlattenedToolRequests();
         settleFinal(snapshotAssistant(ensureOutput()));
         close();
       }
@@ -450,6 +652,7 @@ export function wrapDeepSeekDsmlToolCallStream(
         const sourceIndex = activeTextSourceIndex ?? 0;
         flushTextState(sourceIndex);
         activeTextSourceIndex = null;
+        emitPendingFlattenedToolRequests();
         const message = buildFinalMessage(snapshotAssistant(ensureOutput()));
         enqueue({
           type: "done",

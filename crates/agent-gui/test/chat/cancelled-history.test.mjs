@@ -183,8 +183,41 @@ test("model request sanitizer drops aborted hosted search rounds", () => {
   );
   assert.deepEqual(
     context.messages[1].content.map((block) => block.type),
-    ["thinking", "text"],
+    ["thinking"],
   );
-  assert.match(context.messages[1].content[1].text, /Provider-hosted web search completed/);
+  assert.doesNotMatch(JSON.stringify(context.messages), /Provider-hosted web search completed/);
+  assert.doesNotMatch(JSON.stringify(context.messages), /Provider: claude_code/);
+  assert.doesNotMatch(JSON.stringify(context.messages), /Sources:/);
   assert.doesNotMatch(JSON.stringify(context.messages), /call_01_PIQ9ADQKpEaBFU6f38f19272/);
+});
+
+test("model request sanitizer drops assistant rounds that only contain hosted search metadata", () => {
+  const context = requestContextSanitizer.sanitizeContextForModelRequest({
+    messages: [
+      user("search", 1),
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "hostedSearch",
+            id: "search-only",
+            provider: "claude_code",
+            status: "completed",
+            queries: ["only metadata"],
+            sources: [{ url: "https://example.com/source" }],
+          },
+        ],
+        stopReason: "stop",
+        timestamp: 2,
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    context.messages.map((message) => message.role),
+    ["user"],
+  );
+  const serialized = JSON.stringify(context.messages);
+  assert.equal(serialized.includes("Provider-hosted web search"), false);
+  assert.equal(serialized.includes("example.com/source"), false);
 });
