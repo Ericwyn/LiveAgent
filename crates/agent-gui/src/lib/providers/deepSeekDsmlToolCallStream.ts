@@ -4,6 +4,7 @@ import type {
   AssistantMessageEventStream,
   ToolCall,
 } from "@earendil-works/pi-ai";
+import { parseDsmlToolCallMarkup } from "../chat/runner/deepSeekDsml";
 import {
   comparableToolCall,
   findFlattenedToolRequestOpenStart,
@@ -12,7 +13,6 @@ import {
   type ParsedFlattenedToolRequest,
   parseFlattenedToolRequestAtStart,
 } from "../chat/runner/flattenedToolCallText";
-import { parseDsmlToolCallMarkup } from "../chat/runner/seedToolCalls";
 
 const DSML_TAG_PREFIX = String.raw`(?:\uFF5C{2}|\|{2})\s*DSML\s*(?:\uFF5C{2}|\|{2})`;
 const DSML_TOOL_CALLS_OPEN_PATTERN = new RegExp(
@@ -34,6 +34,8 @@ const DSML_CLOSE_TAG_AT_START_PATTERN = new RegExp(
 const DSML_OPEN_HOLD_LIMIT = 96;
 const DSML_SWALLOW_BUFFER_LIMIT = 64 * 1024;
 const FLATTENED_TOOL_REQUEST_SWALLOW_BUFFER_LIMIT = 64 * 1024;
+
+let deepSeekDsmlRepairStreamSequence = 0;
 
 type IndexedAssistantEvent = Extract<AssistantMessageEvent, { contentIndex: number }>;
 
@@ -147,6 +149,7 @@ function isRecoverableAnthropicStreamEndError(error: unknown) {
 export function wrapDeepSeekDsmlToolCallStream(
   source: AssistantMessageEventStream,
 ): AssistantMessageEventStream {
+  const streamSourceKey = `stream:${++deepSeekDsmlRepairStreamSequence}`;
   const queue: AssistantMessageEvent[] = [];
   const waiting: Array<(result: IteratorResult<AssistantMessageEvent>) => void> = [];
   let closed = false;
@@ -160,13 +163,20 @@ export function wrapDeepSeekDsmlToolCallStream(
   let extractedToolCalls = false;
   let activeTextSourceIndex: number | null = null;
   let activeTextOutputIndex: number | null = null;
+  let activeThinkingSourceIndex: number | null = null;
+  let activeThinkingOutputIndex: number | null = null;
   let textBuffer = "";
+  let thinkingBuffer = "";
   let dsmlBuffer = "";
+  let thinkingDsmlBuffer = "";
   let flattenedToolRequestBuffer = "";
   let pendingFlattenedToolRequests: ToolCall[] = [];
   let inDsml = false;
+  let inThinkingDsml = false;
   let inFlattenedToolRequest = false;
   let activeDsmlOpenTag = "";
+  let activeThinkingDsmlOpenTag = "";
+  let dsmlBlockSequence = 0;
   const sourceToOutputIndex = new Map<number, number>();
 
   const ensureOutput = (partial?: AssistantMessage) => {
@@ -255,7 +265,10 @@ export function wrapDeepSeekDsmlToolCallStream(
     Boolean(
       textBuffer ||
         dsmlBuffer ||
+        thinkingBuffer ||
+        thinkingDsmlBuffer ||
         activeDsmlOpenTag ||
+        activeThinkingDsmlOpenTag ||
         flattenedToolRequestBuffer ||
         pendingFlattenedToolRequests.length,
     );
@@ -314,6 +327,63 @@ export function wrapDeepSeekDsmlToolCallStream(
       });
     }
     activeTextOutputIndex = null;
+  };
+
+  const ensureThinkingBlock = (sourceIndex: number, partial?: AssistantMessage) => {
+    const nextOutput = ensureOutput(partial);
+    if (activeThinkingSourceIndex !== sourceIndex) {
+      activeThinkingSourceIndex = sourceIndex;
+      activeThinkingOutputIndex = null;
+    }
+    if (activeThinkingOutputIndex !== null) return activeThinkingOutputIndex;
+
+    const sourceBlock = partial?.content[sourceIndex];
+    const thinkingBlock = {
+      type: "thinking",
+      thinking: "",
+      ...(sourceBlock?.type === "thinking" && sourceBlock.thinkingSignature
+        ? { thinkingSignature: sourceBlock.thinkingSignature }
+        : {}),
+    } as const;
+    const outputIndex = nextOutput.content.length;
+    nextOutput.content.push(thinkingBlock);
+    sourceToOutputIndex.set(sourceIndex, outputIndex);
+    activeThinkingOutputIndex = outputIndex;
+    enqueue({
+      type: "thinking_start",
+      contentIndex: outputIndex,
+      partial: buildPartial(partial),
+    });
+    return outputIndex;
+  };
+
+  const emitThinkingDelta = (sourceIndex: number, delta: string, partial?: AssistantMessage) => {
+    if (!delta) return;
+    const outputIndex = ensureThinkingBlock(sourceIndex, partial);
+    const block = ensureOutput(partial).content[outputIndex];
+    if (block?.type !== "thinking") return;
+    block.thinking += delta;
+    enqueue({
+      type: "thinking_delta",
+      contentIndex: outputIndex,
+      delta,
+      partial: buildPartial(partial),
+    });
+  };
+
+  const endActiveThinkingBlock = (partial?: AssistantMessage) => {
+    if (activeThinkingOutputIndex === null) return;
+    const outputIndex = activeThinkingOutputIndex;
+    const block = ensureOutput(partial).content[outputIndex];
+    if (block?.type === "thinking") {
+      enqueue({
+        type: "thinking_end",
+        contentIndex: outputIndex,
+        content: block.thinking,
+        partial: buildPartial(partial),
+      });
+    }
+    activeThinkingOutputIndex = null;
   };
 
   const emitToolCall = (toolCall: ToolCall, partial?: AssistantMessage) => {
@@ -382,10 +452,22 @@ export function wrapDeepSeekDsmlToolCallStream(
   };
 
   const drainDsmlBuffer = (sourceIndex: number, partial?: AssistantMessage) => {
+    const recoverDsmlMarkup = (markup: string) => {
+      const toolCalls = parseDsmlToolCallMarkup(markup, {
+        sourceKey: `${streamSourceKey}:${sourceIndex}:${dsmlBlockSequence++}`,
+      });
+      if (toolCalls.length === 0) return false;
+      extractedToolCalls = true;
+      for (const toolCall of toolCalls) {
+        emitToolCall(toolCall, partial);
+      }
+      return true;
+    };
+
     const closeTag = findPattern(DSML_TOOL_CALLS_CLOSE_PATTERN, dsmlBuffer);
     if (!closeTag) {
       if (dsmlBuffer.length > DSML_SWALLOW_BUFFER_LIMIT) {
-        emitTextDelta(sourceIndex, `${activeDsmlOpenTag}${dsmlBuffer}`, partial);
+        recoverDsmlMarkup(`${activeDsmlOpenTag}${dsmlBuffer}`);
         dsmlBuffer = "";
         activeDsmlOpenTag = "";
         inDsml = false;
@@ -396,21 +478,47 @@ export function wrapDeepSeekDsmlToolCallStream(
     const blockContent = dsmlBuffer.slice(0, closeTag.index);
     const remainder = dsmlBuffer.slice(closeTag.index + closeTag.text.length);
     const markup = `${activeDsmlOpenTag}${blockContent}${closeTag.text}`;
-    const toolCalls = parseDsmlToolCallMarkup(markup);
-
-    if (toolCalls.length === 0) {
-      emitTextDelta(sourceIndex, markup, partial);
-    } else {
-      extractedToolCalls = true;
-      for (const toolCall of toolCalls) {
-        emitToolCall(toolCall, partial);
-      }
-    }
+    recoverDsmlMarkup(markup);
 
     dsmlBuffer = "";
     activeDsmlOpenTag = "";
     inDsml = false;
     textBuffer = remainder;
+  };
+
+  const drainThinkingDsmlBuffer = (sourceIndex: number, partial?: AssistantMessage) => {
+    const recoverDsmlMarkup = (markup: string) => {
+      const toolCalls = parseDsmlToolCallMarkup(markup, {
+        sourceKey: `${streamSourceKey}:thinking:${sourceIndex}:${dsmlBlockSequence++}`,
+      });
+      if (toolCalls.length === 0) return false;
+      extractedToolCalls = true;
+      for (const toolCall of toolCalls) {
+        emitToolCall(toolCall, partial);
+      }
+      return true;
+    };
+
+    const closeTag = findPattern(DSML_TOOL_CALLS_CLOSE_PATTERN, thinkingDsmlBuffer);
+    if (!closeTag) {
+      if (thinkingDsmlBuffer.length > DSML_SWALLOW_BUFFER_LIMIT) {
+        recoverDsmlMarkup(`${activeThinkingDsmlOpenTag}${thinkingDsmlBuffer}`);
+        thinkingDsmlBuffer = "";
+        activeThinkingDsmlOpenTag = "";
+        inThinkingDsml = false;
+      }
+      return;
+    }
+
+    const blockContent = thinkingDsmlBuffer.slice(0, closeTag.index);
+    const remainder = thinkingDsmlBuffer.slice(closeTag.index + closeTag.text.length);
+    const markup = `${activeThinkingDsmlOpenTag}${blockContent}${closeTag.text}`;
+    recoverDsmlMarkup(markup);
+
+    thinkingDsmlBuffer = "";
+    activeThinkingDsmlOpenTag = "";
+    inThinkingDsml = false;
+    thinkingBuffer = remainder;
   };
 
   const drainFlattenedToolRequestBuffer = (sourceIndex: number, partial?: AssistantMessage) => {
@@ -517,6 +625,43 @@ export function wrapDeepSeekDsmlToolCallStream(
     }
   };
 
+  const drainThinkingBuffer = (sourceIndex: number, partial?: AssistantMessage) => {
+    while (thinkingBuffer.length > 0) {
+      const openTag = findPattern(DSML_TOOL_CALLS_OPEN_PATTERN, thinkingBuffer);
+      const orphanCloseRun = outputHasAnyToolCall() ? findDsmlOrphanCloseRun(thinkingBuffer) : null;
+      if (orphanCloseRun && (!openTag || orphanCloseRun.start <= openTag.index)) {
+        emitThinkingDelta(sourceIndex, thinkingBuffer.slice(0, orphanCloseRun.start), partial);
+        thinkingBuffer = thinkingBuffer.slice(orphanCloseRun.end);
+        continue;
+      }
+      if (!openTag) {
+        const dsmlHoldIndex = findPotentialDsmlOpenStart(thinkingBuffer);
+        const orphanCloseHoldIndex = outputHasAnyToolCall()
+          ? findPotentialDsmlOrphanCloseStart(thinkingBuffer)
+          : -1;
+        const holdIndexes = [dsmlHoldIndex, orphanCloseHoldIndex].filter((index) => index >= 0);
+        const holdIndex = holdIndexes.length > 0 ? Math.min(...holdIndexes) : -1;
+        if (holdIndex >= 0) {
+          emitThinkingDelta(sourceIndex, thinkingBuffer.slice(0, holdIndex), partial);
+          thinkingBuffer = thinkingBuffer.slice(holdIndex);
+          return;
+        }
+        emitThinkingDelta(sourceIndex, thinkingBuffer, partial);
+        thinkingBuffer = "";
+        return;
+      }
+
+      emitThinkingDelta(sourceIndex, thinkingBuffer.slice(0, openTag.index), partial);
+      endActiveThinkingBlock(partial);
+      activeThinkingDsmlOpenTag = openTag.text;
+      thinkingDsmlBuffer = thinkingBuffer.slice(openTag.index + openTag.text.length);
+      thinkingBuffer = "";
+      inThinkingDsml = true;
+      drainThinkingDsmlBuffer(sourceIndex, partial);
+      if (inThinkingDsml) return;
+    }
+  };
+
   const flushTextState = (sourceIndex: number, partial?: AssistantMessage) => {
     if (inFlattenedToolRequest) {
       drainFlattenedToolRequestBuffer(sourceIndex, partial);
@@ -527,7 +672,16 @@ export function wrapDeepSeekDsmlToolCallStream(
       }
     }
     if (inDsml) {
-      emitTextDelta(sourceIndex, `${activeDsmlOpenTag}${dsmlBuffer}`, partial);
+      const markup = `${activeDsmlOpenTag}${dsmlBuffer}`;
+      const toolCalls = parseDsmlToolCallMarkup(markup, {
+        sourceKey: `${streamSourceKey}:${sourceIndex}:flush:${dsmlBlockSequence++}`,
+      });
+      if (toolCalls.length > 0) {
+        extractedToolCalls = true;
+        for (const toolCall of toolCalls) {
+          emitToolCall(toolCall, partial);
+        }
+      }
       dsmlBuffer = "";
       activeDsmlOpenTag = "";
       inDsml = false;
@@ -537,6 +691,29 @@ export function wrapDeepSeekDsmlToolCallStream(
       textBuffer = "";
     }
     endActiveTextBlock(partial);
+  };
+
+  const flushThinkingState = (sourceIndex: number, partial?: AssistantMessage) => {
+    if (inThinkingDsml) {
+      const markup = `${activeThinkingDsmlOpenTag}${thinkingDsmlBuffer}`;
+      const toolCalls = parseDsmlToolCallMarkup(markup, {
+        sourceKey: `${streamSourceKey}:thinking:${sourceIndex}:flush:${dsmlBlockSequence++}`,
+      });
+      if (toolCalls.length > 0) {
+        extractedToolCalls = true;
+        for (const toolCall of toolCalls) {
+          emitToolCall(toolCall, partial);
+        }
+      }
+      thinkingDsmlBuffer = "";
+      activeThinkingDsmlOpenTag = "";
+      inThinkingDsml = false;
+    }
+    if (thinkingBuffer) {
+      emitThinkingDelta(sourceIndex, thinkingBuffer, partial);
+      thinkingBuffer = "";
+    }
+    endActiveThinkingBlock(partial);
   };
 
   const mirrorIndexedEvent = (event: IndexedAssistantEvent) => {
@@ -579,6 +756,16 @@ export function wrapDeepSeekDsmlToolCallStream(
             ensureOutput(event.partial);
             break;
           }
+          case "thinking_start": {
+            activeThinkingSourceIndex = event.contentIndex;
+            activeThinkingOutputIndex = null;
+            thinkingBuffer = "";
+            thinkingDsmlBuffer = "";
+            inThinkingDsml = false;
+            activeThinkingDsmlOpenTag = "";
+            ensureOutput(event.partial);
+            break;
+          }
           case "text_delta": {
             activeTextSourceIndex = event.contentIndex;
             if (inFlattenedToolRequest) {
@@ -596,15 +783,38 @@ export function wrapDeepSeekDsmlToolCallStream(
             }
             break;
           }
+          case "thinking_delta": {
+            activeThinkingSourceIndex = event.contentIndex;
+            if (inThinkingDsml) {
+              thinkingDsmlBuffer += event.delta;
+              drainThinkingDsmlBuffer(event.contentIndex, event.partial);
+              if (!inThinkingDsml && thinkingBuffer) {
+                drainThinkingBuffer(event.contentIndex, event.partial);
+              }
+            } else {
+              thinkingBuffer += event.delta;
+              drainThinkingBuffer(event.contentIndex, event.partial);
+            }
+            break;
+          }
           case "text_end": {
             flushTextState(event.contentIndex, event.partial);
             activeTextSourceIndex = null;
+            break;
+          }
+          case "thinking_end": {
+            flushThinkingState(event.contentIndex, event.partial);
+            activeThinkingSourceIndex = null;
             break;
           }
           case "done": {
             if (activeTextSourceIndex !== null) {
               flushTextState(activeTextSourceIndex, event.message);
               activeTextSourceIndex = null;
+            }
+            if (activeThinkingSourceIndex !== null) {
+              flushThinkingState(activeThinkingSourceIndex, event.message);
+              activeThinkingSourceIndex = null;
             }
             emitPendingFlattenedToolRequests(event.message);
             const message = buildFinalMessage(event.message);
@@ -620,6 +830,10 @@ export function wrapDeepSeekDsmlToolCallStream(
               flushTextState(activeTextSourceIndex, event.error);
               activeTextSourceIndex = null;
             }
+            if (activeThinkingSourceIndex !== null) {
+              flushThinkingState(activeThinkingSourceIndex, event.error);
+              activeThinkingSourceIndex = null;
+            }
             emitPendingFlattenedToolRequests(event.error);
             enqueue({
               type: "error",
@@ -628,9 +842,6 @@ export function wrapDeepSeekDsmlToolCallStream(
             });
             break;
           }
-          case "thinking_start":
-          case "thinking_delta":
-          case "thinking_end":
           case "toolcall_start":
           case "toolcall_delta":
           case "toolcall_end": {
@@ -643,6 +854,10 @@ export function wrapDeepSeekDsmlToolCallStream(
         }
       }
       if (!closed) {
+        if (activeThinkingSourceIndex !== null) {
+          flushThinkingState(activeThinkingSourceIndex);
+          activeThinkingSourceIndex = null;
+        }
         emitPendingFlattenedToolRequests();
         settleFinal(snapshotAssistant(ensureOutput()));
         close();
@@ -650,8 +865,14 @@ export function wrapDeepSeekDsmlToolCallStream(
     } catch (error) {
       if (isRecoverableAnthropicStreamEndError(error) && hasRecoverableOutput()) {
         const sourceIndex = activeTextSourceIndex ?? 0;
-        flushTextState(sourceIndex);
+        if (activeTextSourceIndex !== null) {
+          flushTextState(sourceIndex);
+        }
+        if (activeThinkingSourceIndex !== null) {
+          flushThinkingState(activeThinkingSourceIndex);
+        }
         activeTextSourceIndex = null;
+        activeThinkingSourceIndex = null;
         emitPendingFlattenedToolRequests();
         const message = buildFinalMessage(snapshotAssistant(ensureOutput()));
         enqueue({

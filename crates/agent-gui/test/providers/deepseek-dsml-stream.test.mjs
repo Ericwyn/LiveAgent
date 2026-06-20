@@ -112,6 +112,48 @@ function createSourceStream(deltas, stopReason = "stop") {
   };
 }
 
+function createThinkingSourceStream(deltas, stopReason = "stop") {
+  const thinking = deltas.join("");
+  const assistant = createAssistantWithContent([{ type: "thinking", thinking }], stopReason);
+  const partial = {
+    ...assistant,
+    content: [{ type: "thinking", thinking: "", thinkingSignature: "" }],
+  };
+  const events = [
+    { type: "start", partial: { ...assistant, content: [] } },
+    { type: "thinking_start", contentIndex: 0, partial },
+  ];
+
+  for (const delta of deltas) {
+    partial.content[0].thinking += delta;
+    events.push({
+      type: "thinking_delta",
+      contentIndex: 0,
+      delta,
+      partial: { ...partial, content: [{ ...partial.content[0] }] },
+    });
+  }
+
+  events.push({
+    type: "thinking_end",
+    contentIndex: 0,
+    content: thinking,
+    partial: assistant,
+  });
+  events.push({ type: "done", reason: stopReason, message: assistant });
+
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const event of events) {
+        yield event;
+      }
+    },
+    async result() {
+      return assistant;
+    },
+  };
+}
+
 function createSourceStreamWithTextAndTool(deltas, toolCall) {
   const text = deltas.join("");
   const assistant = createAssistantWithContent([{ type: "text", text }, toolCall], "toolUse");
@@ -379,6 +421,43 @@ test("DeepSeek DSML stream wrapper converts split builtin_web_search markup into
       .join(""),
     "prefix  suffix",
   );
+});
+
+test("DeepSeek DSML stream wrapper strips tool markup leaked through thinking", async () => {
+  const deltas = [
+    "Need search ",
+    `<${dsml}tool_calls>`,
+    `<${dsml}invoke name="builtin_web_search">`,
+    `<${dsml}parameter name="additionalContext" string="true">thinking leak</${dsml}parameter>`,
+    `</${dsml}invoke>`,
+    `</${dsml}tool_calls>`,
+    " done",
+  ];
+
+  const wrapped = wrapDeepSeekDsmlToolCallStream(createThinkingSourceStream(deltas));
+  const events = [];
+  for await (const event of wrapped) {
+    events.push(event);
+  }
+
+  const thinkingText = events
+    .filter((event) => event.type === "thinking_delta")
+    .map((event) => event.delta)
+    .join("");
+  assert.equal(thinkingText, "Need search  done");
+
+  const toolCallEvents = events.filter((event) => event.type === "toolcall_end");
+  assert.equal(toolCallEvents.length, 1);
+  assert.equal(toolCallEvents[0].toolCall.name, "builtin_web_search");
+  assert.deepEqual(toolCallEvents[0].toolCall.arguments, { additionalContext: "thinking leak" });
+
+  const final = await wrapped.result();
+  assert.equal(JSON.stringify(final).includes("DSML"), false);
+  assert.deepEqual(
+    final.content.map((block) => block.type),
+    ["thinking", "toolCall", "thinking"],
+  );
+  assert.equal(final.stopReason, "toolUse");
 });
 
 test("DeepSeek DSML stream wrapper converts flattened tool request text into tool calls", async () => {
@@ -825,15 +904,14 @@ test("streamAssistantMessage replies to recovered DeepSeek DSML tool calls befor
   assert.equal(capturedContexts.length, 2);
 
   const secondMessages = capturedContexts[1].messages;
-  assert.equal(secondMessages.at(-1).role, "assistant");
+  assert.equal(secondMessages.at(-2).role, "assistant");
   assert.deepEqual(
-    secondMessages.at(-1).content.map((block) => block.type),
-    ["text"],
+    secondMessages.at(-2).content.map((block) => block.type),
+    ["text", "toolCall"],
   );
+  assert.equal(secondMessages.at(-1).role, "toolResult");
   assert.equal(
-    secondMessages.some((message) =>
-      message.content?.some?.((block) => block.type === "toolCall" || block.type === "toolResult"),
-    ),
+    secondMessages.some((message) => JSON.stringify(message).includes(`<${dsml}`)),
     false,
   );
 });
@@ -906,13 +984,13 @@ test("streamAssistantMessage normalizes recovered DeepSeek DSML tool calls from 
       message.role === "assistant" &&
       message.content.some((block) => block.type === "text" && block.text === "Searching") &&
       message.content.some(
-        (block) => block.type === "text" && block.text.includes(missingLocalTool.id),
+        (block) => block.type === "toolCall" && block.id === missingLocalTool.id,
       ),
   );
   assert.ok(assistantIndex >= 0);
   assert.equal(
     messages.some((message) => message.role === "toolResult"),
-    false,
+    true,
   );
   assert.equal(
     messages.some(
@@ -920,18 +998,16 @@ test("streamAssistantMessage normalizes recovered DeepSeek DSML tool calls from 
         message.role === "assistant" &&
         message.content.some((block) => block.type === "toolCall"),
     ),
-    false,
-  );
-  assert.equal(messages[assistantIndex + 1].role, "user");
-  assert.equal(
-    messages[assistantIndex + 1].content.some(
-      (block) =>
-        block.type === "text" &&
-        block.text.includes(missingLocalTool.id) &&
-        block.text.includes("is_error: true"),
-    ),
     true,
   );
+  assert.equal(messages[assistantIndex + 1].role, "toolResult");
+  assert.equal(messages[assistantIndex + 2].role, "toolResult");
+  assert.equal(messages[assistantIndex + 3].role, "toolResult");
+  assert.equal(
+    messages[assistantIndex + 3].toolCallId,
+    missingLocalTool.id,
+  );
+  assert.equal(messages[assistantIndex + 3].isError, true);
 });
 
 test("completeAssistantMessage normalizes recovered DeepSeek DSML tool calls from history", async () => {
@@ -987,13 +1063,13 @@ test("completeAssistantMessage normalizes recovered DeepSeek DSML tool calls fro
   assert.equal(capturedContexts.length, 1);
   const messages = capturedContexts[0].messages;
   const assistantIndex = messages.findIndex((message) => message === incompleteAssistant);
-  assert.equal(assistantIndex, -1);
+  assert.equal(assistantIndex, 1);
   assert.equal(
     messages.some(
       (message) =>
         message.role === "toolResult" && message.toolCallId === missingSearch.id,
     ),
-    false,
+    true,
   );
   assert.equal(
     messages.some(
@@ -1003,10 +1079,10 @@ test("completeAssistantMessage normalizes recovered DeepSeek DSML tool calls fro
           (block) => block.type === "toolCall" && block.id === missingSearch.id,
         ),
     ),
-    false,
+    true,
   );
   assert.deepEqual(
     messages.map((message) => message.role),
-    ["user", "user"],
+    ["user", "assistant", "toolResult", "user"],
   );
 });

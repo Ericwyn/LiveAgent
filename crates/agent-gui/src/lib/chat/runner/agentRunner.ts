@@ -616,8 +616,8 @@ export async function runAssistantWithTools(params: {
             hostedSearchBlocks: hostedSearchBlocksByRound.get(currentRound) ?? [],
             sourcesIntro: "Hosted search sources already captured in this round:",
             fallbackText:
-              "No local web_search executor is available. Continue from existing context, or request provider-native web search through the model/tool protocol instead of printing DSML markup.",
-            extraInstructions: ["Do not repeat the DSML markup in the final answer."],
+              "No local web_search executor is available. Continue from existing context, or request provider-native web search through the model/tool protocol instead of printing raw tool-call markup.",
+            extraInstructions: ["Do not repeat raw tool-call markup in the final answer."],
           });
         } else {
           const execute = () =>

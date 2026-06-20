@@ -1,6 +1,7 @@
 import type { Context, Message, TextContent, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { DisplayImageItemDetails, DisplayImageResultDetails } from "../../tools/builtinTypes";
 import { normalizeHostedSearchBlock } from "../messages/hostedSearch";
+import { isOnlyDsmlOrphanCloseTags, stripDsmlToolCallMarkup } from "../runner/deepSeekDsml";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object";
@@ -94,13 +95,56 @@ function buildDisplayImageContextText(message: ToolResultMessage<DisplayImageRes
   ].join("\n");
 }
 
-export function sanitizeMessageForModelContext(message: Message): Message {
-  let nextMessage = message;
+function sanitizeModelText(text: string) {
+  const stripped = stripDsmlToolCallMarkup(text);
+  return isOnlyDsmlOrphanCloseTags(stripped) ? "" : stripped;
+}
 
-  if (message.role === "assistant") {
+function sanitizeTextBlocksForModelContext(message: Message): Message {
+  if (message.role !== "assistant" && message.role !== "user" && message.role !== "toolResult") {
+    return message;
+  }
+
+  if (typeof message.content === "string") {
+    const content = sanitizeModelText(message.content);
+    return content === message.content ? message : ({ ...message, content } as Message);
+  }
+
+  if (!Array.isArray(message.content)) return message;
+
+  let changed = false;
+  const content = (message.content as unknown[]).flatMap((block) => {
+    if (!isRecord(block)) {
+      return [block];
+    }
+
+    if (block.type === "text" && typeof block.text === "string") {
+      const text = sanitizeModelText(block.text);
+      if (text !== block.text) changed = true;
+      if (!text.trim()) return [];
+      return [{ ...block, text }];
+    }
+
+    if (block.type === "thinking" && typeof block.thinking === "string") {
+      const thinking = sanitizeModelText(block.thinking);
+      if (thinking !== block.thinking) changed = true;
+      if (!thinking.trim()) return [];
+      return [{ ...block, thinking }];
+    }
+
+    return [block];
+  });
+
+  return changed ? ({ ...message, content: content as Message["content"] } as Message) : message;
+}
+
+export function sanitizeMessageForModelContext(message: Message): Message {
+  let nextMessage = sanitizeTextBlocksForModelContext(message);
+
+  if (nextMessage.role === "assistant") {
     const nextContent: unknown[] = [];
     let changed = false;
-    for (const block of message.content as unknown[]) {
+    for (const block of nextMessage.content as unknown[]) {
       const hostedSearch = normalizeHostedSearchBlock(block);
       if (hostedSearch) {
         changed = true;
@@ -110,7 +154,7 @@ export function sanitizeMessageForModelContext(message: Message): Message {
     }
     if (changed) {
       nextMessage = {
-        ...message,
+        ...nextMessage,
         content: nextContent as Message["content"],
       } as Message;
     }

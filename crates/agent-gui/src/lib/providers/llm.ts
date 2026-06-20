@@ -2,7 +2,6 @@ import type {
   AssistantMessage,
   CacheRetention,
   Context,
-  Message,
   Model,
   OpenAICompletionsCompat,
   SimpleStreamOptions,
@@ -36,6 +35,15 @@ import {
 } from "../settings";
 import { withPowerActivity } from "../system/powerActivity";
 import { wrapDeepSeekDsmlToolCallStream } from "./deepSeekDsmlToolCallStream";
+import {
+  applyDeepSeekModelDefaults,
+  attachDeepSeekProviderPayloadAdapter,
+  isDeepSeekAnthropicTarget,
+  isDeepSeekCodexTarget,
+  isDeepSeekTarget,
+  mapDeepSeekReasoningEffort,
+  resolveDeepSeekOpenAICompletionsOverrides,
+} from "./deepSeekProviderAdapter";
 import {
   createHostedSearchEventAggregator,
   createHostedSearchProbeId,
@@ -114,6 +122,7 @@ export type StreamOptionsEx = SimpleStreamOptions & {
    * 开启后在事件流层把 DSML 转回结构化 toolCall，避免 stop 截断工具循环。
    */
   deepSeekDsmlToolCallRepair?: boolean;
+  deepSeekProviderAdapter?: boolean;
   deepSeekAnthropicPayloadToolBlockFlattening?: boolean;
 };
 
@@ -266,6 +275,19 @@ function resolveAnthropicThinkingRuntime(
   };
 }
 
+function resolveDeepSeekAnthropicThinkingRuntime(
+  model: Model<any>,
+  options: StreamOptionsEx,
+): AnthropicThinkingRuntime {
+  const effort = mapDeepSeekReasoningEffort(options.reasoning) as AnthropicEffort | undefined;
+  return {
+    thinkingEnabled: Boolean(effort),
+    mode: effort ? "adaptive" : "disabled",
+    maxTokens: resolveMaxTokens(options.maxTokens, model.maxTokens),
+    ...(effort ? { effort } : {}),
+  };
+}
+
 function applyAnthropicThinkingPayloadOverride(
   payload: unknown,
   thinking: AnthropicThinkingRuntime,
@@ -294,135 +316,6 @@ function applyAnthropicThinkingPayloadOverride(
     },
     ...(Object.keys(outputConfig).length > 0 ? { output_config: outputConfig } : {}),
   };
-}
-
-function isDeepSeekAnthropicModel(model: Model<any>) {
-  const modelId = String(model.id ?? "").toLowerCase();
-  const baseUrl = String((model as { baseUrl?: unknown }).baseUrl ?? "").toLowerCase();
-  return modelId.includes("deepseek") || baseUrl.includes("deepseek");
-}
-
-function isDeepSeekAnthropicEndpoint(params: { api?: string; baseUrl?: string; modelId?: string }) {
-  if (params.api && params.api !== "anthropic-messages") return false;
-  const baseUrl = params.baseUrl?.trim().toLowerCase() ?? "";
-  const modelId = params.modelId?.trim().toLowerCase() ?? "";
-  return baseUrl.includes("deepseek.com") || modelId.includes("deepseek");
-}
-
-function isAnthropicPayloadToolUseBlock(block: unknown): block is Record<string, unknown> {
-  return isRecord(block) && block.type === "tool_use" && typeof block.id === "string";
-}
-
-function isAnthropicPayloadToolResultBlock(
-  block: unknown,
-): block is Record<string, unknown> & { tool_use_id: string } {
-  return isRecord(block) && block.type === "tool_result" && typeof block.tool_use_id === "string";
-}
-
-function isDeepSeekDsmlRecoveredToolCallId(id: unknown) {
-  return typeof id === "string" && id.startsWith("dsml-tool-call-");
-}
-
-function anthropicPayloadToolUseToContextText(toolUse: Record<string, unknown>) {
-  const name = typeof toolUse.name === "string" ? toolUse.name : "";
-  return truncateContextText(
-    [
-      "Historical assistant tool request (read-only context; do not repeat):",
-      `tool_call_id: ${toolUse.id}`,
-      `tool_name: ${name || "unknown"}`,
-      "arguments:",
-      safeJsonForContext(isRecord(toolUse.input) ? toolUse.input : (toolUse.input ?? {})),
-    ].join("\n"),
-  );
-}
-
-function anthropicPayloadToolResultToContextText(
-  toolResult: Record<string, unknown> & { tool_use_id: string },
-) {
-  const content = toolResult.content;
-  const contentText = Array.isArray(content)
-    ? content
-        .map((block) => {
-          if (isRecord(block) && block.type === "text" && typeof block.text === "string") {
-            return block.text;
-          }
-          return safeJsonForContext(block);
-        })
-        .filter((text) => text.trim())
-        .join("\n\n")
-    : typeof content === "string"
-      ? content
-      : safeJsonForContext(content ?? "");
-
-  return truncateContextText(
-    [
-      "Previous tool execution result:",
-      `tool_call_id: ${toolResult.tool_use_id}`,
-      typeof toolResult.name === "string" ? `tool_name: ${toolResult.name}` : "",
-      typeof toolResult.is_error === "boolean"
-        ? `is_error: ${toolResult.is_error ? "true" : "false"}`
-        : "",
-      "result:",
-      contentText || "(empty result)",
-    ]
-      .filter(Boolean)
-      .join("\n"),
-  );
-}
-
-function flattenAnthropicPayloadToolBlocks(payload: unknown): unknown {
-  if (!isRecord(payload) || !Array.isArray(payload.messages)) return payload;
-
-  let changed = false;
-  const messages = payload.messages.map((message) => {
-    if (!isRecord(message) || !Array.isArray(message.content)) return message;
-
-    let messageChanged = false;
-    const content = message.content.map((block) => {
-      if (isAnthropicPayloadToolUseBlock(block)) {
-        changed = true;
-        messageChanged = true;
-        return { type: "text", text: anthropicPayloadToolUseToContextText(block) };
-      }
-      if (isAnthropicPayloadToolResultBlock(block)) {
-        changed = true;
-        messageChanged = true;
-        return { type: "text", text: anthropicPayloadToolResultToContextText(block) };
-      }
-      return block;
-    });
-
-    return messageChanged ? { ...message, content } : message;
-  });
-
-  return changed ? { ...payload, messages } : payload;
-}
-
-function attachDeepSeekAnthropicPayloadToolBlockFlattening(
-  options: StreamOptionsEx,
-): StreamOptionsEx {
-  if (options.deepSeekAnthropicPayloadToolBlockFlattening) return options;
-
-  const previousOnPayload = options.onPayload;
-  return {
-    ...options,
-    deepSeekDsmlToolCallRepair: true,
-    deepSeekAnthropicPayloadToolBlockFlattening: true,
-    onPayload: async (payload, model) => {
-      let nextPayload = payload;
-      if (previousOnPayload) {
-        const overridden = await previousOnPayload(nextPayload, model);
-        if (overridden !== undefined) {
-          nextPayload = overridden;
-        }
-      }
-      return flattenAnthropicPayloadToolBlocks(nextPayload);
-    },
-  };
-}
-
-function shouldRepairDeepSeekAnthropicContext(model: Model<any>, options?: StreamOptionsEx) {
-  return Boolean(options?.deepSeekDsmlToolCallRepair) || isDeepSeekAnthropicModel(model);
 }
 
 function attachAnthropicThinkingPayloadOverride(
@@ -826,120 +719,6 @@ function buildTextModeUnsupportedToolResult(toolCall: ToolCall): ToolResultMessa
   };
 }
 
-function safeJsonForContext(value: unknown) {
-  try {
-    return JSON.stringify(value ?? {}, null, 2);
-  } catch {
-    return String(value ?? {});
-  }
-}
-
-function truncateContextText(value: string, maxLength = 8_000) {
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, maxLength)}\n\n[truncated ${value.length - maxLength} chars]`;
-}
-
-function toolCallToContextText(toolCall: ToolCall) {
-  return truncateContextText(
-    [
-      "Historical assistant tool request (read-only context; do not repeat):",
-      `tool_call_id: ${toolCall.id}`,
-      `tool_name: ${toolCall.name}`,
-      "arguments:",
-      safeJsonForContext(toolCall.arguments ?? {}),
-    ].join("\n"),
-  );
-}
-
-function toolResultToContextText(message: ToolResultMessage) {
-  const contentText = message.content
-    .map((block) => {
-      if (block.type === "text") return block.text;
-      if (block.type === "image") return "[image content omitted from textual DeepSeek context]";
-      return safeJsonForContext(block);
-    })
-    .filter((text) => text.trim())
-    .join("\n\n");
-
-  return truncateContextText(
-    [
-      "Previous tool execution result:",
-      `tool_call_id: ${message.toolCallId}`,
-      `tool_name: ${message.toolName}`,
-      `is_error: ${message.isError ? "true" : "false"}`,
-      "result:",
-      contentText || "(empty result)",
-    ].join("\n"),
-  );
-}
-
-function appendTextToUserMessage(message: Message, text: string): Message {
-  if (message.role !== "user") return message;
-  if (typeof message.content === "string") {
-    return {
-      ...message,
-      content: `${message.content}${message.content.trim() ? "\n\n" : ""}${text}`,
-    } as Message;
-  }
-  return {
-    ...message,
-    content: [...message.content, { type: "text", text }],
-  } as Message;
-}
-
-function flattenToolInteractionsForDeepSeekAnthropicContext(context: Context): Context {
-  const messages: Message[] = [];
-  let changed = false;
-
-  for (const message of context.messages) {
-    if (message.role === "toolResult") {
-      const text = toolResultToContextText(message);
-      const previous = messages[messages.length - 1];
-      if (previous?.role === "user") {
-        messages[messages.length - 1] = appendTextToUserMessage(previous, text);
-      } else {
-        messages.push({
-          role: "user",
-          content: [{ type: "text", text }],
-          timestamp: message.timestamp,
-        } as Message);
-      }
-      changed = true;
-      continue;
-    }
-
-    if (message.role !== "assistant") {
-      messages.push(message);
-      continue;
-    }
-
-    let messageChanged = false;
-    const nextContent = message.content.flatMap((block) => {
-      if (block.type !== "toolCall") return [block];
-      changed = true;
-      messageChanged = true;
-      return [{ type: "text" as const, text: toolCallToContextText(block) }];
-    });
-
-    if (nextContent.length === 0) {
-      changed = true;
-      continue;
-    }
-
-    messages.push(
-      messageChanged
-        ? ({
-            ...message,
-            content: nextContent,
-            stopReason: message.stopReason === "toolUse" ? "stop" : message.stopReason,
-          } as Message)
-        : message,
-    );
-  }
-
-  return changed ? { ...context, messages } : context;
-}
-
 function buildTextModeToolResultsForAssistant(
   assistant: AssistantMessage,
   hostedSearchBlocks: HostedSearchBlock[],
@@ -963,39 +742,27 @@ function buildTextModeToolResultForToolCall(
         hostedSearchBlocks,
         sourcesIntro: "Hosted search sources already captured in this response:",
         fallbackText:
-          "No hosted search result was returned for this recovered request. Continue from existing context without repeating DSML markup.",
+          "No hosted search result was returned for this recovered request. Continue from existing context without repeating raw tool-call markup.",
       })
     : buildTextModeUnsupportedToolResult(toolCall);
 }
 
-function isDeepSeekDsmlProviderNativeWebSearchToolCall(toolCall: ToolCall) {
-  return (
-    isDeepSeekDsmlRecoveredToolCallId(toolCall.id) &&
-    isProviderNativeWebSearchToolCallName(toolCall.name)
-  );
-}
-
-function findNextAssistantMessageIndex(messages: Context["messages"], startIndex: number) {
-  for (let index = startIndex; index < messages.length; index += 1) {
-    if (messages[index]?.role === "assistant") return index;
+function findNextNonToolResultMessageIndex(messages: Context["messages"], startIndex: number) {
+  let index = startIndex;
+  while (index < messages.length && messages[index]?.role === "toolResult") {
+    index += 1;
   }
-  return messages.length;
+  return index;
 }
 
-function normalizeTextModeToolCallHistoryForDeepSeek(context: Context): Context {
-  const repairedMessages: Context["messages"] = [];
+function normalizeStructuredToolCallHistoryForDeepSeek(context: Context): Context {
+  const messages: Context["messages"] = [];
   let changed = false;
 
-  for (let i = 0; i < context.messages.length; i += 1) {
-    const message = context.messages[i];
-
-    if (message.role === "toolResult") {
-      changed = true;
-      continue;
-    }
-
+  for (let index = 0; index < context.messages.length; index += 1) {
+    const message = context.messages[index];
     if (message.role !== "assistant") {
-      repairedMessages.push(message);
+      messages.push(message);
       continue;
     }
 
@@ -1003,7 +770,7 @@ function normalizeTextModeToolCallHistoryForDeepSeek(context: Context): Context 
       (block): block is ToolCall => block.type === "toolCall",
     );
     if (toolCalls.length === 0) {
-      repairedMessages.push(message);
+      messages.push(message);
       continue;
     }
 
@@ -1011,103 +778,56 @@ function normalizeTextModeToolCallHistoryForDeepSeek(context: Context): Context 
       const assistantContent = message.content.filter((block) => block.type !== "toolCall");
       changed = true;
       if (assistantContent.length > 0) {
-        repairedMessages.push({
+        messages.push({
           ...message,
           content: assistantContent,
           stopReason: "stop",
         } as AssistantMessage);
       }
+      const afterToolResults = findNextNonToolResultMessageIndex(context.messages, index + 1);
+      index = afterToolResults - 1;
       continue;
     }
 
-    const droppedToolCallIds = new Set(
-      toolCalls
-        .filter(isDeepSeekDsmlProviderNativeWebSearchToolCall)
-        .map((toolCall) => toolCall.id),
+    messages.push(message);
+    const afterToolResults = findNextNonToolResultMessageIndex(context.messages, index + 1);
+    const consumedToolResults = context.messages.slice(index + 1, afterToolResults).filter(
+      (candidate): candidate is ToolResultMessage => candidate.role === "toolResult",
     );
-    const retainedToolCalls = toolCalls.filter((toolCall) => !droppedToolCallIds.has(toolCall.id));
-    const assistantContent = message.content.filter(
-      (block) => !(block.type === "toolCall" && droppedToolCallIds.has(block.id)),
-    );
-    if (assistantContent.length !== message.content.length) {
-      changed = true;
-    }
-    if (assistantContent.length > 0) {
-      repairedMessages.push(
-        assistantContent.length === message.content.length
-          ? message
-          : ({
-              ...message,
-              content: assistantContent,
-              stopReason: retainedToolCalls.length > 0 ? "toolUse" : "stop",
-            } as AssistantMessage),
-      );
-    } else {
-      changed = true;
-    }
-
-    const segmentEnd = findNextAssistantMessageIndex(context.messages, i + 1);
-    const retainedToolCallIds = new Set(retainedToolCalls.map((toolCall) => toolCall.id));
-    const existingResultsById = new Map<string, ToolResultMessage>();
-    const consumedToolResultIndexes = new Set<number>();
-
-    for (let index = i + 1; index < segmentEnd; index += 1) {
-      const nextMessage = context.messages[index];
-      if (nextMessage?.role !== "toolResult") continue;
-      consumedToolResultIndexes.add(index);
-      if (droppedToolCallIds.has(nextMessage.toolCallId)) {
-        changed = true;
-        continue;
-      }
-      if (!retainedToolCallIds.has(nextMessage.toolCallId)) {
-        changed = true;
-        continue;
-      }
-      if (!existingResultsById.has(nextMessage.toolCallId)) {
-        existingResultsById.set(nextMessage.toolCallId, nextMessage);
+    const consumedToolResultsById = new Map<string, ToolResultMessage>();
+    for (const toolResult of consumedToolResults) {
+      if (!consumedToolResultsById.has(toolResult.toolCallId)) {
+        consumedToolResultsById.set(toolResult.toolCallId, toolResult);
       } else {
         changed = true;
       }
     }
 
-    const orderedToolResults = retainedToolCalls.map((toolCall) => {
-      const existing = existingResultsById.get(toolCall.id);
+    const orderedToolResults = toolCalls.map((toolCall) => {
+      const existing = consumedToolResultsById.get(toolCall.id);
       if (existing) return existing;
       changed = true;
       return buildTextModeToolResultForToolCall(toolCall, []);
     });
+    messages.push(...orderedToolResults);
 
-    if (orderedToolResults.length > 0) {
-      repairedMessages.push(...orderedToolResults);
-      const alreadyAdjacent = orderedToolResults.every((toolResult, offset) => {
-        const original = context.messages[i + 1 + offset];
-        return original === toolResult;
-      });
-      if (!alreadyAdjacent) {
+    const retainedIds = new Set(toolCalls.map((toolCall) => toolCall.id));
+    for (const toolResult of consumedToolResults) {
+      if (!retainedIds.has(toolResult.toolCallId)) {
         changed = true;
       }
     }
 
-    for (let index = i + 1; index < segmentEnd; index += 1) {
-      if (consumedToolResultIndexes.has(index)) continue;
-      repairedMessages.push(context.messages[index]);
-    }
-
-    if (segmentEnd > i + 1) {
-      i = segmentEnd - 1;
-    }
-
-    if (droppedToolCallIds.size > 0 || retainedToolCalls.length !== toolCalls.length) {
+    const alreadyAdjacent = orderedToolResults.every(
+      (toolResult, offset) => context.messages[index + 1 + offset] === toolResult,
+    );
+    if (!alreadyAdjacent || consumedToolResults.length !== orderedToolResults.length) {
       changed = true;
     }
+    index = afterToolResults - 1;
   }
 
-  return changed
-    ? {
-        ...context,
-        messages: repairedMessages,
-      }
-    : context;
+  return changed ? { ...context, messages } : context;
 }
 
 function hasGeminiGoogleSearchTool(tool: unknown) {
@@ -1393,17 +1113,6 @@ export function finalizeProviderStreamOptions(params: {
   options = attachProviderNativeWebSearch(params.providerId, options, params.nativeWebSearch, {
     baseUrl: params.baseUrl,
   });
-  const isDeepSeekAnthropic = isDeepSeekAnthropicEndpoint({
-    api: params.model?.api,
-    baseUrl: params.baseUrl,
-    modelId: params.model?.id,
-  });
-  if (isDeepSeekAnthropic) {
-    options = {
-      ...options,
-      deepSeekDsmlToolCallRepair: true,
-    };
-  }
   if (params.context && params.model) {
     options = attachOpenAIResponsesNativeAttachments(options, {
       context: params.context,
@@ -1430,9 +1139,11 @@ export function finalizeProviderStreamOptions(params: {
       workdir: params.workdir,
     });
   }
-  if (isDeepSeekAnthropic) {
-    options = attachDeepSeekAnthropicPayloadToolBlockFlattening(options);
-  }
+  options = attachDeepSeekProviderPayloadAdapter(options, {
+    providerId: params.providerId,
+    baseUrl: params.baseUrl,
+    model: params.model,
+  });
   return attachPayloadDebugLogging(options, params.debugLogger, params.extra);
 }
 
@@ -1637,8 +1348,10 @@ function resolveCodexOpenAICompletionsOverrides(params: {
   const isChutes = compatBaseUrl.includes("chutes.ai");
   const isDeepSeek =
     compatBaseUrl.includes("deepseek.com") || normalizedModelId.includes("deepseek");
+  if (isDeepSeek) {
+    return resolveDeepSeekOpenAICompletionsOverrides();
+  }
   const isKnownNonOpenAIModel =
-    isDeepSeek ||
     normalizedModelId.includes("qwen") ||
     normalizedModelId.includes("gpt-oss") ||
     normalizedModelId.includes("glm") ||
@@ -1813,14 +1526,28 @@ export function createModelFromConfig(
 
   if (providerId === "codex") {
     const { baseUrl: normalizedBaseUrl, preferredApi } = normalizeCodexBaseUrl(baseUrl);
-    const api = inferCodexApi(requestFormat, preferredApi);
+    const isDeepSeekCodex = isDeepSeekCodexTarget({
+      providerId,
+      baseUrl: normalizedBaseUrl,
+      upstreamBaseUrl,
+      modelId,
+    });
+    const api = isDeepSeekCodex ? "openai-completions" : inferCodexApi(requestFormat, preferredApi);
     const known = resolveKnownModel("openai", modelId, normalizedBaseUrl);
     if (known && known.api === api) {
-      return {
-        ...known,
-        contextWindow,
-        maxTokens,
-      };
+      return applyDeepSeekModelDefaults(
+        {
+          ...known,
+          contextWindow,
+          maxTokens,
+        },
+        {
+          providerId,
+          baseUrl: normalizedBaseUrl,
+          upstreamBaseUrl,
+          modelId,
+        },
+      );
     }
 
     const custom: Model<any> = {
@@ -1851,7 +1578,12 @@ export function createModelFromConfig(
         }
       }
     }
-    return custom;
+    return applyDeepSeekModelDefaults(custom, {
+      providerId,
+      baseUrl: normalizedBaseUrl,
+      upstreamBaseUrl,
+      modelId,
+    });
   }
 
   if (providerId === "gemini") {
@@ -1882,11 +1614,19 @@ export function createModelFromConfig(
 
   const known = resolveKnownModel("anthropic", modelId, baseUrl);
   if (known) {
-    return {
-      ...known,
-      contextWindow,
-      maxTokens,
-    };
+    return applyDeepSeekModelDefaults(
+      {
+        ...known,
+        contextWindow,
+        maxTokens,
+      },
+      {
+        providerId,
+        baseUrl,
+        upstreamBaseUrl,
+        modelId,
+      },
+    );
   }
 
   const custom: Model<"anthropic-messages"> = {
@@ -1901,25 +1641,38 @@ export function createModelFromConfig(
     contextWindow,
     maxTokens,
   };
-  return custom;
+  return applyDeepSeekModelDefaults(custom, {
+    providerId,
+    baseUrl,
+    upstreamBaseUrl,
+    modelId,
+  });
 }
 
 export function streamSimpleByApi(model: Model<any>, context: Context, options: StreamOptionsEx) {
   switch (model.api) {
     case "anthropic-messages": {
       // Anthropic：需要我们自己调用 streamAnthropic()，以便显式传 toolChoice（以及启用/禁用 thinking）。
-      const anthropicThinking = resolveAnthropicThinkingRuntime(model, options);
-      const shouldRepairDeepSeekAnthropic = shouldRepairDeepSeekAnthropicContext(model, options);
-      const repairedAnthropicContext = shouldRepairDeepSeekAnthropic
-        ? normalizeTextModeToolCallHistoryForDeepSeek(context)
+      const isDeepSeekAnthropic =
+        Boolean(options.deepSeekProviderAdapter || options.deepSeekDsmlToolCallRepair) ||
+        isDeepSeekAnthropicTarget({
+          api: model.api,
+          baseUrl: model.baseUrl,
+          modelId: model.id,
+        });
+      const anthropicThinking = isDeepSeekAnthropic
+        ? resolveDeepSeekAnthropicThinkingRuntime(model, options)
+        : resolveAnthropicThinkingRuntime(model, options);
+      const anthropicOptions = isDeepSeekAnthropic
+        ? attachDeepSeekProviderPayloadAdapter(options, {
+            providerId: "claude_code",
+            baseUrl: model.baseUrl,
+            model,
+          })
+        : attachAnthropicThinkingPayloadOverride(options, anthropicThinking);
+      const anthropicContext = isDeepSeekAnthropic
+        ? normalizeStructuredToolCallHistoryForDeepSeek(context)
         : context;
-      const anthropicContext = shouldRepairDeepSeekAnthropic
-        ? flattenToolInteractionsForDeepSeekAnthropicContext(repairedAnthropicContext)
-        : repairedAnthropicContext;
-      let anthropicOptions = attachAnthropicThinkingPayloadOverride(options, anthropicThinking);
-      if (shouldRepairDeepSeekAnthropic) {
-        anthropicOptions = attachDeepSeekAnthropicPayloadToolBlockFlattening(anthropicOptions);
-      }
       const stream = streamAnthropic(model as any, anthropicContext, {
         temperature: anthropicOptions.temperature,
         maxTokens: anthropicThinking.maxTokens,
@@ -1938,17 +1691,30 @@ export function streamSimpleByApi(model: Model<any>, context: Context, options: 
           : {}),
         toolChoice: anthropicOptions.toolChoice ?? "none",
       });
-      return anthropicOptions.deepSeekDsmlToolCallRepair
+      return isDeepSeekAnthropic || anthropicOptions.deepSeekDsmlToolCallRepair
         ? wrapDeepSeekDsmlToolCallStream(stream)
         : stream;
     }
     case "openai-completions": {
+      const openAICompletionsOptions = isDeepSeekTarget({
+        baseUrl: model.baseUrl,
+        modelId: model.id,
+      })
+        ? attachDeepSeekProviderPayloadAdapter(options, {
+            providerId: "codex",
+            baseUrl: model.baseUrl,
+            model,
+          })
+        : options;
+      const openAICompletionsContext = openAICompletionsOptions.deepSeekProviderAdapter
+        ? normalizeStructuredToolCallHistoryForDeepSeek(context)
+        : context;
       const openAIOptions: OpenAICompletionsOptions = {
-        ...buildOpenAIBaseOptions(model, options),
-        reasoningEffort: options.reasoning,
-        toolChoice: mapToolChoiceToOpenAI(options.toolChoice),
+        ...buildOpenAIBaseOptions(model, openAICompletionsOptions),
+        reasoningEffort: openAICompletionsOptions.reasoning,
+        toolChoice: mapToolChoiceToOpenAI(openAICompletionsOptions.toolChoice),
       };
-      return streamOpenAICompletions(model as any, context, openAIOptions);
+      return streamOpenAICompletions(model as any, openAICompletionsContext, openAIOptions);
     }
     case "openai-responses": {
       const openAIOptions: OpenAIResponsesOptions = {

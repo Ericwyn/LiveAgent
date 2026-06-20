@@ -56,7 +56,7 @@ export function buildProviderNativeWebSearchBridgeResult(params: {
     return `${index + 1}. ${title} - ${source.url}`;
   });
   const text = [
-    "Recovered a provider-native web search request that was emitted as DSML text instead of a structured provider tool call.",
+    "Recovered a provider-native web search request that was emitted as raw tool-call markup instead of a structured provider tool call.",
     query ? `Requested query: ${query}` : "",
     sourceLines.length > 0 ? [params.sourcesIntro, ...sourceLines].join("\n") : params.fallbackText,
     ...(params.extraInstructions ?? []),

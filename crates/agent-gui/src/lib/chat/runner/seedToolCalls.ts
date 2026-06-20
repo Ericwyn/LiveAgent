@@ -1,5 +1,11 @@
 import type { AssistantMessage, ToolCall } from "@earendil-works/pi-ai";
 import {
+  hasDsmlToolCallMarkup,
+  isOnlyDsmlOrphanCloseTags,
+  recoverDsmlToolCallsFromText,
+  stripDsmlToolCallMarkup,
+} from "./deepSeekDsml";
+import {
   comparableToolCall,
   hasFlattenedToolRequestText,
   recoverFlattenedToolRequests,
@@ -10,23 +16,9 @@ const FUNCTION_PATTERN = /<function\b([^>]*)>([\s\S]*?)(?:<\/function>|$)/i;
 const PARAMETER_PATTERN =
   /<parameter\b([^>]*)>([\s\S]*?)(?:<\/parameter>|(?=<parameter\b|<\/function>|$))/gi;
 const ATTRIBUTE_PATTERN = /([a-zA-Z_][\w:-]*)\s*=\s*"([^"]*)"/g;
-const DSML_TAG_PREFIX = String.raw`(?:\uFF5C{2}|\|{2})\s*DSML\s*(?:\uFF5C{2}|\|{2})`;
-const DSML_TOOL_CALL_DISPLAY_PATTERN = new RegExp(
-  String.raw`<\s*${DSML_TAG_PREFIX}\s*tool_calls\s*>[\s\S]*?(?:<\/\s*${DSML_TAG_PREFIX}\s*tool_calls\s*>|$)`,
-  "gi",
-);
-const DSML_INVOKE_PATTERN = new RegExp(
-  String.raw`<\s*${DSML_TAG_PREFIX}\s*invoke\b([^>]*)>([\s\S]*?)(?:<\/\s*${DSML_TAG_PREFIX}\s*invoke\s*>|$)`,
-  "gi",
-);
-const DSML_PARAMETER_PATTERN = new RegExp(
-  String.raw`<\s*${DSML_TAG_PREFIX}\s*parameter\b([^>]*)>([\s\S]*?)(?:<\/\s*${DSML_TAG_PREFIX}\s*parameter\s*>|(?=<\s*${DSML_TAG_PREFIX}\s*parameter\b|<\/\s*${DSML_TAG_PREFIX}\s*invoke\s*>|$))`,
-  "gi",
-);
-const DSML_ORPHAN_CLOSE_TAGS_PATTERN = new RegExp(
-  String.raw`^\s*(?:<\/\s*${DSML_TAG_PREFIX}\s*(?:parameter|invoke|tool_calls)\s*>\s*)+$`,
-  "i",
-);
+
+export { parseDsmlToolCallMarkup } from "./deepSeekDsml";
+
 function parseAttributes(raw: string) {
   const attributes = new Map<string, string>();
   ATTRIBUTE_PATTERN.lastIndex = 0;
@@ -72,6 +64,18 @@ function shouldRecoverDeepSeekFlattenedText(assistant: AssistantMessage) {
     .map((value) => (typeof value === "string" ? value.toLowerCase() : ""))
     .join(" ");
   return metadata.includes("deepseek");
+}
+
+function buildAssistantBlockRecoverySourceKey(assistant: AssistantMessage, blockIndex: number) {
+  return [
+    "assistant",
+    (assistant as { model?: unknown }).model,
+    (assistant as { provider?: unknown }).provider,
+    assistant.timestamp,
+    blockIndex,
+  ]
+    .map((value) => String(value ?? ""))
+    .join(":");
 }
 
 function coerceSeedParameterValue(value: string, attributes: Map<string, string>) {
@@ -136,61 +140,25 @@ function parseSeedToolCallMarkup(markup: string): ToolCall | null {
   };
 }
 
-export function parseDsmlToolCallMarkup(markup: string): ToolCall[] {
-  const toolCalls: ToolCall[] = [];
-  DSML_INVOKE_PATTERN.lastIndex = 0;
-  let invokeMatch = DSML_INVOKE_PATTERN.exec(markup);
-
-  while (invokeMatch !== null) {
-    const invokeAttributes = parseAttributes(invokeMatch[1] ?? "");
-    const toolName = invokeAttributes.get("name")?.trim() ?? "";
-    if (!toolName) {
-      invokeMatch = DSML_INVOKE_PATTERN.exec(markup);
-      continue;
-    }
-
-    const args: Record<string, unknown> = {};
-    const paramsBody = invokeMatch[2] ?? "";
-    DSML_PARAMETER_PATTERN.lastIndex = 0;
-    let paramMatch = DSML_PARAMETER_PATTERN.exec(paramsBody);
-    while (paramMatch !== null) {
-      const paramAttributes = parseAttributes(paramMatch[1] ?? "");
-      const paramName = paramAttributes.get("name")?.trim() ?? "";
-      if (!paramName) {
-        paramMatch = DSML_PARAMETER_PATTERN.exec(paramsBody);
-        continue;
-      }
-      args[paramName] = coerceSeedParameterValue(paramMatch[2] ?? "", paramAttributes);
-      paramMatch = DSML_PARAMETER_PATTERN.exec(paramsBody);
-    }
-
-    toolCalls.push({
-      type: "toolCall",
-      id: `dsml-tool-call-${crypto.randomUUID()}`,
-      name: toolName,
-      arguments: args,
-    });
-    invokeMatch = DSML_INVOKE_PATTERN.exec(markup);
-  }
-
-  return toolCalls;
-}
-
 function hasRecoverableToolCallMarkup(
   text: string,
   options?: { recoverFlattenedText?: boolean; stripDsmlOrphanCloseTags?: boolean },
 ) {
   return (
     text.includes("<seed:tool_call>") ||
-    (text.includes("DSML") && text.includes("tool_calls")) ||
+    hasDsmlToolCallMarkup(text) ||
     Boolean(options?.recoverFlattenedText && hasFlattenedToolRequestText(text)) ||
-    Boolean(options?.stripDsmlOrphanCloseTags && DSML_ORPHAN_CLOSE_TAGS_PATTERN.test(text))
+    Boolean(options?.stripDsmlOrphanCloseTags && isOnlyDsmlOrphanCloseTags(text))
   );
 }
 
 function recoverToolCallsFromBlockText(
   text: string,
-  options?: { recoverFlattenedText?: boolean; stripDsmlOrphanCloseTags?: boolean },
+  options?: {
+    recoverFlattenedText?: boolean;
+    stripDsmlOrphanCloseTags?: boolean;
+    sourceKey?: string;
+  },
 ) {
   if (!hasRecoverableToolCallMarkup(text, options)) {
     return {
@@ -206,16 +174,17 @@ function recoverToolCallsFromBlockText(
     }
     return "";
   });
-  cleanedText = cleanedText.replace(DSML_TOOL_CALL_DISPLAY_PATTERN, (markup) => {
-    toolCalls.push(...parseDsmlToolCallMarkup(markup));
-    return "";
+  const recoveredDsml = recoverDsmlToolCallsFromText(cleanedText, {
+    sourceKey: options?.sourceKey,
   });
+  cleanedText = recoveredDsml.cleanedText;
+  toolCalls.push(...recoveredDsml.toolCalls);
   if (options?.recoverFlattenedText) {
     const flattened = recoverFlattenedToolRequests(cleanedText);
     cleanedText = flattened.text;
     toolCalls.push(...flattened.toolCalls);
   }
-  if (options?.stripDsmlOrphanCloseTags && DSML_ORPHAN_CLOSE_TAGS_PATTERN.test(cleanedText)) {
+  if (options?.stripDsmlOrphanCloseTags && isOnlyDsmlOrphanCloseTags(cleanedText)) {
     cleanedText = "";
   }
 
@@ -232,12 +201,11 @@ export function stripSeedToolCallMarkup(
   if (!hasRecoverableToolCallMarkup(text, options)) {
     return text;
   }
-  const strippedMarkupText = text
-    .replace(SEED_TOOL_CALL_DISPLAY_PATTERN, "")
-    .replace(DSML_TOOL_CALL_DISPLAY_PATTERN, "");
+  const strippedMarkupText = text.replace(SEED_TOOL_CALL_DISPLAY_PATTERN, "");
+  const strippedDsmlText = stripDsmlToolCallMarkup(strippedMarkupText);
   const nextText = options?.recoverFlattenedText
-    ? recoverFlattenedToolRequests(strippedMarkupText).text
-    : strippedMarkupText;
+    ? recoverFlattenedToolRequests(strippedDsmlText).text
+    : strippedDsmlText;
   return cleanIfChanged(text, nextText);
 }
 
@@ -254,11 +222,12 @@ export function recoverAssistantSeedToolCalls(
   const seenComparableToolCalls = new Set(existingStructuredToolCalls.map(comparableToolCall));
   let changed = false;
 
-  for (const block of assistant.content) {
+  for (const [blockIndex, block] of assistant.content.entries()) {
     if (block.type === "thinking") {
       const recovered = recoverToolCallsFromBlockText(block.thinking, {
         recoverFlattenedText,
         stripDsmlOrphanCloseTags,
+        sourceKey: buildAssistantBlockRecoverySourceKey(assistant, blockIndex),
       });
       if (recovered.cleanedText !== block.thinking) {
         changed = true;
@@ -286,6 +255,7 @@ export function recoverAssistantSeedToolCalls(
       const recovered = recoverToolCallsFromBlockText(block.text, {
         recoverFlattenedText,
         stripDsmlOrphanCloseTags,
+        sourceKey: buildAssistantBlockRecoverySourceKey(assistant, blockIndex),
       });
       if (recovered.cleanedText !== block.text) {
         changed = true;
