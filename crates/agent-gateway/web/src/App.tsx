@@ -2256,14 +2256,12 @@ export default function App() {
     [queueSettingsSave],
   );
 
-  const openTunnelToolPanel = useCallback(
+  const ensureTunnelToolTab = useCallback(
     (projectPathKey?: string) => {
       const targetProjectPathKey =
         workspaceProjectPathKey(projectPathKey) ||
         workspaceProjectPathKey(activeWorkspaceProjectPath);
       if (!targetProjectPathKey) return;
-      setActiveView("chat");
-      setProjectToolsPanelOpen(true);
       setSettings((prev) =>
         updateProjectToolsTunnelOpen(
           updateProjectToolsPanelActiveTab(prev, targetProjectPathKey, "tunnel"),
@@ -2281,10 +2279,10 @@ export default function App() {
       if (!change) return;
       setTunnelRefreshToken((current) => current + 1);
       if (change.action === "create") {
-        openTunnelToolPanel(change.projectPathKey);
+        ensureTunnelToolTab(change.projectPathKey);
       }
     },
-    [openTunnelToolPanel],
+    [ensureTunnelToolTab],
   );
 
   const persistProjectConversationActivity = useCallback(

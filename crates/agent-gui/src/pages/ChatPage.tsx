@@ -1062,14 +1062,12 @@ export function ChatPage(props: ChatPageProps) {
     [activateWorkspaceProject, checkWorkspaceProjectDirectory, setSettings],
   );
 
-  const openTunnelToolPanel = useCallback(
+  const ensureTunnelToolTab = useCallback(
     (projectPathKey?: string) => {
       const targetProjectPathKey =
         workspaceProjectPathKey(projectPathKey) ||
         workspaceProjectPathKey(activeWorkspaceProjectPath);
       if (!targetProjectPathKey) return;
-      setActiveView("chat");
-      setProjectToolsPanelOpen(true);
       setSettings((prev) =>
         updateProjectToolsTunnelOpen(
           updateProjectToolsPanelActiveTab(prev, targetProjectPathKey, "tunnel"),
@@ -3705,7 +3703,7 @@ export function ChatPage(props: ChatPageProps) {
             onTunnelsChanged: (change) => {
               setTunnelRefreshToken((current) => current + 1);
               if (change.action === "create") {
-                openTunnelToolPanel(change.tunnel.projectPathKey);
+                ensureTunnelToolTab(change.tunnel.projectPathKey);
               }
             },
             sessionId,
