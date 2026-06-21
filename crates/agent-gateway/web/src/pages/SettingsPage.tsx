@@ -68,9 +68,6 @@ function NavItem({ icon, label, active, onClick }: NavItemProps) {
           : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
       }`}
     >
-      {active && (
-        <span className="settings-nav-indicator absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-primary" />
-      )}
       <div className="flex items-center gap-3">
         <div
           className={`settings-nav-icon flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${

@@ -2272,10 +2272,6 @@ html[data-liveagent-webui="gateway"] .project-terminal-viewport .xterm-viewport:
     border-color: hsl(var(--primary) / 0.35);
   }
 
-  html[data-liveagent-webui="gateway"] .settings-nav-indicator {
-    display: none;
-  }
-
   html[data-liveagent-webui="gateway"] .settings-nav-item > div {
     gap: 8px;
   }

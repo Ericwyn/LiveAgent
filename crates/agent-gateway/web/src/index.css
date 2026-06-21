@@ -618,22 +618,6 @@
     }
   }
 
-  /* Settings sidebar nav indicator */
-  .settings-nav-indicator {
-    animation: navIndicatorIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  }
-
-  @keyframes navIndicatorIn {
-    from {
-      opacity: 0;
-      transform: translateY(-50%) scaleY(0);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(-50%) scaleY(1);
-    }
-  }
-
   /* Settings page section transitions */
   .settings-section-enter {
     animation: settingsSectionIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
@@ -714,8 +698,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .settings-section-enter,
-    .settings-section-title-enter,
-    .settings-nav-indicator {
+    .settings-section-title-enter {
       animation: none;
     }
 
