@@ -235,18 +235,20 @@ export function SshTunnelPanel(props: SshTunnelPanelProps) {
   const visibleSessions = scope === "project" ? projectSshSessions : sshSessions;
   const canCreateInScope = scope === "project";
   const createHosts = canCreateInScope ? associatedHosts : [];
+  const hasCreateHosts = createHosts.length > 0;
+  const canShowCreateButton = canCreateInScope && hasCreateHosts;
   const selectedCreateHostId = createHosts.some((host) => host.id === createHostId)
     ? createHostId
     : (createHosts[0]?.id ?? "");
   const selectedCreateHost = createHosts.find((host) => host.id === selectedCreateHostId) ?? null;
   const selectedHostMessage = selectedCreateHost ? hostStatusMessage(selectedCreateHost, t) : "";
   const canCreate = Boolean(
-    canCreateInScope && selectedCreateHost && !selectedHostMessage && !creating,
+    canShowCreateButton && selectedCreateHost && !selectedHostMessage && !creating,
   );
   useEffect(() => {
-    if (canCreateInScope || view !== "create") return;
+    if (canShowCreateButton || view !== "create") return;
     setView("list");
-  }, [canCreateInScope, view]);
+  }, [canShowCreateButton, view]);
 
   useEffect(() => {
     if (!active) return;
@@ -521,7 +523,6 @@ export function SshTunnelPanel(props: SshTunnelPanelProps) {
     scope === "project"
       ? t("projectTools.sshTunnelProjectEmptyHint")
       : t("projectTools.sshTunnelAllEmptyHint");
-  const hasCreateHosts = createHosts.length > 0;
   const visibleSessionCount = visibleSessions.length;
   const connectedSessionCount = visibleSessions.filter(sshSessionConnected).length;
   const statusText =
@@ -815,7 +816,7 @@ export function SshTunnelPanel(props: SshTunnelPanelProps) {
               </div>
               <div className="truncate text-xs text-muted-foreground">{statusText}</div>
             </div>
-            {canCreateInScope ? (
+            {canShowCreateButton ? (
               <button
                 type="button"
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-transparent text-muted-foreground transition-colors hover:border-border/60 hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -887,7 +888,7 @@ export function SshTunnelPanel(props: SshTunnelPanelProps) {
 
           {visibleSessionCount === 0 ? (
             <div className="flex min-h-full items-center justify-center">
-              <div className="flex flex-col items-center justify-center gap-1.5 rounded-lg border border-dashed border-border/70 bg-background/40 px-4 py-8 text-center">
+              <div className="flex flex-col items-center justify-center gap-1.5 rounded-lg bg-background/40 px-4 py-8 text-center">
                 <div className="mb-1.5 flex h-12 w-12 items-center justify-center rounded-xl border border-border/50 bg-background/80 text-muted-foreground/70 shadow-[inset_0_1px_0_hsl(0_0%_100%_/_0.6),0_1px_3px_hsl(0_0%_0%_/_0.05)] dark:shadow-none">
                   <Key className="h-5 w-5" />
                 </div>
@@ -896,14 +897,13 @@ export function SshTunnelPanel(props: SshTunnelPanelProps) {
                   {emptyHint}
                 </div>
                 <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
-                  {canCreateInScope ? (
+                  {canShowCreateButton ? (
                     <Button
                       type="button"
                       variant="default"
                       size="sm"
                       className="h-7 rounded-lg px-2.5 text-xs"
                       onClick={() => setView("create")}
-                      disabled={!hasCreateHosts}
                     >
                       {t("projectTools.newSshTunnel")}
                     </Button>
