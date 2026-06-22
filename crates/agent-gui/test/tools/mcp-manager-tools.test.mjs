@@ -93,6 +93,37 @@ test("McpManager is always registered as a builtin tool", async () => {
   assert.equal(registry.metadataByName.get("McpManager").kind, "manage_mcp");
 });
 
+test("builtin registry resolves tool names with casing drift before execution", async () => {
+  const loader = createTsModuleLoader();
+  const registryModule = loader.loadModule("src/lib/tools/builtinRegistry.ts");
+  const fileToolState = loader.loadModule("src/lib/tools/fileToolState.ts");
+
+  const registry = await registryModule.buildBuiltinToolRegistry({
+    workdir: "/workspace",
+    providerId: "codex",
+    fileState: fileToolState.createFileToolState(),
+    skillsEnabled: false,
+    runtimeScope: "chat",
+    selectedSystemToolIds: [],
+    mcpSettings: { servers: [], selected: [] },
+    enabledMcpServerIds: [],
+    selectableMcpServers: [],
+  });
+
+  assert.equal(registry.hasTool("mcpmanager"), true);
+
+  const result = await registry.executeToolCall({
+    type: "toolCall",
+    id: "call-lower-mcp-manager",
+    name: "mcpmanager",
+    arguments: { action: "list" },
+  });
+
+  assert.equal(result.isError, false);
+  assert.equal(result.toolName, "McpManager");
+  assert.equal(result.details.kind, "manage_mcp");
+});
+
 test("ManagedProcess is registered only for chat runtime", async () => {
   const loader = createTsModuleLoader();
   const registryModule = loader.loadModule("src/lib/tools/builtinRegistry.ts");

@@ -52,6 +52,7 @@ import {
   resolveProviderNativeWebSearchStatus,
 } from "../search/providerNativeSearchStatus";
 import { createSubagentScheduler, type SubagentScheduler } from "../subagent/subagentScheduler";
+import { comparableToolCall } from "./flattenedToolCallText";
 import { recoverAssistantSeedToolCalls } from "./seedToolCalls";
 
 function createLinkedAbortSignal(signals: Array<AbortSignal | undefined>): {
@@ -347,6 +348,93 @@ export function buildToolsSuffix(workdir: string, availableToolNames?: readonly 
   return sections.join("\n\n");
 }
 
+function toolNameLookupKey(name: string) {
+  return name.trim().toLowerCase();
+}
+
+function buildToolNameCanonicalizer(tools: readonly { name: string }[]) {
+  const canonicalByKey = new Map<string, string | null>();
+  for (const tool of tools) {
+    const key = toolNameLookupKey(tool.name);
+    if (!key) continue;
+    const existing = canonicalByKey.get(key);
+    if (existing === undefined) {
+      canonicalByKey.set(key, tool.name);
+    } else if (existing !== tool.name) {
+      canonicalByKey.set(key, null);
+    }
+  }
+
+  return (name: string) => {
+    const canonical = canonicalByKey.get(toolNameLookupKey(name));
+    return canonical ?? name;
+  };
+}
+
+function normalizeToolCallName(toolCall: ToolCall, canonicalizeToolName: (name: string) => string) {
+  const canonicalName = canonicalizeToolName(toolCall.name);
+  if (canonicalName === toolCall.name) return toolCall;
+  return {
+    ...toolCall,
+    name: canonicalName,
+  };
+}
+
+function normalizeAssistantToolCallNames(
+  assistant: AssistantMessage,
+  canonicalizeToolName: (name: string) => string,
+) {
+  let changed = false;
+  const nextContent = assistant.content.map((block) => {
+    if (block.type !== "toolCall") return block;
+    const nextBlock = normalizeToolCallName(block, canonicalizeToolName);
+    if (nextBlock !== block) changed = true;
+    return nextBlock;
+  });
+
+  if (changed) {
+    assistant.content = nextContent;
+  }
+  return assistant;
+}
+
+function getComparableCanonicalToolCall(
+  toolCall: ToolCall,
+  canonicalizeToolName: (name: string) => string,
+) {
+  return comparableToolCall(normalizeToolCallName(toolCall, canonicalizeToolName));
+}
+
+function dedupeRecoveredToolCallsAgainstExisting(params: {
+  existingAssistant: AssistantMessage;
+  recoveredToolCalls: ToolCall[];
+  canonicalizeToolName: (name: string) => string;
+}) {
+  const seen = new Set(
+    params.existingAssistant.content
+      .filter((block): block is ToolCall => block.type === "toolCall")
+      .map((toolCall) => getComparableCanonicalToolCall(toolCall, params.canonicalizeToolName)),
+  );
+  const uniqueToolCalls: ToolCall[] = [];
+  const duplicateToolCallIds = new Set<string>();
+
+  for (const toolCall of params.recoveredToolCalls) {
+    const normalizedToolCall = normalizeToolCallName(toolCall, params.canonicalizeToolName);
+    const comparable = comparableToolCall(normalizedToolCall);
+    if (seen.has(comparable)) {
+      duplicateToolCallIds.add(normalizedToolCall.id);
+      continue;
+    }
+    seen.add(comparable);
+    uniqueToolCalls.push(normalizedToolCall);
+  }
+
+  return {
+    uniqueToolCalls,
+    duplicateToolCallIds,
+  };
+}
+
 function buildSystemPrompt(base: string | undefined, suffix: string) {
   const head = (base || "").trim();
   if (!head) return suffix;
@@ -592,18 +680,28 @@ export async function runAssistantWithTools(params: {
     const toolCallsById = new Map<string, ToolCall>();
     const parallelBatchKeyByToolCallId = new Map<string, string>();
     const parallelToolBatches = new Map<string, ParallelToolBatch>();
+    const llmTools = params.tools ?? [];
+    const canonicalizeToolName = buildToolNameCanonicalizer(llmTools);
+    const normalizeToolCallNameForExecution = (toolCall: ToolCall) =>
+      normalizeToolCallName(toolCall, canonicalizeToolName);
+    const normalizeAssistantToolCallNamesForExecution = (assistant: AssistantMessage) =>
+      normalizeAssistantToolCallNames(assistant, canonicalizeToolName);
     let currentRound = 0;
 
     const executeSingleToolCall = async (
       toolCall: ToolCall,
       signal?: AbortSignal,
     ): Promise<{ content: ToolResultMessage["content"]; details: unknown }> => {
+      const effectiveToolCall = normalizeToolCallNameForExecution(toolCall);
+      if (effectiveToolCall !== toolCall) {
+        toolCallsById.set(effectiveToolCall.id, effectiveToolCall);
+      }
       let toolResult: ToolResultMessage;
       const linkedSignal = createLinkedAbortSignal([signal, params.signal]);
       try {
-        if (shouldSilenceProviderNativeWebSearchToolCall(toolCall)) {
+        if (shouldSilenceProviderNativeWebSearchToolCall(effectiveToolCall)) {
           toolResult = buildProviderNativeWebSearchBridgeResult({
-            toolCall,
+            toolCall: effectiveToolCall,
             hostedSearchBlocks: hostedSearchBlocksByRound.get(currentRound) ?? [],
             sourcesIntro: "Hosted search sources already captured in this round:",
             fallbackText:
@@ -612,8 +710,8 @@ export async function runAssistantWithTools(params: {
           });
         } else {
           const execute = () =>
-            params.executeToolCall(toolCall, linkedSignal.signal, {
-              parentToolCall: toolCall,
+            params.executeToolCall(effectiveToolCall, linkedSignal.signal, {
+              parentToolCall: effectiveToolCall,
               subagentScheduler,
               emitToolCall: (emittedToolCall) => {
                 toolCallsById.set(emittedToolCall.id, emittedToolCall);
@@ -631,17 +729,17 @@ export async function runAssistantWithTools(params: {
               emitToolStatus: (status) => params.onToolStatus?.(status),
             });
           toolResult = toMessageToolResult(
-            await (toolCall.name === "Bash"
+            await (effectiveToolCall.name === "Bash"
               ? subagentScheduler.runBash(execute, linkedSignal.signal)
               : execute()),
-            toolCall,
+            effectiveToolCall,
           );
         }
       } catch (error) {
         toolResult = {
           role: "toolResult",
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
+          toolCallId: effectiveToolCall.id,
+          toolName: effectiveToolCall.name,
           content: [
             {
               type: "text",
@@ -659,7 +757,7 @@ export async function runAssistantWithTools(params: {
         linkedSignal.cleanup();
       }
 
-      toolResultErrorFlags.set(toolCall.id, Boolean(toolResult.isError));
+      toolResultErrorFlags.set(effectiveToolCall.id, Boolean(toolResult.isError));
       return {
         content: toolResult.content,
         details: toolResult.details ?? {},
@@ -703,7 +801,6 @@ export async function runAssistantWithTools(params: {
       return batch;
     };
 
-    const llmTools = params.tools ?? [];
     const localToolNames = new Set(llmTools.map((tool) => tool.name));
     const hiddenProviderNativeWebSearchToolNames = new Set<string>(
       nativeWebSearchStatus
@@ -1106,17 +1203,25 @@ export async function runAssistantWithTools(params: {
         isError: toolResultErrorFlags.get(toolCall.id) ?? false,
       }),
       beforeToolCall: async ({ assistantMessage, toolCall }) => {
-        toolCallsById.set(toolCall.id, toolCall);
-        if (toolCall.name !== "Agent") {
+        const effectiveToolCall = normalizeToolCallNameForExecution(toolCall);
+        const effectiveAssistantMessage =
+          normalizeAssistantToolCallNamesForExecution(assistantMessage);
+        toolCallsById.set(effectiveToolCall.id, effectiveToolCall);
+        if (effectiveToolCall.name !== "Agent") {
           return undefined;
         }
-        const group = findConsecutiveToolGroup(assistantMessage, toolCall.id, toolCall.name);
-        if (!group || group.length <= 1) return undefined;
+        const rawGroup = findConsecutiveToolGroup(
+          effectiveAssistantMessage,
+          effectiveToolCall.id,
+          effectiveToolCall.name,
+        );
+        if (!rawGroup || rawGroup.length <= 1) return undefined;
+        const group = rawGroup.map(normalizeToolCallNameForExecution);
 
         const batchKey = buildParallelToolBatchKey(group);
         if (!parallelToolBatches.has(batchKey)) {
           parallelToolBatches.set(batchKey, {
-            toolName: toolCall.name,
+            toolName: effectiveToolCall.name,
             toolCalls: group,
             started: false,
             announced: false,
@@ -1177,16 +1282,21 @@ export async function runAssistantWithTools(params: {
             nativeWebSearchStatusController.pause();
             const block = streamEvent.partial.content[streamEvent.contentIndex];
             if (block && block.type === "toolCall") {
-              toolCallsById.set(block.id, block);
-              if (!shouldSilenceProviderNativeWebSearchToolCall(block)) {
-                params.onToolCall?.(block, currentRound);
+              const effectiveToolCall = normalizeToolCallNameForExecution(block);
+              if (effectiveToolCall !== block) {
+                streamEvent.partial.content[streamEvent.contentIndex] = effectiveToolCall;
+              }
+              toolCallsById.set(effectiveToolCall.id, effectiveToolCall);
+              if (!shouldSilenceProviderNativeWebSearchToolCall(effectiveToolCall)) {
+                params.onToolCall?.(effectiveToolCall, currentRound);
               }
             }
           } else if (streamEvent.type === "toolcall_end") {
             nativeWebSearchStatusController.pause();
-            toolCallsById.set(streamEvent.toolCall.id, streamEvent.toolCall);
-            if (!shouldSilenceProviderNativeWebSearchToolCall(streamEvent.toolCall)) {
-              params.onToolCall?.(streamEvent.toolCall, currentRound);
+            const effectiveToolCall = normalizeToolCallNameForExecution(streamEvent.toolCall);
+            toolCallsById.set(effectiveToolCall.id, effectiveToolCall);
+            if (!shouldSilenceProviderNativeWebSearchToolCall(effectiveToolCall)) {
+              params.onToolCall?.(effectiveToolCall, currentRound);
             }
           }
           break;
@@ -1200,29 +1310,58 @@ export async function runAssistantWithTools(params: {
                   ? "failed"
                   : "completed";
             const hostedSearchBlocks = getHostedSearchBlocksForRound(currentRound);
-            const assistantWithHostedSearch = applyHostedSearchBlocksToAssistant(
+            const assistantWithCanonicalToolNames = normalizeAssistantToolCallNamesForExecution(
               event.message as AssistantMessage,
+            );
+            const assistantWithHostedSearch = applyHostedSearchBlocksToAssistant(
+              assistantWithCanonicalToolNames,
               currentRound,
               hostedSearchBlocks,
             );
             const normalizedSeedTurn = recoverAssistantSeedToolCalls(assistantWithHostedSearch);
-            const assistantMessage = normalizedSeedTurn?.assistant ?? assistantWithHostedSearch;
-            if (normalizedSeedTurn || assistantWithHostedSearch !== event.message) {
+            let recoveredSeedToolCalls: ToolCall[] = [];
+            let assistantWithRecoveredToolCalls =
+              normalizedSeedTurn?.assistant ?? assistantWithHostedSearch;
+            if (normalizedSeedTurn) {
+              const deduped = dedupeRecoveredToolCallsAgainstExisting({
+                existingAssistant: assistantWithHostedSearch,
+                recoveredToolCalls: normalizedSeedTurn.toolCalls,
+                canonicalizeToolName,
+              });
+              recoveredSeedToolCalls = deduped.uniqueToolCalls;
+              if (deduped.duplicateToolCallIds.size > 0) {
+                assistantWithRecoveredToolCalls = {
+                  ...assistantWithRecoveredToolCalls,
+                  content: assistantWithRecoveredToolCalls.content.filter(
+                    (block) =>
+                      block.type !== "toolCall" || !deduped.duplicateToolCallIds.has(block.id),
+                  ),
+                };
+              }
+            }
+            const assistantMessage = normalizeAssistantToolCallNamesForExecution(
+              assistantWithRecoveredToolCalls,
+            );
+            if (
+              normalizedSeedTurn ||
+              assistantMessage !== event.message ||
+              assistantWithHostedSearch !== event.message
+            ) {
               const stateMessages = getAgentMessages(agent);
               if (stateMessages.length > 0) {
                 agent.state.messages = [...stateMessages.slice(0, -1), assistantMessage];
               }
             }
-            if (normalizedSeedTurn && normalizedSeedTurn.toolCalls.length > 0) {
+            if (normalizedSeedTurn && recoveredSeedToolCalls.length > 0) {
               pendingRecoveredSeedTurnRef.current = {
                 round: currentRound,
                 assistant: assistantMessage,
-                toolCalls: normalizedSeedTurn.toolCalls,
+                toolCalls: recoveredSeedToolCalls,
               };
               params.debugLogger?.logResponse({
                 type: "seed_tool_call_recovery",
                 round: currentRound,
-                toolCalls: normalizedSeedTurn.toolCalls,
+                toolCalls: recoveredSeedToolCalls,
               });
             }
             queueHostedSearchFinalization(currentRound, hostedSearchFinishMode, {

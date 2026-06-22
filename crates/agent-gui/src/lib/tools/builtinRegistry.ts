@@ -104,6 +104,24 @@ function createBuiltinToolRegistry(bundles: BuiltinToolBundle[]): BuiltinToolReg
   const tools: BuiltinToolBundle["tools"] = [];
   const metadataByName = new Map<string, BuiltinToolMetadata>();
   const executorsByName = new Map<string, BuiltinToolBundle["executeToolCall"]>();
+  const canonicalToolNameByLookupKey = new Map<string, string | null>();
+
+  const registerCanonicalToolName = (toolName: string) => {
+    const key = toolName.trim().toLowerCase();
+    if (!key) return;
+    const existing = canonicalToolNameByLookupKey.get(key);
+    if (existing === undefined) {
+      canonicalToolNameByLookupKey.set(key, toolName);
+    } else if (existing !== toolName) {
+      canonicalToolNameByLookupKey.set(key, null);
+    }
+  };
+
+  const resolveToolName = (toolName: string) => {
+    if (executorsByName.has(toolName)) return toolName;
+    const canonical = canonicalToolNameByLookupKey.get(toolName.trim().toLowerCase());
+    return canonical && executorsByName.has(canonical) ? canonical : null;
+  };
 
   for (const bundle of bundles) {
     for (const tool of bundle.tools) {
@@ -112,6 +130,7 @@ function createBuiltinToolRegistry(bundles: BuiltinToolBundle[]): BuiltinToolReg
       }
       tools.push(tool);
       executorsByName.set(tool.name, bundle.executeToolCall);
+      registerCanonicalToolName(tool.name);
       const metadata = bundle.metadataByName.get(tool.name);
       if (metadata) {
         metadataByName.set(tool.name, metadata);
@@ -122,9 +141,21 @@ function createBuiltinToolRegistry(bundles: BuiltinToolBundle[]): BuiltinToolReg
   return {
     tools,
     metadataByName,
-    hasTool: (toolName) => executorsByName.has(toolName),
+    hasTool: (toolName) => resolveToolName(toolName) !== null,
     async executeToolCall(toolCall, signal, context) {
-      const execute = executorsByName.get(toolCall.name);
+      const resolvedToolName = resolveToolName(toolCall.name);
+      if (!resolvedToolName) {
+        return {
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [{ type: "text", text: `Unknown tool: ${toolCall.name}` }],
+          details: {},
+          isError: true,
+          timestamp: Date.now(),
+        };
+      }
+      const execute = executorsByName.get(resolvedToolName);
       if (!execute) {
         return {
           role: "toolResult",
@@ -136,7 +167,9 @@ function createBuiltinToolRegistry(bundles: BuiltinToolBundle[]): BuiltinToolReg
           timestamp: Date.now(),
         };
       }
-      return execute(toolCall, signal, context);
+      const effectiveToolCall =
+        resolvedToolName === toolCall.name ? toolCall : { ...toolCall, name: resolvedToolName };
+      return execute(effectiveToolCall, signal, context);
     },
   };
 }

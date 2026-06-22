@@ -459,6 +459,44 @@ test("runAssistantWithTools calls onBeforeNextTurn only for toolUse turns with t
   );
 });
 
+test("runAssistantWithTools canonicalizes builtin tool call name casing before execution", async () => {
+  const lowerCaseWriteCall = createToolCall("call-write", "write", {
+    path: "report.html",
+    content: "<html></html>",
+  });
+  const writeTool = {
+    name: "Write",
+    description: "Write a file",
+    parameters: { type: "object", properties: {} },
+  };
+  resetFakeStreams(createToolUseAssistant(lowerCaseWriteCall), createTextAssistant("done"));
+  const toolEvents = createToolEventRecorder();
+  const { params, executedToolCalls } = createBaseParams({
+    context: {
+      systemPrompt: "Base system prompt",
+      messages: [{ role: "user", content: "Start", timestamp: 1 }],
+      tools: [writeTool],
+    },
+    tools: [writeTool],
+    ...toolEvents.handlers,
+  });
+
+  const result = await runAssistantWithTools(params);
+
+  assert.deepEqual(
+    observedStreamContexts[0].tools.map((tool) => tool.name),
+    ["Write"],
+  );
+  assert.equal(executedToolCalls.length, 1);
+  assert.equal(executedToolCalls[0].id, lowerCaseWriteCall.id);
+  assert.equal(executedToolCalls[0].name, "Write");
+  assert.equal(result.emittedMessages[0].role, "assistant");
+  assert.equal(result.emittedMessages[0].content.at(-1).name, "Write");
+  assert.equal(result.emittedMessages[1].role, "toolResult");
+  assert.equal(result.emittedMessages[1].toolName, "Write");
+  assert.equal(result.emittedMessages[1].isError, false);
+});
+
 test("runAssistantWithTools runs consecutive Agent tool calls in parallel", async () => {
   const agentA = {
     type: "toolCall",
@@ -523,6 +561,62 @@ test("runAssistantWithTools runs consecutive Agent tool calls in parallel", asyn
   assert.deepEqual(
     result.emittedMessages.map((message) => message.role),
     ["assistant", "toolResult", "toolResult", "assistant"],
+  );
+});
+
+test("runAssistantWithTools canonicalizes lowercase Agent calls before parallel grouping", async () => {
+  const agentA = createToolCall("call-agent-lower-a", "agent", {
+    id: "a",
+    prompt: "Ask A",
+  });
+  const agentB = createToolCall("call-agent-lower-b", "agent", {
+    id: "b",
+    prompt: "Ask B",
+  });
+  resetFakeStreams(
+    createAssistant([agentA, agentB], "toolUse"),
+    createTextAssistant("final answer"),
+  );
+  let active = 0;
+  let maxActive = 0;
+  const statuses = [];
+  const agentTool = {
+    name: "Agent",
+    description: "Delegate",
+    parameters: { type: "object", properties: {} },
+  };
+  const { params, executedToolCalls } = createBaseParams({
+    context: {
+      systemPrompt: "Base system prompt",
+      messages: [{ role: "user", content: "Start", timestamp: 1 }],
+      tools: [agentTool],
+    },
+    tools: [agentTool],
+    async executeToolCall(toolCall) {
+      executedToolCalls.push(toolCall);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      active -= 1;
+      return createToolResult(toolCall, `result:${toolCall.id}`);
+    },
+    onToolStatus(status) {
+      if (status) statuses.push(status);
+    },
+    onBeforeNextTurn: async () => null,
+  });
+
+  const result = await runAssistantWithTools(params);
+
+  assert.equal(maxActive, 2);
+  assert.deepEqual(
+    executedToolCalls.map((call) => call.name),
+    ["Agent", "Agent"],
+  );
+  assert.ok(statuses.some((status) => /并行执行 2 个 Agent 调用/.test(status)));
+  assert.deepEqual(
+    result.emittedMessages[0].content.map((block) => block.name),
+    ["Agent", "Agent"],
   );
 });
 
@@ -863,6 +957,57 @@ arguments: {"pattern": "express", "file_pattern": "**/*.js", "ignore_case": true
   assert.deepEqual(
     result.emittedMessages.map((message) => message.role),
     ["assistant", "toolResult", "assistant"],
+  );
+});
+
+test("runAssistantWithTools dedupes recovered lowercase tool text against canonical structured calls", async () => {
+  const writeCall = createToolCall("call_00_native_write", "Write", {
+    path: "report.html",
+    content: "<html></html>",
+  });
+  resetFakeStreams(
+    createAssistant(
+      [
+        {
+          type: "text",
+          text: `Generated the report.
+
+Historical tool call (read-only, not repeating):
+tool_name: write
+arguments: {"path": "report.html", "content": "<html></html>"}`,
+        },
+        writeCall,
+      ],
+      "toolUse",
+      { api: "anthropic-messages", provider: "anthropic", model: "deepseek-chat" },
+    ),
+    createTextAssistant("after native write"),
+  );
+  const writeTool = {
+    name: "Write",
+    description: "Write files",
+    parameters: { type: "object", properties: {} },
+  };
+  const { params, executedToolCalls } = createBaseParams({
+    tools: [writeTool],
+    context: {
+      systemPrompt: "Base system prompt",
+      messages: [{ role: "user", content: "Start", timestamp: 1 }],
+      tools: [writeTool],
+    },
+  });
+
+  const result = await runAssistantWithTools(params);
+
+  assert.equal(executedToolCalls.length, 1);
+  assert.equal(executedToolCalls[0].id, writeCall.id);
+  assert.equal(executedToolCalls[0].name, "Write");
+  const assistantToolCalls = result.emittedMessages[0].content.filter(
+    (block) => block.type === "toolCall",
+  );
+  assert.deepEqual(
+    assistantToolCalls.map((toolCall) => toolCall.id),
+    [writeCall.id],
   );
 });
 
