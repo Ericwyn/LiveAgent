@@ -826,7 +826,6 @@ function CommitMentionChip({
   return (
     <>
       <span
-        title={resolvedCommit.subject ? `${label}: ${resolvedCommit.subject}` : label}
         role={resolvedCommit.githubUrl ? "button" : undefined}
         tabIndex={resolvedCommit.githubUrl ? 0 : undefined}
         className={mentionChipClassName("commit", {

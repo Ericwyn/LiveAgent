@@ -1,10 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { renderToStaticMarkup } from "react-dom/server";
+import * as jsxRuntime from "react/jsx-runtime";
 import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
 const userMessageContent = loader.loadModule("src/lib/chat/messages/userMessageContent.tsx");
 const mentionReferences = loader.loadModule("src/lib/chat/messages/mentionReferences.ts");
+const reactRenderLoader = createTsModuleLoader({
+  mocks: {
+    "react/jsx-runtime": jsxRuntime,
+    "@tauri-apps/plugin-opener": {
+      openUrl() {
+        throw new Error("openUrl mock was not expected to be called");
+      },
+    },
+  },
+});
+const renderedUserMessageContent = reactRenderLoader.loadModule(
+  "src/lib/chat/messages/userMessageContent.tsx",
+);
 
 function compactSegments(segments) {
   return segments.map((segment) => {
@@ -79,4 +94,15 @@ test("inline file mention tokens remain plain text", () => {
     compactSegments(userMessageContent.tokenizeUserMessage("打开 @src/main.tsx 和 @docs/", [])),
     [{ type: "text", value: "打开 @src/main.tsx 和 @docs/" }],
   );
+});
+
+test("rendered commit mentions do not include native title tooltips", () => {
+  const html = renderToStaticMarkup(
+    jsxRuntime.jsx(renderedUserMessageContent.UserMessageContent, {
+      text: "看看 [commit 0e1a4fc: init](https://github.com/example/repo/commit/0e1a4fc1234567890)",
+    }),
+  );
+
+  assert.match(html, /0e1a4fc/);
+  assert.doesNotMatch(html, /title=/);
 });
