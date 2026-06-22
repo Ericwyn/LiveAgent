@@ -70,6 +70,7 @@ export function WorkspaceSshTerminalOverlay(props: WorkspaceSshTerminalOverlayPr
   const [error, setError] = useState<string | null>(null);
   const openRequestIdRef = useRef<number | null>(null);
   const hideTimerRef = useRef<number | null>(null);
+  const tabElementRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const sshSessions = useMemo(
     () => sessions.filter((session) => session.kind === "ssh" && session.ssh),
@@ -160,6 +161,12 @@ export function WorkspaceSshTerminalOverlay(props: WorkspaceSshTerminalOverlayPr
     setActiveTabId(openTabRecords[0]?.tab.id ?? "");
   }, [activeTabId, openTabRecords]);
 
+  useEffect(() => {
+    if (!activeTabId) return;
+    const activeTab = tabElementRefs.current.get(activeTabId);
+    activeTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeTabId, openTabRecords.length]);
+
   useEffect(
     () => () => {
       cancelPendingHide();
@@ -199,50 +206,59 @@ export function WorkspaceSshTerminalOverlay(props: WorkspaceSshTerminalOverlayPr
         </button>
       </div>
 
-      <div className="flex h-10 shrink-0 items-end gap-1 overflow-x-auto border-b border-border bg-background px-2 pt-1">
+      <div className="workspace-ssh-terminal-tabs flex h-10 shrink-0 items-end gap-1 overflow-x-auto overflow-y-hidden border-b border-border bg-background px-2 pt-1">
         {openTabRecords.map(({ tab, session }) => (
-          <button
+          <div
             key={tab.id}
-            type="button"
+            ref={(node) => {
+              if (node) {
+                tabElementRefs.current.set(tab.id, node);
+              } else {
+                tabElementRefs.current.delete(tab.id);
+              }
+            }}
             className={cn(
-              "group flex h-8 max-w-[14rem] shrink-0 items-center gap-1.5 rounded-t-md border border-b-0 px-2 text-xs transition-colors",
+              "workspace-ssh-terminal-tab group flex h-8 max-w-[14rem] shrink-0 items-center gap-1.5 rounded-t-md border border-b-0 px-2 text-xs transition-colors",
               tab.id === activeTabId
                 ? "border-border bg-muted text-foreground"
                 : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground",
             )}
             title={sessionEndpointLabel(session)}
-            onClick={() => setActiveTabId(tab.id)}
           >
-            <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", statusDotClassName(session))} />
-            {tab.kind === "sftp" ? (
-              <FolderTree className="h-3.5 w-3.5 shrink-0" />
-            ) : (
-              <Terminal className="h-3.5 w-3.5 shrink-0" />
-            )}
-            <span className="min-w-0 truncate">
-              {tab.kind === "sftp"
-                ? `${t("workspaceSshTerminal.sftpTab")} · ${sessionTitle(session, t("workspaceSshTerminal.title"))}`
-                : sessionTitle(session, t("workspaceSshTerminal.title"))}
-            </span>
-            <span
-              role="button"
-              tabIndex={0}
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+              title={sessionEndpointLabel(session)}
+              aria-label={sessionEndpointLabel(session)}
+              onClick={() => setActiveTabId(tab.id)}
+            >
+              <span
+                className={cn("h-1.5 w-1.5 shrink-0 rounded-full", statusDotClassName(session))}
+              />
+              {tab.kind === "sftp" ? (
+                <FolderTree className="h-3.5 w-3.5 shrink-0" />
+              ) : (
+                <Terminal className="h-3.5 w-3.5 shrink-0" />
+              )}
+              <span className="min-w-0 truncate">
+                {tab.kind === "sftp"
+                  ? `${t("workspaceSshTerminal.sftpTab")} · ${sessionTitle(session, t("workspaceSshTerminal.title"))}`
+                  : sessionTitle(session, t("workspaceSshTerminal.title"))}
+              </span>
+            </button>
+            <button
+              type="button"
               className="ml-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/75 hover:bg-background hover:text-foreground"
               title={t("workspaceSshTerminal.closeTab")}
+              aria-label={t("workspaceSshTerminal.closeTab")}
               onClick={(event) => {
-                event.stopPropagation();
-                closeTab(tab.id);
-              }}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" && event.key !== " ") return;
-                event.preventDefault();
                 event.stopPropagation();
                 closeTab(tab.id);
               }}
             >
               <X className="h-3 w-3" />
-            </span>
-          </button>
+            </button>
+          </div>
         ))}
       </div>
 

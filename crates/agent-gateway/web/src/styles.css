@@ -110,6 +110,24 @@ html[data-liveagent-webui="gateway"] .project-tools-panel-tabs::-webkit-scrollba
   height: 0;
 }
 
+html[data-liveagent-webui="gateway"] .workspace-ssh-terminal-tabs {
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  -webkit-overflow-scrolling: touch;
+  scroll-padding-inline: 0.5rem;
+}
+
+html[data-liveagent-webui="gateway"] .workspace-ssh-terminal-tabs::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+html[data-liveagent-webui="gateway"] .workspace-ssh-terminal-tab {
+  max-width: min(14rem, calc(100vw - 2rem));
+}
+
 html[data-liveagent-webui="gateway"] .project-tools-panel-tabs-scrollbar {
   position: relative;
   height: 4px;
@@ -2129,6 +2147,21 @@ html[data-liveagent-webui="gateway"] .project-terminal-viewport .xterm-viewport:
   html[data-liveagent-webui="gateway"] .workspace-image-preview-overlay,
   html[data-liveagent-webui="gateway"] .workspace-ssh-terminal-overlay {
     z-index: 60;
+  }
+
+  html[data-liveagent-webui="gateway"] .workspace-ssh-terminal-tabs {
+    height: 44px;
+    padding-inline: 8px;
+    scroll-padding-inline: 8px;
+  }
+
+  html[data-liveagent-webui="gateway"] .workspace-ssh-terminal-tab {
+    max-width: min(13.5rem, calc(100vw - 1rem));
+  }
+
+  html[data-liveagent-webui="gateway"] .workspace-ssh-terminal-tab > button:last-child {
+    width: 1.75rem;
+    height: 1.75rem;
   }
 
   html[data-liveagent-webui="gateway"] .project-tools-panel-inner {
