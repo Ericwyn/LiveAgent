@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +29,75 @@ func (m *Manager) SubscribeTerminalEvents() (<-chan *gatewayv1.TerminalEvent, fu
 	}
 
 	return ch, cleanup
+}
+
+func (m *Manager) RegisterTerminalStreamToAgent(ch chan *gatewayv1.TerminalStreamFrame) func() {
+	m.syncHub.terminalStreamMu.Lock()
+	m.syncHub.terminalStreamToAgent = ch
+	m.syncHub.terminalStreamMu.Unlock()
+
+	return func() {
+		m.syncHub.terminalStreamMu.Lock()
+		if m.syncHub.terminalStreamToAgent == ch {
+			m.syncHub.terminalStreamToAgent = nil
+		}
+		m.syncHub.terminalStreamMu.Unlock()
+	}
+}
+
+func (m *Manager) SendTerminalFrameToAgent(ctx context.Context, frame *gatewayv1.TerminalStreamFrame) error {
+	if frame == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.syncHub.terminalStreamMu.Lock()
+	ch := m.syncHub.terminalStreamToAgent
+	m.syncHub.terminalStreamMu.Unlock()
+	if ch == nil {
+		return ErrAgentOffline
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case ch <- frame:
+		return nil
+	}
+}
+
+func (m *Manager) SubscribeTerminalStreamFrames() (<-chan *gatewayv1.TerminalStreamFrame, func()) {
+	ch := make(chan *gatewayv1.TerminalStreamFrame, 4096)
+
+	m.syncHub.terminalStreamMu.Lock()
+	subID := m.syncHub.nextTerminalStreamSubID
+	m.syncHub.nextTerminalStreamSubID += 1
+	m.syncHub.terminalStreamSubscribers[subID] = ch
+	m.syncHub.terminalStreamMu.Unlock()
+
+	cleanup := func() {
+		m.syncHub.terminalStreamMu.Lock()
+		delete(m.syncHub.terminalStreamSubscribers, subID)
+		m.syncHub.terminalStreamMu.Unlock()
+	}
+
+	return ch, cleanup
+}
+
+func (m *Manager) BroadcastTerminalStreamFrame(frame *gatewayv1.TerminalStreamFrame) {
+	if frame == nil {
+		return
+	}
+	m.syncHub.terminalStreamMu.Lock()
+	for id, ch := range m.syncHub.terminalStreamSubscribers {
+		select {
+		case ch <- frame:
+		default:
+			delete(m.syncHub.terminalStreamSubscribers, id)
+			close(ch)
+		}
+	}
+	m.syncHub.terminalStreamMu.Unlock()
 }
 
 func cloneTerminalSession(session *gatewayv1.TerminalSession) *gatewayv1.TerminalSession {

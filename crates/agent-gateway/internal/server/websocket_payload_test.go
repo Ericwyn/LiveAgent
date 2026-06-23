@@ -85,7 +85,7 @@ func TestActiveChatRunSummaryPayloadIncludesReplayCursor(t *testing.T) {
 func TestWebsocketTerminalPayloadsPreserveOutputOffsets(t *testing.T) {
 	response := websocketTerminalResponsePayload(&gatewayv1.TerminalResponse{
 		Action:            "attach",
-		Output:            "uploads\n",
+		Output:            []byte("uploads\n"),
 		OutputStartOffset: 8,
 		OutputEndOffset:   16,
 	})
@@ -100,7 +100,7 @@ func TestWebsocketTerminalPayloadsPreserveOutputOffsets(t *testing.T) {
 		Kind:              "output",
 		SessionId:         "terminal-1",
 		ProjectPathKey:    "/workspace/project",
-		Data:              "uploads\n",
+		Data:              []byte("uploads\n"),
 		OutputStartOffset: 16,
 		OutputEndOffset:   24,
 	})

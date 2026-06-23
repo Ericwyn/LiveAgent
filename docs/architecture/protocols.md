@@ -6,7 +6,9 @@
 |---|---|---|---|
 | gRPC unary | `AgentGateway.Authenticate` | Desktop -> Gateway | 桌面端认证与 session 初始化。 |
 | gRPC stream | `AgentGateway.AgentConnect` | Desktop <-> Gateway | 桌面端常驻双向通道，承载 GatewayEnvelope 与 AgentEnvelope。 |
+| gRPC stream | `AgentGateway.AgentTerminalConnect` | Desktop <-> Gateway | 终端专用字节流，承载 `TerminalStreamFrame`，避免 terminal IO 与 chat/settings/history 队头阻塞。 |
 | WebSocket | `GET /ws` | WebUI <-> Gateway | WebUI 非 Chat 请求/响应、状态广播、history/settings 等同步。 |
+| WebSocket | `GET /ws/terminal` | WebUI <-> Gateway | WebUI 终端专用二进制流；JSON 控制帧只用于 auth/error，热路径为 bytes frame。 |
 | HTTP Chat Command | `POST /api/chat/commands` | WebUI -> Gateway -> Desktop | Chat 提交、编辑重发、取消；命令先被 Gateway accepted，再异步下发桌面端。 |
 | HTTP Chat Events | `GET /api/chat/events` | Gateway -> WebUI | fetch-based SSE；按 `conversation_id` 与 `after_seq` 恢复事件流。 |
 | HTTP API | `/api/status` | WebUI -> Gateway | 查询 Agent 在线状态。 |
@@ -83,16 +85,22 @@ GUI 本地上传不需要 HTTP/Gateway，直接通过 Tauri command 导入。
 
 Gateway 不再通过错误文案推断 public share 状态，错误语义由桌面端产生并通过 proto 传递。
 
-## Terminal Event 兴趣模型
+## Terminal Stream 协议
 
-WebUI 的 terminal 事件以 session/project interest 控制：
+终端已从普通 WebSocket RPC 模型切换为独立 stream 模型。普通 `/ws` 只保留 session list/create/close/rename、SSH prompt、SSH tabs 等控制面与 metadata 同步；高频 `attach/input/resize/output/detach` 不再作为 `/ws` request/response 存在。
 
-| 事件 | 转发规则 |
+| 层级 | 合同 |
 |---|---|
-| metadata，例如 `created`、`exit`、`closed` | 可广播给已认证连接，用于保持 session/project 列表新鲜。 |
-| `output` | 必须先通过 `terminal.attach` 订阅具体 `session_id`；`terminal.detach` 后停止转发。 |
+| Browser-Gateway | `GET /ws/terminal` 首帧发送 `{type:"auth", token}`；之后使用二进制 frame：`version(1) + kind(1) + headerLength(2, big endian) + JSON header + bytes`。 |
+| Frame header | `kind` 为 `attach/input/resize/detach/output/snapshot/error`；header 包含 `streamId/sessionId/projectPathKey/seq/startOffset/endOffset/cols/rows/maxBytes/truncated/error`。 |
+| Desktop-Gateway | `AgentTerminalConnect(stream TerminalStreamFrame) returns (stream TerminalStreamFrame)`；`AgentConnect` 不承载 terminal output/input/resize。 |
+| Snapshot | attach 返回 `snapshot` frame，data 为 tail bytes，header 的 `startOffset/endOffset` 用于前端去重。 |
+| Input | input frame 为 fire-and-forget bytes；不返回 session metadata，不进入普通 request pending map。 |
+| Resize | resize frame 只发送最新 cols/rows；不返回 session metadata。 |
+| Output | output frame 只携带轻量 session id、project key、offset 与 bytes；React session state 不因 output 更新。 |
+| SharedWorker | 每个 token 维护一条 terminal stream，上游按 session 复用 attach；多个页面共享 output，只有当前 attached stream 的输入写入上游。 |
 
-Gateway 的连接态 tracker 只维护 WebSocket 连接内的短期 interest，不改变桌面端 terminal registry，也不改变现有 wire payload。
+Gateway 的 `/ws/terminal` 连接只维护本连接内的 session attach 集合；detach 只影响这条 terminal stream 的输出投递，不改变桌面端 terminal registry。
 
 ## Skills 与 Memory 管理协议
 

@@ -13,6 +13,11 @@ import type {
   TerminalSession,
   TerminalShellOptions,
   TerminalSnapshot,
+  TerminalStreamChunk,
+  TerminalStreamClient,
+  TerminalStreamHandle,
+  TerminalStreamInputState,
+  TerminalStreamSnapshot,
   TerminalSshCreateResult,
   TerminalSshLatency,
   TerminalSshMetadata,
@@ -27,6 +32,7 @@ import type {
   SftpTransferEvent,
   SftpTransferResponse,
 } from "@/lib/sftp/types";
+import { BrowserGatewayTerminalStreamClient } from "@/lib/terminal/gatewayTerminalStreamClient";
 
 import type {
   AgentStatus,
@@ -301,6 +307,8 @@ type RawTerminalResponse = {
   snapshot?: TerminalSnapshot;
   prompt?: TerminalSshPrompt;
   output?: string;
+  outputBytes?: unknown;
+  output_bytes?: unknown;
   truncated?: boolean;
   outputStartOffset?: number;
   output_start_offset?: number;
@@ -1079,10 +1087,28 @@ function normalizeTerminalSnapshot(input: RawTerminalResponse): TerminalSnapshot
   return {
     session: normalizeTerminalSession(input.session),
     output: input.output ?? "",
+    outputBytes: normalizeTerminalBytes(input.outputBytes ?? input.output_bytes, input.output),
     truncated: input.truncated === true,
     outputStartOffset,
     outputEndOffset,
   };
+}
+
+function normalizeTerminalBytes(value: unknown, fallbackText?: string): Uint8Array {
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+  }
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (Array.isArray(value)) return Uint8Array.from(value.map((item) => Number(item) & 0xff));
+  if (typeof value === "string" && value.length > 0) {
+    try {
+      return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+    } catch {
+      return new TextEncoder().encode(value);
+    }
+  }
+  return fallbackText ? new TextEncoder().encode(fallbackText) : new Uint8Array();
 }
 
 function normalizeTerminalSshCreateResult(input: RawTerminalResponse): TerminalSshCreateResult {
@@ -1156,7 +1182,6 @@ function normalizeTerminalEvent(input: RawTerminalEvent): TerminalEvent | null {
     projectPathKey:
       input.projectPathKey ?? input.project_path_key ?? session?.projectPathKey ?? sshTabs?.projectPathKey ?? "",
     session,
-    data: input.data ?? undefined,
     outputStartOffset,
     outputEndOffset,
     sshTabs,
@@ -1287,6 +1312,7 @@ function shouldRecoverMemoryManageRequest(payload: MemoryManagePayload) {
 }
 
 export class GatewayWebSocketClient {
+  readonly terminalStream: BrowserGatewayTerminalStreamClient;
   private socket: WebSocket | null = null;
   private connectPromise: Promise<void> | null = null;
   private authenticated = false;
@@ -1314,6 +1340,7 @@ export class GatewayWebSocketClient {
   };
 
   constructor(private readonly token: string) {
+    this.terminalStream = new BrowserGatewayTerminalStreamClient(token);
     this.installReconnectWakeups();
   }
 
@@ -1766,42 +1793,6 @@ export class GatewayWebSocketClient {
     return normalizeSshTerminalTabsSnapshot(response.sshTabs ?? response.ssh_tabs);
   }
 
-  async snapshotTerminal(
-    sessionId: string,
-    maxBytes?: number,
-    projectPathKey?: string,
-  ): Promise<TerminalSnapshot> {
-    return normalizeTerminalSnapshot(
-      await this.requestWithRecovery<RawTerminalResponse>("terminal.attach", {
-        session_id: sessionId,
-        project_path_key: projectPathKey,
-        max_bytes: maxBytes,
-      }),
-    );
-  }
-
-  async inputTerminal(sessionId: string, data: string, projectPathKey?: string): Promise<void> {
-    await this.request("terminal.input", {
-      session_id: sessionId,
-      project_path_key: projectPathKey,
-      data,
-    });
-  }
-
-  async resizeTerminal(
-    sessionId: string,
-    cols: number,
-    rows: number,
-    projectPathKey?: string,
-  ): Promise<void> {
-    await this.request("terminal.resize", {
-      session_id: sessionId,
-      project_path_key: projectPathKey,
-      cols,
-      rows,
-    });
-  }
-
   async renameTerminal(
     sessionId: string,
     title: string,
@@ -1834,13 +1825,6 @@ export class GatewayWebSocketClient {
       project_path_key: projectPathKey,
     });
     return (response.sessions ?? []).map(normalizeTerminalSession);
-  }
-
-  async detachTerminal(sessionId: string, projectPathKey?: string): Promise<void> {
-    await this.request("terminal.detach", {
-      session_id: sessionId,
-      project_path_key: projectPathKey,
-    });
   }
 
   async listTunnels(): Promise<TunnelSummary[]> {
@@ -2132,6 +2116,7 @@ export class GatewayWebSocketClient {
 
   dispose() {
     this.disposed = true;
+    this.terminalStream.dispose();
     this.uninstallReconnectWakeups();
     this.clearReconnectTimer();
     this.clearReconnectNoticeTimer();
@@ -2689,6 +2674,7 @@ export class GatewayWebSocketClient {
 }
 
 export type GatewayWebSocketClientLike = {
+  terminalStream: TerminalStreamClient;
   getStatus(): Promise<AgentStatus>;
   prepareChatRuntime(reason?: string): Promise<AgentStatus>;
   subscribeStatus(listener: StatusListener): () => void;
@@ -2789,18 +2775,6 @@ export type GatewayWebSocketClientLike = {
     kind: SshTerminalTabKind;
   }): Promise<SshTerminalTabsSnapshot>;
   closeSshTerminalTab(tabId: string): Promise<SshTerminalTabsSnapshot>;
-  snapshotTerminal(
-    sessionId: string,
-    maxBytes?: number,
-    projectPathKey?: string,
-  ): Promise<TerminalSnapshot>;
-  inputTerminal(sessionId: string, data: string, projectPathKey?: string): Promise<void>;
-  resizeTerminal(
-    sessionId: string,
-    cols: number,
-    rows: number,
-    projectPathKey?: string,
-  ): Promise<void>;
   renameTerminal(
     sessionId: string,
     title: string,
@@ -2808,7 +2782,6 @@ export type GatewayWebSocketClientLike = {
   ): Promise<TerminalSession>;
   closeTerminal(sessionId: string, projectPathKey?: string): Promise<TerminalSession>;
   closeProjectTerminals(projectPathKey: string): Promise<TerminalSession[]>;
-  detachTerminal(sessionId: string, projectPathKey?: string): Promise<void>;
   listTunnels(): Promise<TunnelSummary[]>;
   createTunnel(input: TunnelCreateInput): Promise<TunnelSummary>;
   updateTunnel(input: TunnelUpdateInput): Promise<TunnelSummary>;
@@ -2894,10 +2867,42 @@ type SharedWorkerClientEventMessage = {
   payload: unknown;
 };
 
+type SharedWorkerTerminalStreamSnapshotMessage = {
+  type: "terminal_stream_snapshot";
+  connection_id: string;
+  stream_id: string;
+  payload: TerminalStreamSnapshot;
+};
+
+type SharedWorkerTerminalStreamOutputMessage = {
+  type: "terminal_stream_output";
+  connection_id: string;
+  stream_id: string;
+  payload: TerminalStreamChunk;
+};
+
+type SharedWorkerTerminalStreamInputStateMessage = {
+  type: "terminal_stream_input_state";
+  connection_id: string;
+  stream_id: string;
+  payload: TerminalStreamInputState;
+};
+
+type SharedWorkerTerminalStreamErrorMessage = {
+  type: "terminal_stream_error";
+  connection_id: string;
+  stream_id: string;
+  error?: string;
+};
+
 type SharedWorkerClientMessage =
   | SharedWorkerClientReadyMessage
   | SharedWorkerClientResponseMessage
-  | SharedWorkerClientEventMessage;
+  | SharedWorkerClientEventMessage
+  | SharedWorkerTerminalStreamSnapshotMessage
+  | SharedWorkerTerminalStreamOutputMessage
+  | SharedWorkerTerminalStreamInputStateMessage
+  | SharedWorkerTerminalStreamErrorMessage;
 
 type SharedWorkerClientRequestMessage =
   | {
@@ -2917,15 +2922,334 @@ type SharedWorkerClientRequestMessage =
       connection_id: string;
     }
   | {
+      type: "terminal_stream_attach";
+      connection_id: string;
+      stream_id: string;
+      session: TerminalSession;
+      max_bytes?: number;
+    }
+  | {
+      type: "terminal_stream_write";
+      connection_id: string;
+      stream_id: string;
+      session_id: string;
+      bytes: Uint8Array<ArrayBufferLike>;
+    }
+  | {
+      type: "terminal_stream_resize";
+      connection_id: string;
+      stream_id: string;
+      session_id: string;
+      cols: number;
+      rows: number;
+    }
+  | {
+      type: "terminal_stream_detach";
+      connection_id: string;
+      stream_id: string;
+      session_id: string;
+    }
+  | {
       type: "dispose";
       connection_id: string;
     };
+
+type SharedWorkerTerminalAttachPending = {
+  handle: SharedWorkerTerminalStreamHandle;
+  resolve: (handle: SharedWorkerTerminalStreamHandle) => void;
+  reject: (reason?: unknown) => void;
+  timeoutId: number;
+};
+
+class SharedWorkerTerminalStreamHandle implements TerminalStreamHandle {
+  private disposed = false;
+  private readonly listeners = new Set<(chunk: TerminalStreamChunk) => void>();
+  private readonly inputStateListeners = new Set<(state: TerminalStreamInputState) => void>();
+  private readonly queuedChunks: TerminalStreamChunk[] = [];
+  private inputState: TerminalStreamInputState = {
+    paused: false,
+    queuedBytes: 0,
+    highWaterBytes: 256 * 1024,
+  };
+
+  constructor(
+    private readonly owner: SharedWorkerTerminalStreamClient,
+    private readonly streamID: string,
+    public snapshot: TerminalStreamSnapshot,
+  ) {}
+
+  accept(chunk: TerminalStreamChunk) {
+    if (this.disposed || chunk.sessionId !== this.snapshot.session.id) {
+      return;
+    }
+    if (this.listeners.size === 0) {
+      this.queuedChunks.push(chunk);
+      return;
+    }
+    for (const listener of this.listeners) {
+      listener(chunk);
+    }
+  }
+
+  write(data: Uint8Array) {
+    if (this.disposed || data.byteLength === 0) {
+      return false;
+    }
+    if (this.inputState.paused) {
+      return false;
+    }
+    this.owner.write(this.streamID, this.snapshot.session.id, data);
+    return true;
+  }
+
+  resize(cols: number, rows: number) {
+    if (this.disposed) {
+      return;
+    }
+    this.owner.resize(this.streamID, this.snapshot.session.id, cols, rows);
+  }
+
+  subscribeOutput(listener: (chunk: TerminalStreamChunk) => void) {
+    this.listeners.add(listener);
+    const queued = this.queuedChunks.splice(0);
+    for (const chunk of queued) {
+      listener(chunk);
+    }
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  subscribeInputState(listener: (state: TerminalStreamInputState) => void) {
+    this.inputStateListeners.add(listener);
+    listener(this.inputState);
+    return () => {
+      this.inputStateListeners.delete(listener);
+    };
+  }
+
+  acceptInputState(state: TerminalStreamInputState) {
+    if (this.disposed) {
+      return;
+    }
+    this.inputState = state;
+    for (const listener of this.inputStateListeners) {
+      listener(state);
+    }
+  }
+
+  dispose() {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    this.listeners.clear();
+    this.inputStateListeners.clear();
+    this.queuedChunks.length = 0;
+    this.owner.detach(this.streamID, this.snapshot.session.id);
+  }
+
+  disposeLocalOnly() {
+    this.disposed = true;
+    this.listeners.clear();
+    this.inputStateListeners.clear();
+    this.queuedChunks.length = 0;
+  }
+}
+
+class SharedWorkerTerminalStreamClient implements TerminalStreamClient {
+  private readonly pending = new Map<string, SharedWorkerTerminalAttachPending>();
+  private readonly handles = new Map<string, SharedWorkerTerminalStreamHandle>();
+
+  constructor(
+    private readonly ensureConnected: () => Promise<void>,
+    private readonly postMessage: (message: SharedWorkerClientRequestMessage) => void,
+    private readonly connectionID: () => string,
+    private readonly nextID: (prefix: string) => string,
+  ) {}
+
+  async attach(
+    session: TerminalSession,
+    options?: { maxBytes?: number },
+  ): Promise<TerminalStreamHandle> {
+    await this.ensureConnected();
+    const streamID = this.nextID("terminal-stream");
+    const handle = new SharedWorkerTerminalStreamHandle(this, streamID, {
+      session,
+      bytes: new Uint8Array(),
+      truncated: false,
+      outputStartOffset: 0,
+      outputEndOffset: 0,
+    });
+    this.handles.set(streamID, handle);
+
+    return new Promise((resolve, reject) => {
+      const host = getRuntimeHost();
+      const timeoutId = host.setTimeout(() => {
+        this.failAttach(streamID, new Error("Terminal stream attach timed out"));
+      }, 15_000);
+
+      this.pending.set(streamID, { handle, resolve, reject, timeoutId });
+      try {
+        this.postMessage({
+          type: "terminal_stream_attach",
+          connection_id: this.connectionID(),
+          stream_id: streamID,
+          session,
+          max_bytes: options?.maxBytes,
+        });
+      } catch (error) {
+        this.failAttach(streamID, error);
+      }
+    });
+  }
+
+  write(streamID: string, sessionID: string, data: Uint8Array) {
+    if (data.byteLength === 0 || !this.handles.has(streamID)) {
+      return;
+    }
+    try {
+      this.postMessage({
+        type: "terminal_stream_write",
+        connection_id: this.connectionID(),
+        stream_id: streamID,
+        session_id: sessionID,
+        bytes: data.slice(),
+      });
+    } catch {
+      this.handleError({
+        type: "terminal_stream_error",
+        connection_id: this.connectionID(),
+        stream_id: streamID,
+        error: "Terminal stream port is closed",
+      });
+    }
+  }
+
+  resize(streamID: string, sessionID: string, cols: number, rows: number) {
+    if (!this.handles.has(streamID)) {
+      return;
+    }
+    try {
+      this.postMessage({
+        type: "terminal_stream_resize",
+        connection_id: this.connectionID(),
+        stream_id: streamID,
+        session_id: sessionID,
+        cols,
+        rows,
+      });
+    } catch {
+      this.handleError({
+        type: "terminal_stream_error",
+        connection_id: this.connectionID(),
+        stream_id: streamID,
+        error: "Terminal stream port is closed",
+      });
+    }
+  }
+
+  detach(streamID: string, sessionID: string) {
+    const handle = this.handles.get(streamID);
+    this.handles.delete(streamID);
+    const pending = this.pending.get(streamID);
+    if (pending) {
+      const host = getRuntimeHost();
+      host.clearTimeout(pending.timeoutId);
+      this.pending.delete(streamID);
+      pending.reject(new Error("Terminal stream detached"));
+    }
+    handle?.disposeLocalOnly();
+    try {
+      this.postMessage({
+        type: "terminal_stream_detach",
+        connection_id: this.connectionID(),
+        stream_id: streamID,
+        session_id: sessionID,
+      });
+    } catch {
+      // The SharedWorker port may already be closed during disposal.
+    }
+  }
+
+  handleSnapshot(message: SharedWorkerTerminalStreamSnapshotMessage) {
+    const pending = this.pending.get(message.stream_id);
+    if (!pending) {
+      return;
+    }
+    const host = getRuntimeHost();
+    host.clearTimeout(pending.timeoutId);
+    this.pending.delete(message.stream_id);
+    pending.handle.snapshot = message.payload;
+    pending.resolve(pending.handle);
+  }
+
+  handleOutput(message: SharedWorkerTerminalStreamOutputMessage) {
+    this.handles.get(message.stream_id)?.accept(message.payload);
+  }
+
+  handleInputState(message: SharedWorkerTerminalStreamInputStateMessage) {
+    this.handles.get(message.stream_id)?.acceptInputState(message.payload);
+  }
+
+  handleError(message: SharedWorkerTerminalStreamErrorMessage) {
+    const error = new Error(message.error || "Terminal stream failed");
+    if (this.pending.has(message.stream_id)) {
+      this.failAttach(message.stream_id, error);
+      return;
+    }
+    const handle = this.handles.get(message.stream_id);
+    if (handle) {
+      this.handles.delete(message.stream_id);
+      handle.disposeLocalOnly();
+    }
+  }
+
+  disposeAll(error: Error) {
+    const host = getRuntimeHost();
+    for (const [streamID, pending] of this.pending) {
+      host.clearTimeout(pending.timeoutId);
+      pending.reject(error);
+      pending.handle.disposeLocalOnly();
+      this.handles.delete(streamID);
+    }
+    this.pending.clear();
+    for (const handle of this.handles.values()) {
+      handle.disposeLocalOnly();
+    }
+    this.handles.clear();
+  }
+
+  private failAttach(streamID: string, reason: unknown) {
+    const pending = this.pending.get(streamID);
+    if (!pending) {
+      return;
+    }
+    const host = getRuntimeHost();
+    host.clearTimeout(pending.timeoutId);
+    this.pending.delete(streamID);
+    this.handles.delete(streamID);
+    pending.handle.disposeLocalOnly();
+    pending.reject(reason);
+    try {
+      this.postMessage({
+        type: "terminal_stream_detach",
+        connection_id: this.connectionID(),
+        stream_id: streamID,
+        session_id: pending.handle.snapshot.session.id,
+      });
+    } catch {
+      // The SharedWorker port may already be closed.
+    }
+  }
+}
 
 function canUseSharedWorker() {
   return typeof window !== "undefined" && typeof SharedWorker === "function";
 }
 
 class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
+  readonly terminalStream: SharedWorkerTerminalStreamClient;
   private readonly worker: SharedWorker;
   private readonly port: MessagePort;
   private readonly connectionID: string;
@@ -2962,6 +3286,12 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
       type: "module",
     });
     this.port = this.worker.port;
+    this.terminalStream = new SharedWorkerTerminalStreamClient(
+      () => this.ensureConnected(),
+      (message) => this.postMessage(message),
+      () => this.connectionID,
+      (prefix) => this.nextRequestId(prefix),
+    );
     this.port.onmessage = (event) => {
       this.handleMessage(event.data);
     };
@@ -3402,42 +3732,6 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
     return normalizeSshTerminalTabsSnapshot(response.sshTabs ?? response.ssh_tabs);
   }
 
-  async snapshotTerminal(
-    sessionId: string,
-    maxBytes?: number,
-    projectPathKey?: string,
-  ): Promise<TerminalSnapshot> {
-    return normalizeTerminalSnapshot(
-      await this.request<RawTerminalResponse>("terminal.attach", {
-        session_id: sessionId,
-        project_path_key: projectPathKey,
-        max_bytes: maxBytes,
-      }),
-    );
-  }
-
-  async inputTerminal(sessionId: string, data: string, projectPathKey?: string): Promise<void> {
-    await this.request("terminal.input", {
-      session_id: sessionId,
-      project_path_key: projectPathKey,
-      data,
-    });
-  }
-
-  async resizeTerminal(
-    sessionId: string,
-    cols: number,
-    rows: number,
-    projectPathKey?: string,
-  ): Promise<void> {
-    await this.request("terminal.resize", {
-      session_id: sessionId,
-      project_path_key: projectPathKey,
-      cols,
-      rows,
-    });
-  }
-
   async renameTerminal(
     sessionId: string,
     title: string,
@@ -3470,13 +3764,6 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
       project_path_key: projectPathKey,
     });
     return (response.sessions ?? []).map(normalizeTerminalSession);
-  }
-
-  async detachTerminal(sessionId: string, projectPathKey?: string): Promise<void> {
-    await this.request("terminal.detach", {
-      session_id: sessionId,
-      project_path_key: projectPathKey,
-    });
   }
 
   async listTunnels(): Promise<TunnelSummary[]> {
@@ -3904,6 +4191,18 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
       case "event":
         this.handleWorkerEvent(message);
         return;
+      case "terminal_stream_snapshot":
+        this.terminalStream.handleSnapshot(message);
+        return;
+      case "terminal_stream_output":
+        this.terminalStream.handleOutput(message);
+        return;
+      case "terminal_stream_input_state":
+        this.terminalStream.handleInputState(message);
+        return;
+      case "terminal_stream_error":
+        this.terminalStream.handleError(message);
+        return;
     }
   }
 
@@ -4003,6 +4302,7 @@ class SharedWorkerGatewayWebSocketClient implements GatewayWebSocketClientLike {
       entry.reject(error);
     }
 
+    this.terminalStream.disposeAll(error);
   }
 
   private nextRequestId(prefix: string) {

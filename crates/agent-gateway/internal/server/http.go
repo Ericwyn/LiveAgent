@@ -22,8 +22,17 @@ import (
 
 func NewHTTPServer(cfg *config.Config, sm *session.Manager) http.Handler {
 	rootMux := http.NewServeMux()
+	webSocketServer := NewWebSocketServer(cfg, sm)
+	terminalWebSocketServer := NewTerminalWebSocketServer(cfg, sm)
 	rootMux.HandleFunc("GET /healthz", handler.Health())
-	rootMux.Handle("/ws", NewWebSocketServer(cfg, sm))
+	rootMux.Handle("/ws", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isTerminalWebSocketFallback(r) {
+			terminalWebSocketServer.ServeHTTP(w, r)
+			return
+		}
+		webSocketServer.ServeHTTP(w, r)
+	}))
+	rootMux.Handle("/ws/terminal", terminalWebSocketServer)
 	rootMux.HandleFunc("/t/", publicTunnelProxy(sm))
 	rootMux.HandleFunc("GET /image-proxy", handler.ImageProxy(cfg.RequestTimeout))
 	rootMux.HandleFunc("GET /api/public/history-shares/{token}", publicHistoryShare(cfg, sm))
@@ -80,6 +89,11 @@ func NewHTTPServer(cfg *config.Config, sm *session.Manager) http.Handler {
 	})
 
 	return rootMux
+}
+
+func isTerminalWebSocketFallback(r *http.Request) bool {
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("terminal")))
+	return value == "1" || value == "true" || value == "stream"
 }
 
 func isWebUIStaticAssetPath(cleanPath string) bool {

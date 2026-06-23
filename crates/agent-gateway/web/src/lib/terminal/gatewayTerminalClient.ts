@@ -33,15 +33,6 @@ export function createGatewayTerminalClient(api: GatewayWebSocketClientLike): Te
     closeSshTerminalTab(tabId) {
       return api.closeSshTerminalTab(tabId);
     },
-    snapshot(sessionId, maxBytes, projectPathKey) {
-      return api.snapshotTerminal(sessionId, maxBytes, projectPathKey);
-    },
-    async input(sessionId, data, projectPathKey) {
-      await api.inputTerminal(sessionId, data, projectPathKey);
-    },
-    async resize(sessionId, cols, rows, projectPathKey) {
-      await api.resizeTerminal(sessionId, cols, rows, projectPathKey);
-    },
     rename(sessionId, title, projectPathKey) {
       return api.renameTerminal(sessionId, title, projectPathKey);
     },
@@ -51,11 +42,9 @@ export function createGatewayTerminalClient(api: GatewayWebSocketClientLike): Te
     closeProject(projectPathKey) {
       return api.closeProjectTerminals(projectPathKey);
     },
-    async detach(sessionId, projectPathKey) {
-      await api.detachTerminal(sessionId, projectPathKey);
-    },
     subscribe(listener) {
       return api.subscribeTerminal(listener);
     },
+    stream: api.terminalStream,
   };
 }

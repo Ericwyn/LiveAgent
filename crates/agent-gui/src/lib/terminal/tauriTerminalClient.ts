@@ -9,6 +9,10 @@ import type {
   TerminalShellOption,
   TerminalShellOptions,
   TerminalSnapshot,
+  TerminalStreamChunk,
+  TerminalStreamHandle,
+  TerminalStreamInputState,
+  TerminalStreamSnapshot,
   TerminalSshCreateResult,
   TerminalSshLatency,
   TerminalSshMetadata,
@@ -19,6 +23,12 @@ type TerminalEventListener = (event: TerminalEvent) => void;
 
 const globalTerminalListeners = new Set<TerminalEventListener>();
 let globalListenerStarted = false;
+const globalTerminalStreamHandles = new Set<TauriTerminalStreamHandle>();
+let globalStreamListenerStarted = false;
+const INPUT_FLUSH_BYTES = 4 * 1024;
+const INPUT_FLUSH_MS = 8;
+const INPUT_HIGH_WATER_BYTES = 256 * 1024;
+const INPUT_LOW_WATER_BYTES = 128 * 1024;
 
 function ensureGlobalTerminalListener() {
   if (globalListenerStarted) return;
@@ -28,6 +38,18 @@ function ensureGlobalTerminalListener() {
     if (!normalized) return;
     for (const listener of globalTerminalListeners) {
       listener(normalized);
+    }
+  });
+}
+
+function ensureGlobalTerminalStreamListener() {
+  if (globalStreamListenerStarted) return;
+  globalStreamListenerStarted = true;
+  void listen<RawTerminalStreamEvent>("terminal:stream", (event) => {
+    const chunk = normalizeStreamEvent(event.payload);
+    if (!chunk) return;
+    for (const handle of globalTerminalStreamHandles) {
+      handle.accept(chunk);
     }
   });
 }
@@ -62,6 +84,8 @@ type RawTerminalSshPrompt = Partial<TerminalSshPrompt> & {
 type RawTerminalSnapshot = {
   session?: RawTerminalSession;
   output?: string;
+  outputBytes?: unknown;
+  output_bytes?: unknown;
   truncated?: boolean;
   outputStartOffset?: number;
   output_start_offset?: number;
@@ -69,6 +93,29 @@ type RawTerminalSnapshot = {
   output_end_offset?: number;
   sshPrompt?: RawTerminalSshPrompt | null;
   ssh_prompt?: RawTerminalSshPrompt | null;
+};
+
+type RawTerminalStreamSnapshot = {
+  session?: RawTerminalSession;
+  bytes?: unknown;
+  truncated?: boolean;
+  outputStartOffset?: number;
+  output_start_offset?: number;
+  outputEndOffset?: number;
+  output_end_offset?: number;
+};
+
+type RawTerminalStreamEvent = {
+  kind?: string;
+  sessionId?: string;
+  session_id?: string;
+  projectPathKey?: string;
+  project_path_key?: string;
+  startOffset?: number;
+  start_offset?: number;
+  endOffset?: number;
+  end_offset?: number;
+  bytes?: unknown;
 };
 
 type RawTerminalSshLatency = Partial<TerminalSshLatency> & {
@@ -184,9 +231,25 @@ function normalizeSnapshot(input: RawTerminalSnapshot): TerminalSnapshot {
   return {
     session: normalizeSession(input.session),
     output: input.output ?? "",
+    outputBytes: normalizeBytes(input.outputBytes ?? input.output_bytes),
     truncated: input.truncated === true,
     outputStartOffset,
     outputEndOffset,
+  };
+}
+
+function normalizeStreamSnapshot(input: RawTerminalStreamSnapshot): TerminalStreamSnapshot {
+  if (!input.session) {
+    throw new Error("Terminal stream attach did not include a session");
+  }
+  return {
+    session: normalizeSession(input.session),
+    bytes: normalizeBytes(input.bytes),
+    truncated: input.truncated === true,
+    outputStartOffset: normalizeOptionalOffset(
+      input.outputStartOffset ?? input.output_start_offset,
+    ) ?? 0,
+    outputEndOffset: normalizeOptionalOffset(input.outputEndOffset ?? input.output_end_offset) ?? 0,
   };
 }
 
@@ -259,17 +322,222 @@ function normalizeEvent(input: RawTerminalEvent): TerminalEvent | null {
     projectPathKey:
       input.projectPathKey ?? input.project_path_key ?? session?.projectPathKey ?? sshTabs.projectPathKey,
     session,
-    data: input.data ?? undefined,
     outputStartOffset,
     outputEndOffset,
     sshTabs: input.sshTabs || input.ssh_tabs ? sshTabs : undefined,
   };
 }
 
+function normalizeStreamEvent(input: RawTerminalStreamEvent): TerminalStreamChunk | null {
+  const sessionId = (input.sessionId ?? input.session_id ?? "").trim();
+  if (!sessionId) return null;
+  const bytes = normalizeBytes(input.bytes);
+  if (bytes.byteLength === 0) return null;
+  return {
+    sessionId,
+    projectPathKey: input.projectPathKey ?? input.project_path_key ?? "",
+    bytes,
+    startOffset: normalizeOptionalOffset(input.startOffset ?? input.start_offset) ?? 0,
+    endOffset: normalizeOptionalOffset(input.endOffset ?? input.end_offset) ?? 0,
+  };
+}
+
+function normalizeBytes(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+  }
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (Array.isArray(value)) {
+    return Uint8Array.from(value.map((item) => Number(item) & 0xff));
+  }
+  if (typeof value === "string" && value.length > 0) {
+    return new TextEncoder().encode(value);
+  }
+  return new Uint8Array();
+}
+
 function normalizeOptionalOffset(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.floor(value)
     : undefined;
+}
+
+class TauriTerminalStreamHandle implements TerminalStreamHandle {
+  private disposed = false;
+  private readonly listeners = new Set<(chunk: TerminalStreamChunk) => void>();
+  private readonly inputStateListeners = new Set<(state: TerminalStreamInputState) => void>();
+  private readonly queuedChunks: TerminalStreamChunk[] = [];
+  private inputQueue: Uint8Array[] = [];
+  private inputBytes = 0;
+  private inputTimer: number | null = null;
+  private resizeTimer: number | null = null;
+  private latestResize: { cols: number; rows: number } | null = null;
+  private inputPausedReason: TerminalStreamInputState["reason"] | null = null;
+
+  constructor(
+    public snapshot: TerminalStreamSnapshot,
+    private readonly sessionId: string,
+  ) {}
+
+  accept(chunk: TerminalStreamChunk) {
+    if (this.disposed || chunk.sessionId !== this.sessionId) return;
+    if (this.listeners.size === 0) {
+      this.queuedChunks.push(chunk);
+      return;
+    }
+    for (const listener of this.listeners) {
+      listener(chunk);
+    }
+  }
+
+  write(data: Uint8Array) {
+    if (this.disposed || data.byteLength === 0) return false;
+    if (this.inputPausedReason) return false;
+    if (this.inputBytes + data.byteLength > INPUT_HIGH_WATER_BYTES) {
+      this.setInputPaused("slow");
+      if (this.inputBytes === 0) {
+        queueMicrotask(() => this.clearInputPaused());
+        return false;
+      }
+      this.flushInput();
+      return false;
+    }
+    this.inputQueue.push(data.slice());
+    this.inputBytes += data.byteLength;
+    this.emitInputState();
+    if (this.inputBytes >= INPUT_FLUSH_BYTES) {
+      this.flushInput();
+      return true;
+    }
+    if (this.inputTimer === null) {
+      this.inputTimer = window.setTimeout(() => this.flushInput(), INPUT_FLUSH_MS);
+    }
+    return true;
+  }
+
+  resize(cols: number, rows: number) {
+    if (this.disposed) return;
+    this.latestResize = {
+      cols: Math.max(20, Math.min(400, Math.round(cols))),
+      rows: Math.max(6, Math.min(200, Math.round(rows))),
+    };
+    if (this.resizeTimer !== null) return;
+    this.resizeTimer = window.setTimeout(() => this.flushResize(), 16);
+  }
+
+  subscribeOutput(listener: (chunk: TerminalStreamChunk) => void) {
+    this.listeners.add(listener);
+    const queued = this.queuedChunks.splice(0);
+    for (const chunk of queued) {
+      listener(chunk);
+    }
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  subscribeInputState(listener: (state: TerminalStreamInputState) => void) {
+    this.inputStateListeners.add(listener);
+    listener(this.inputState());
+    return () => {
+      this.inputStateListeners.delete(listener);
+    };
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.flushInput();
+    if (this.inputTimer !== null) {
+      window.clearTimeout(this.inputTimer);
+      this.inputTimer = null;
+    }
+    if (this.resizeTimer !== null) {
+      window.clearTimeout(this.resizeTimer);
+      this.resizeTimer = null;
+    }
+    globalTerminalStreamHandles.delete(this);
+    this.listeners.clear();
+    this.inputStateListeners.clear();
+    this.queuedChunks.length = 0;
+    this.inputPausedReason = "closed";
+  }
+
+  private flushInput() {
+    if (this.inputTimer !== null) {
+      window.clearTimeout(this.inputTimer);
+      this.inputTimer = null;
+    }
+    if (this.inputBytes === 0) {
+      this.clearInputPaused();
+      return;
+    }
+    const bytes = new Uint8Array(this.inputBytes);
+    let offset = 0;
+    for (const chunk of this.inputQueue) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    this.inputQueue = [];
+    this.inputBytes = 0;
+    this.emitInputState();
+    void invoke("terminal_stream_input", {
+      session_id: this.sessionId,
+      bytes: Array.from(bytes),
+    })
+      .then(() => this.clearInputPaused())
+      .catch(() => this.setInputPaused("closed"));
+  }
+
+  private flushResize() {
+    if (this.resizeTimer !== null) {
+      window.clearTimeout(this.resizeTimer);
+      this.resizeTimer = null;
+    }
+    const latest = this.latestResize;
+    this.latestResize = null;
+    if (!latest) return;
+    void invoke("terminal_stream_resize", {
+      session_id: this.sessionId,
+      cols: latest.cols,
+      rows: latest.rows,
+    }).catch(() => undefined);
+  }
+
+  private inputState(): TerminalStreamInputState {
+    return {
+      paused: this.inputPausedReason !== null,
+      queuedBytes: this.inputBytes,
+      highWaterBytes: INPUT_HIGH_WATER_BYTES,
+      reason: this.inputPausedReason ?? undefined,
+    };
+  }
+
+  private emitInputState() {
+    if (this.inputStateListeners.size === 0) return;
+    const state = this.inputState();
+    for (const listener of this.inputStateListeners) {
+      listener(state);
+    }
+  }
+
+  private setInputPaused(reason: NonNullable<TerminalStreamInputState["reason"]>) {
+    if (this.inputPausedReason === reason) {
+      this.emitInputState();
+      return;
+    }
+    this.inputPausedReason = reason;
+    this.emitInputState();
+  }
+
+  private clearInputPaused() {
+    if (this.inputPausedReason === null || this.inputBytes > INPUT_LOW_WATER_BYTES) {
+      return;
+    }
+    this.inputPausedReason = null;
+    this.emitInputState();
+  }
 }
 
 export const tauriTerminalClient: TerminalClient = {
@@ -352,27 +620,6 @@ export const tauriTerminalClient: TerminalClient = {
       }),
     );
   },
-  async snapshot(sessionId, maxBytes, _projectPathKey) {
-    return normalizeSnapshot(
-      await invoke<RawTerminalSnapshot>("terminal_snapshot", {
-        session_id: sessionId,
-        max_bytes: maxBytes,
-      }),
-    );
-  },
-  async input(sessionId, data, _projectPathKey) {
-    await invoke("terminal_input", {
-      session_id: sessionId,
-      data,
-    });
-  },
-  async resize(sessionId, cols, rows, _projectPathKey) {
-    await invoke("terminal_resize", {
-      session_id: sessionId,
-      cols,
-      rows,
-    });
-  },
   async rename(sessionId, title, _projectPathKey) {
     return normalizeSession(
       await invoke<RawTerminalSession>("terminal_rename", {
@@ -394,14 +641,40 @@ export const tauriTerminalClient: TerminalClient = {
     });
     return (response.sessions ?? []).map(normalizeSession);
   },
-  async detach(_sessionId, _projectPathKey) {
-    // Tauri clients receive local events directly; detach is only meaningful for Gateway fanout.
-  },
   subscribe(listener) {
     ensureGlobalTerminalListener();
     globalTerminalListeners.add(listener);
     return () => {
       globalTerminalListeners.delete(listener);
     };
+  },
+  stream: {
+    async attach(session, options) {
+      ensureGlobalTerminalStreamListener();
+      const handle = new TauriTerminalStreamHandle(
+        {
+          session,
+          bytes: new Uint8Array(),
+          truncated: false,
+          outputStartOffset: 0,
+          outputEndOffset: 0,
+        },
+        session.id,
+      );
+      globalTerminalStreamHandles.add(handle);
+      try {
+        const snapshot = normalizeStreamSnapshot(
+          await invoke<RawTerminalStreamSnapshot>("terminal_stream_attach", {
+            session_id: session.id,
+            max_bytes: options?.maxBytes,
+          }),
+        );
+        handle.snapshot = snapshot;
+        return handle;
+      } catch (error) {
+        handle.dispose();
+        throw error;
+      }
+    },
   },
 };

@@ -36,7 +36,7 @@ use crate::runtime::sftp::{
 use crate::runtime::terminal::{
     terminal_shell_options, SshTerminalTabRecord, SshTerminalTabsSnapshot, TerminalEventPayload,
     TerminalSessionRecord, TerminalSessionRegistry, TerminalShellOption, TerminalSnapshotResponse,
-    TerminalSshCreateResponse,
+    TerminalSshCreateResponse, TerminalStreamEventPayload, TerminalStreamSnapshotResponse,
 };
 use crate::services::cron::CronManager;
 use crate::services::gateway_bridge;
@@ -56,6 +56,9 @@ const UI_ONLY_SETTINGS_SYNC_FIELDS: &[&str] = &[
 ];
 const GATEWAY_GRPC_MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const GATEWAY_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+const GATEWAY_TERMINAL_STREAM_RECONNECT_MIN: Duration = Duration::from_millis(250);
+const GATEWAY_TERMINAL_STREAM_RECONNECT_MAX: Duration = Duration::from_secs(5);
+const GATEWAY_TERMINAL_STREAM_STABLE_AFTER: Duration = Duration::from_secs(30);
 const GATEWAY_CHAT_LEASE_MS: u64 = 15_000;
 const GATEWAY_CHAT_RUNNING_LEASE_MS: u64 = 30 * 60_000;
 const GATEWAY_CHAT_LEASE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
@@ -255,6 +258,7 @@ pub struct GatewayController {
     runner_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     status: Mutex<GatewayStatusSnapshot>,
     outbound_tx: Mutex<Option<mpsc::Sender<proto::AgentEnvelope>>>,
+    terminal_stream_tx: Mutex<Option<mpsc::Sender<proto::TerminalStreamFrame>>>,
     settings_snapshot: Mutex<Option<Value>>,
     remote_chat_inbox: Mutex<HashMap<String, RemoteChatInboxRecord>>,
     tunnels: Mutex<HashMap<String, LocalTunnelRecord>>,
@@ -262,6 +266,7 @@ pub struct GatewayController {
     tunnel_ws_streams: Mutex<HashMap<String, mpsc::Sender<proto::TunnelFrame>>>,
     pending_tunnel_controls: Mutex<HashMap<String, oneshot::Sender<proto::TunnelControlResponse>>>,
     terminal_forwarder_once: Once,
+    terminal_stream_forwarder_once: Once,
     sftp_forwarder_once: Once,
     remote_chat_inbox_sweeper_once: Once,
 }
@@ -296,6 +301,7 @@ impl GatewayController {
                 last_error: None,
             }),
             outbound_tx: Mutex::new(None),
+            terminal_stream_tx: Mutex::new(None),
             settings_snapshot: Mutex::new(None),
             remote_chat_inbox: Mutex::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
@@ -303,6 +309,7 @@ impl GatewayController {
             tunnel_ws_streams: Mutex::new(HashMap::new()),
             pending_tunnel_controls: Mutex::new(HashMap::new()),
             terminal_forwarder_once: Once::new(),
+            terminal_stream_forwarder_once: Once::new(),
             sftp_forwarder_once: Once::new(),
             remote_chat_inbox_sweeper_once: Once::new(),
         }
@@ -310,6 +317,7 @@ impl GatewayController {
 
     pub fn start(self: &Arc<Self>) -> Result<(), String> {
         self.start_terminal_forwarder();
+        self.start_terminal_stream_forwarder();
         self.start_sftp_forwarder();
         self.start_remote_chat_inbox_sweeper();
         self.ensure_runner()
@@ -328,6 +336,25 @@ impl GatewayController {
                     };
                     if let Err(error) = sender.blocking_send(envelope) {
                         eprintln!("send gateway terminal event failed: {error}");
+                    }
+                }
+            });
+        });
+    }
+
+    fn start_terminal_stream_forwarder(self: &Arc<Self>) {
+        let controller = Arc::clone(self);
+        self.terminal_stream_forwarder_once.call_once(move || {
+            let (receiver, guard) = controller.terminal_registry.subscribe_stream();
+            thread::spawn(move || {
+                let _guard = guard;
+                while let Ok(event) = receiver.recv() {
+                    let frame = build_terminal_stream_output_frame(event.payload);
+                    let Ok(sender) = controller.current_terminal_stream_sender() else {
+                        continue;
+                    };
+                    if let Err(error) = sender.blocking_send(frame) {
+                        eprintln!("send gateway terminal stream frame failed: {error}");
                     }
                 }
             });
@@ -397,6 +424,7 @@ impl GatewayController {
 
     fn restart_runner(self: &Arc<Self>) -> Result<(), String> {
         self.set_outbound_sender(None);
+        self.set_terminal_stream_sender(None);
         let mut runner_task = self
             .runner_task
             .lock()
@@ -639,6 +667,7 @@ impl GatewayController {
             let config = config_rx.borrow().clone();
             if !config.enabled || !is_remote_configured(&config) {
                 self.set_outbound_sender(None);
+                self.set_terminal_stream_sender(None);
                 self.publish_status(|status| {
                     set_disconnected_status(status, &config, None);
                 });
@@ -656,6 +685,7 @@ impl GatewayController {
             let reconfigured = latest_config != current_config;
 
             self.set_outbound_sender(None);
+            self.set_terminal_stream_sender(None);
             if reconfigured {
                 self.publish_status(|status| {
                     set_disconnected_status(status, &latest_config, None);
@@ -730,78 +760,270 @@ impl GatewayController {
             });
         }
 
+        let terminal_client = client.clone();
+
         let (outbound_tx, outbound_rx) = mpsc::channel::<proto::AgentEnvelope>(4096);
         self.set_outbound_sender(Some(outbound_tx));
+        let (terminal_stop_tx, terminal_stop_rx) = watch::channel(false);
+        let terminal_task =
+            self.spawn_terminal_stream(terminal_client, config.clone(), terminal_stop_rx);
 
-        let mut connect_request = tonic::Request::new(ReceiverStream::new(outbound_rx));
-        insert_bearer_metadata(connect_request.metadata_mut(), &config.token)?;
+        let serve_result = async {
+            let mut connect_request = tonic::Request::new(ReceiverStream::new(outbound_rx));
+            insert_bearer_metadata(connect_request.metadata_mut(), &config.token)?;
 
-        let connect_call = client.agent_connect(connect_request);
-        let response = match await_abortable_on_reconfigure(&config, config_rx, async move {
-            tokio::time::timeout(Duration::from_secs(10), connect_call)
-                .await
-                .map_err(|_| "open gateway stream timed out".to_string())?
-                .map_err(|e| format!("open gateway stream failed: {e}"))
-        })
-        .await?
-        {
-            Some(response) => response,
-            None => return Ok(()),
-        };
-        let mut inbound = response.into_inner();
+            let connect_call = client.agent_connect(connect_request);
+            let response = match await_abortable_on_reconfigure(&config, config_rx, async move {
+                tokio::time::timeout(Duration::from_secs(10), connect_call)
+                    .await
+                    .map_err(|_| "open gateway stream timed out".to_string())?
+                    .map_err(|e| format!("open gateway stream failed: {e}"))
+            })
+            .await?
+            {
+                Some(response) => response,
+                None => return Ok(()),
+            };
+            let mut inbound = response.into_inner();
 
-        let connected_at = now_unix_seconds();
-        self.publish_status(|status| {
-            status.online = true;
-            status.enabled = true;
-            status.configured = true;
-            status.gateway_url = config.gateway_url.clone();
-            status.agent_id = effective_agent_id(&config);
-            status.session_id = Some(auth_response.session_id.clone());
-            status.connected_since = Some(connected_at);
-            status.last_heartbeat = Some(connected_at);
-            status.last_error = None;
-        });
+            let connected_at = now_unix_seconds();
+            self.publish_status(|status| {
+                status.online = true;
+                status.enabled = true;
+                status.configured = true;
+                status.gateway_url = config.gateway_url.clone();
+                status.agent_id = effective_agent_id(&config);
+                status.session_id = Some(auth_response.session_id.clone());
+                status.connected_since = Some(connected_at);
+                status.last_heartbeat = Some(connected_at);
+                status.last_error = None;
+            });
 
-        if let Err(error) = self.publish_current_settings_sync().await {
-            eprintln!("publish gateway settings sync failed: {error}");
-        }
-        if let Err(error) = self.publish_current_terminal_sessions().await {
-            eprintln!("publish gateway terminal sessions failed: {error}");
-        }
-        if let Err(error) = self.publish_current_tunnels().await {
-            eprintln!("publish gateway tunnels failed: {error}");
-        }
+            if let Err(error) = self.publish_current_settings_sync().await {
+                eprintln!("publish gateway settings sync failed: {error}");
+            }
+            if let Err(error) = self.publish_current_terminal_sessions().await {
+                eprintln!("publish gateway terminal sessions failed: {error}");
+            }
+            if let Err(error) = self.publish_current_tunnels().await {
+                eprintln!("publish gateway tunnels failed: {error}");
+            }
 
-        let timeout_seconds = i64::try_from(config.heartbeat_interval.max(5)).unwrap_or(30) * 3;
+            let timeout_seconds = i64::try_from(config.heartbeat_interval.max(5)).unwrap_or(30) * 3;
 
-        loop {
-            tokio::select! {
-                changed = config_rx.changed() => {
-                    if changed.is_err() {
-                        return Ok(());
+            loop {
+                tokio::select! {
+                    changed = config_rx.changed() => {
+                        if changed.is_err() {
+                            return Ok(());
+                        }
+                        let next = config_rx.borrow().clone();
+                        if next != config {
+                            return Ok(());
+                        }
                     }
-                    let next = config_rx.borrow().clone();
-                    if next != config {
-                        return Ok(());
-                    }
-                }
-                message = tokio::time::timeout(
-                    Duration::from_secs(u64::try_from(timeout_seconds.max(5)).unwrap_or(15)),
-                    inbound.message(),
-                ) => {
-                    match message {
-                        Err(_) => return Err("gateway heartbeat timed out".to_string()),
-                        Ok(Err(err)) => return Err(format!("gateway stream receive failed: {err}")),
-                        Ok(Ok(None)) => return Err("gateway stream closed".to_string()),
-                        Ok(Ok(Some(envelope))) => {
-                            self.touch_heartbeat();
-                            self.handle_gateway_envelope(envelope).await?;
+                    message = tokio::time::timeout(
+                        Duration::from_secs(u64::try_from(timeout_seconds.max(5)).unwrap_or(15)),
+                        inbound.message(),
+                    ) => {
+                        match message {
+                            Err(_) => return Err("gateway heartbeat timed out".to_string()),
+                            Ok(Err(err)) => return Err(format!("gateway stream receive failed: {err}")),
+                            Ok(Ok(None)) => return Err("gateway stream closed".to_string()),
+                            Ok(Ok(Some(envelope))) => {
+                                self.touch_heartbeat();
+                                self.handle_gateway_envelope(envelope).await?;
+                            }
                         }
                     }
                 }
             }
         }
+        .await;
+
+        let _ = terminal_stop_tx.send(true);
+        terminal_task.abort();
+        self.set_terminal_stream_sender(None);
+        serve_result
+    }
+
+    fn spawn_terminal_stream(
+        self: &Arc<Self>,
+        client: proto::agent_gateway_client::AgentGatewayClient<tonic::transport::Channel>,
+        config: RemoteSettingsPayload,
+        stop_rx: watch::Receiver<bool>,
+    ) -> tauri::async_runtime::JoinHandle<()> {
+        let controller = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            controller
+                .run_terminal_stream(client, config, stop_rx)
+                .await;
+        })
+    }
+
+    async fn run_terminal_stream(
+        self: Arc<Self>,
+        client: proto::agent_gateway_client::AgentGatewayClient<tonic::transport::Channel>,
+        config: RemoteSettingsPayload,
+        mut stop_rx: watch::Receiver<bool>,
+    ) {
+        let mut reconnect_delay = GATEWAY_TERMINAL_STREAM_RECONNECT_MIN;
+
+        loop {
+            if *stop_rx.borrow() {
+                break;
+            }
+
+            let attempt_started = Instant::now();
+            let result = Arc::clone(&self)
+                .run_terminal_stream_once(client.clone(), config.clone(), stop_rx.clone())
+                .await;
+            if *stop_rx.borrow() {
+                break;
+            }
+            self.set_terminal_stream_sender(None);
+
+            if attempt_started.elapsed() >= GATEWAY_TERMINAL_STREAM_STABLE_AFTER {
+                reconnect_delay = GATEWAY_TERMINAL_STREAM_RECONNECT_MIN;
+            }
+            match result {
+                Ok(()) => eprintln!("gateway terminal stream closed; reconnecting"),
+                Err(error) => eprintln!("gateway terminal stream stopped: {error}; reconnecting"),
+            }
+
+            let delay = reconnect_delay;
+            reconnect_delay =
+                std::cmp::min(reconnect_delay * 2, GATEWAY_TERMINAL_STREAM_RECONNECT_MAX);
+            tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+
+        self.set_terminal_stream_sender(None);
+    }
+
+    async fn run_terminal_stream_once(
+        self: Arc<Self>,
+        mut client: proto::agent_gateway_client::AgentGatewayClient<tonic::transport::Channel>,
+        config: RemoteSettingsPayload,
+        mut stop_rx: watch::Receiver<bool>,
+    ) -> Result<(), String> {
+        let (terminal_tx, terminal_rx) = mpsc::channel::<proto::TerminalStreamFrame>(4096);
+
+        let result = async {
+            let mut request = tonic::Request::new(ReceiverStream::new(terminal_rx));
+            insert_bearer_metadata(request.metadata_mut(), &config.token)?;
+            let response = tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        return Ok(());
+                    }
+                    return Ok(());
+                }
+                response = client.agent_terminal_connect(request) => {
+                    response.map_err(|error| format!("open gateway terminal stream failed: {error}"))?
+                }
+            };
+            self.set_terminal_stream_sender(Some(terminal_tx.clone()));
+            let mut inbound = response.into_inner();
+            loop {
+                tokio::select! {
+                    changed = stop_rx.changed() => {
+                        if changed.is_err() || *stop_rx.borrow() {
+                            return Ok(());
+                        }
+                    }
+                    message = inbound.message() => {
+                        match message {
+                            Ok(Some(frame)) => {
+                                if let Err(error) = self.handle_terminal_stream_frame(frame).await {
+                                    eprintln!("handle gateway terminal stream frame failed: {error}");
+                                }
+                            }
+                            Ok(None) => return Ok(()),
+                            Err(error) => {
+                                return Err(format!("gateway terminal stream receive failed: {error}"))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .await;
+
+        self.clear_terminal_stream_sender_if_current(&terminal_tx);
+        result
+    }
+
+    async fn handle_terminal_stream_frame(
+        &self,
+        frame: proto::TerminalStreamFrame,
+    ) -> Result<(), String> {
+        let kind = frame.kind.trim().to_ascii_lowercase();
+        let stream_id = frame.stream_id.clone();
+        let session_id = frame.session_id.clone();
+        let project_path_key = frame.project_path_key.clone();
+        let result = match kind.as_str() {
+            "attach" => {
+                self.ensure_terminal_stream_allowed(&frame)?;
+                let snapshot = self.terminal_registry.stream_attach(
+                    frame.session_id.clone(),
+                    optional_proto_usize(frame.max_bytes),
+                )?;
+                self.send_terminal_stream_frame(terminal_stream_snapshot_to_proto(
+                    stream_id.clone(),
+                    snapshot,
+                ))
+                .await
+            }
+            "input" => {
+                self.ensure_terminal_stream_allowed(&frame)?;
+                self.terminal_registry
+                    .input_bytes_from_remote(frame.session_id.clone(), frame.data.clone())?;
+                Ok(())
+            }
+            "resize" => {
+                self.ensure_terminal_stream_allowed(&frame)?;
+                self.terminal_registry.stream_resize(
+                    frame.session_id.clone(),
+                    optional_proto_u16(frame.cols).unwrap_or(80),
+                    optional_proto_u16(frame.rows).unwrap_or(24),
+                )?;
+                Ok(())
+            }
+            "detach" => Ok(()),
+            "" => Err("terminal stream frame kind is required".to_string()),
+            other => Err(format!("unsupported terminal stream frame: {other}")),
+        };
+
+        if let Err(error) = result {
+            let _ = self
+                .send_terminal_stream_frame(terminal_stream_error_frame(
+                    stream_id,
+                    session_id,
+                    project_path_key,
+                    error.clone(),
+                ))
+                .await;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn send_terminal_stream_frame(
+        &self,
+        frame: proto::TerminalStreamFrame,
+    ) -> Result<(), String> {
+        let sender = self.current_terminal_stream_sender()?;
+        sender
+            .send(frame)
+            .await
+            .map_err(|error| format!("send terminal stream frame failed: {error}"))
     }
 
     async fn handle_gateway_envelope(
@@ -1676,7 +1898,7 @@ impl GatewayController {
                     action,
                     sessions: Vec::new(),
                     session: None,
-                    output: String::new(),
+                    output: Vec::new(),
                     truncated: false,
                     shell_options: options
                         .options
@@ -1713,7 +1935,7 @@ impl GatewayController {
                     action,
                     sessions,
                     session: None,
-                    output: String::new(),
+                    output: Vec::new(),
                     truncated: false,
                     shell_options: Vec::new(),
                     default_shell: String::new(),
@@ -1735,7 +1957,7 @@ impl GatewayController {
                     optional_proto_u16(request.cols),
                     optional_proto_u16(request.rows),
                 )?;
-                Ok(terminal_snapshot_response_to_proto(action, snapshot))
+                Ok(terminal_create_snapshot_response_to_proto(action, snapshot))
             }
             "create_ssh" => {
                 let project_path_key =
@@ -1780,7 +2002,7 @@ impl GatewayController {
                     action,
                     sessions: Vec::new(),
                     session: None,
-                    output: String::new(),
+                    output: Vec::new(),
                     truncated: false,
                     shell_options: Vec::new(),
                     default_shell: String::new(),
@@ -1798,7 +2020,7 @@ impl GatewayController {
                     action,
                     sessions: Vec::new(),
                     session: None,
-                    output: String::new(),
+                    output: Vec::new(),
                     truncated: false,
                     shell_options: Vec::new(),
                     default_shell: String::new(),
@@ -1828,38 +2050,6 @@ impl GatewayController {
                     .terminal_registry
                     .ssh_terminal_tab_close(request.tab_id)?;
                 Ok(terminal_ssh_tabs_response_to_proto(action, snapshot))
-            }
-            "attach" | "snapshot" => {
-                self.ensure_terminal_session_in_project(
-                    &request.session_id,
-                    &request.project_path_key,
-                )?;
-                let snapshot = self
-                    .terminal_registry
-                    .snapshot(request.session_id, optional_proto_usize(request.max_bytes))?;
-                Ok(terminal_snapshot_response_to_proto(action, snapshot))
-            }
-            "input" => {
-                self.ensure_terminal_session_in_project(
-                    &request.session_id,
-                    &request.project_path_key,
-                )?;
-                let session = self
-                    .terminal_registry
-                    .input(request.session_id, request.data)?;
-                Ok(terminal_record_response_to_proto(action, session))
-            }
-            "resize" => {
-                self.ensure_terminal_session_in_project(
-                    &request.session_id,
-                    &request.project_path_key,
-                )?;
-                let session = self.terminal_registry.resize(
-                    request.session_id,
-                    optional_proto_u16(request.cols).unwrap_or(80),
-                    optional_proto_u16(request.rows).unwrap_or(24),
-                )?;
-                Ok(terminal_record_response_to_proto(action, session))
             }
             "rename" => {
                 self.ensure_terminal_session_in_project(
@@ -1903,20 +2093,6 @@ impl GatewayController {
                 }
                 Ok(terminal_list_response_to_proto(action, sessions))
             }
-            "detach" => Ok(proto::TerminalResponse {
-                action,
-                sessions: Vec::new(),
-                session: None,
-                output: String::new(),
-                truncated: false,
-                shell_options: Vec::new(),
-                default_shell: String::new(),
-                output_start_offset: 0,
-                output_end_offset: 0,
-                ssh_prompt: None,
-                latency_ms: 0,
-                ssh_tabs: None,
-            }),
             "" => Err("terminal action is required".to_string()),
             other => Err(format!("unsupported terminal action: {other}")),
         }
@@ -1959,8 +2135,7 @@ impl GatewayController {
                     Err("web terminal is disabled in desktop Remote settings".to_string())
                 }
             }
-            "attach" | "snapshot" | "input" | "resize" | "rename" | "close" | "detach"
-            | "ssh_latency" => {
+            "attach" | "input" | "resize" | "rename" | "close" | "ssh_latency" => {
                 let session = self
                     .terminal_registry
                     .session_record(request.session_id.trim().to_string())?;
@@ -1994,6 +2169,32 @@ impl GatewayController {
         }
     }
 
+    fn ensure_terminal_stream_allowed(
+        &self,
+        frame: &proto::TerminalStreamFrame,
+    ) -> Result<(), String> {
+        let action = frame.kind.trim().to_ascii_lowercase();
+        let request = proto::TerminalRequest {
+            action: action.clone(),
+            session_id: frame.session_id.clone(),
+            project_path_key: frame.project_path_key.clone(),
+            cols: frame.cols,
+            rows: frame.rows,
+            max_bytes: frame.max_bytes,
+            ..Default::default()
+        };
+        match action.as_str() {
+            "attach" | "input" | "resize" => {
+                self.ensure_terminal_session_in_project(
+                    &request.session_id,
+                    &request.project_path_key,
+                )?;
+                self.ensure_terminal_request_allowed(&action, &request)
+            }
+            other => Err(format!("unsupported terminal stream frame: {other}")),
+        }
+    }
+
     async fn send_agent_envelope(&self, envelope: proto::AgentEnvelope) -> Result<(), String> {
         let sender = self.current_outbound_sender()?;
         send_agent_envelope_to(sender, envelope).await
@@ -2005,6 +2206,16 @@ impl GatewayController {
             .map_err(|_| "gateway outbound sender lock poisoned".to_string())?
             .clone()
             .ok_or_else(|| "gateway outbound stream is offline".to_string())
+    }
+
+    fn current_terminal_stream_sender(
+        &self,
+    ) -> Result<mpsc::Sender<proto::TerminalStreamFrame>, String> {
+        self.terminal_stream_tx
+            .lock()
+            .map_err(|_| "gateway terminal stream sender lock poisoned".to_string())?
+            .clone()
+            .ok_or_else(|| "gateway terminal stream is offline".to_string())
     }
 
     fn spawn_uploaded_image_preview_response(
@@ -2044,6 +2255,27 @@ impl GatewayController {
     fn set_outbound_sender(&self, sender: Option<mpsc::Sender<proto::AgentEnvelope>>) {
         if let Ok(mut slot) = self.outbound_tx.lock() {
             *slot = sender;
+        }
+    }
+
+    fn set_terminal_stream_sender(&self, sender: Option<mpsc::Sender<proto::TerminalStreamFrame>>) {
+        if let Ok(mut slot) = self.terminal_stream_tx.lock() {
+            *slot = sender;
+        }
+    }
+
+    fn clear_terminal_stream_sender_if_current(
+        &self,
+        sender: &mpsc::Sender<proto::TerminalStreamFrame>,
+    ) {
+        if let Ok(mut slot) = self.terminal_stream_tx.lock() {
+            if slot
+                .as_ref()
+                .map(|current| current.same_channel(sender))
+                .unwrap_or(false)
+            {
+                *slot = None;
+            }
         }
     }
 
@@ -4117,7 +4349,7 @@ fn terminal_list_response_to_proto(
             .map(terminal_session_to_proto)
             .collect(),
         session: None,
-        output: String::new(),
+        output: Vec::new(),
         truncated: false,
         shell_options: Vec::new(),
         default_shell: String::new(),
@@ -4137,7 +4369,7 @@ fn terminal_record_response_to_proto(
         action,
         sessions: Vec::new(),
         session: Some(terminal_session_to_proto(session)),
-        output: String::new(),
+        output: Vec::new(),
         truncated: false,
         shell_options: Vec::new(),
         default_shell: String::new(),
@@ -4149,7 +4381,7 @@ fn terminal_record_response_to_proto(
     }
 }
 
-fn terminal_snapshot_response_to_proto(
+fn terminal_create_snapshot_response_to_proto(
     action: String,
     snapshot: TerminalSnapshotResponse,
 ) -> proto::TerminalResponse {
@@ -4157,7 +4389,7 @@ fn terminal_snapshot_response_to_proto(
         action,
         sessions: Vec::new(),
         session: Some(terminal_session_to_proto(snapshot.session)),
-        output: snapshot.output,
+        output: snapshot.output_bytes,
         truncated: snapshot.truncated,
         shell_options: Vec::new(),
         default_shell: String::new(),
@@ -4177,7 +4409,7 @@ fn terminal_ssh_create_response_to_proto(
         action,
         sessions: Vec::new(),
         session: response.session.map(terminal_session_to_proto),
-        output: response.output,
+        output: response.output_bytes,
         truncated: response.truncated,
         shell_options: Vec::new(),
         default_shell: String::new(),
@@ -4208,7 +4440,7 @@ fn terminal_ssh_tabs_response_to_proto(
         action,
         sessions: Vec::new(),
         session: None,
-        output: String::new(),
+        output: Vec::new(),
         truncated: false,
         shell_options: Vec::new(),
         default_shell: String::new(),
@@ -4217,6 +4449,75 @@ fn terminal_ssh_tabs_response_to_proto(
         ssh_prompt: None,
         latency_ms: 0,
         ssh_tabs: Some(ssh_terminal_tabs_to_proto(snapshot)),
+    }
+}
+
+fn terminal_stream_snapshot_to_proto(
+    stream_id: String,
+    snapshot: TerminalStreamSnapshotResponse,
+) -> proto::TerminalStreamFrame {
+    let project_path_key = normalize_project_path_key(&snapshot.session.project_path_key);
+    let session_id = snapshot.session.id.clone();
+    proto::TerminalStreamFrame {
+        kind: "snapshot".to_string(),
+        stream_id,
+        session_id,
+        project_path_key,
+        seq: 0,
+        start_offset: snapshot.output_start_offset,
+        end_offset: snapshot.output_end_offset,
+        cols: u32::from(snapshot.session.cols),
+        rows: u32::from(snapshot.session.rows),
+        max_bytes: 0,
+        truncated: snapshot.truncated,
+        error: String::new(),
+        session: Some(terminal_session_to_proto(snapshot.session)),
+        data: snapshot.bytes,
+    }
+}
+
+fn build_terminal_stream_output_frame(
+    payload: TerminalStreamEventPayload,
+) -> proto::TerminalStreamFrame {
+    proto::TerminalStreamFrame {
+        kind: payload.kind,
+        stream_id: String::new(),
+        session_id: payload.session_id,
+        project_path_key: normalize_project_path_key(&payload.project_path_key),
+        seq: 0,
+        start_offset: payload.start_offset,
+        end_offset: payload.end_offset,
+        cols: 0,
+        rows: 0,
+        max_bytes: 0,
+        truncated: false,
+        error: String::new(),
+        session: None,
+        data: payload.bytes,
+    }
+}
+
+fn terminal_stream_error_frame(
+    stream_id: String,
+    session_id: String,
+    project_path_key: String,
+    error: String,
+) -> proto::TerminalStreamFrame {
+    proto::TerminalStreamFrame {
+        kind: "error".to_string(),
+        stream_id,
+        session_id,
+        project_path_key: normalize_project_path_key(&project_path_key),
+        seq: 0,
+        start_offset: 0,
+        end_offset: 0,
+        cols: 0,
+        rows: 0,
+        max_bytes: 0,
+        truncated: false,
+        error,
+        session: None,
+        data: Vec::new(),
     }
 }
 

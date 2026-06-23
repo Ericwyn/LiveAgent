@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocale } from "@/i18n";
 import { cn } from "@/lib/shared/utils";
 import type { SftpClient } from "@/lib/sftp/types";
@@ -11,7 +11,13 @@ import type {
 } from "@/lib/terminal/types";
 import { AlertTriangle, FolderTree, Terminal, X } from "../icons";
 import { XTermViewport } from "../project-tools/XTermViewport";
-import { WorkspaceSftpPanel } from "./WorkspaceSftpPanel";
+
+const WorkspaceSftpPanel = lazy(async () => {
+  const module = await import("./WorkspaceSftpPanel");
+  return {
+    default: module.WorkspaceSftpPanel,
+  };
+});
 
 export type WorkspaceSshTerminalOpenRequest = {
   id: number;
@@ -72,6 +78,8 @@ export function WorkspaceSshTerminalOverlay(props: WorkspaceSshTerminalOverlayPr
   const [activeTabId, setActiveTabId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const openRequestIdRef = useRef<number | null>(null);
+  const optimisticTabIdsRef = useRef<Set<string>>(new Set());
+  const locallyClosedTabIdsRef = useRef<Set<string>>(new Set());
   const hideTimerRef = useRef<number | null>(null);
   const tabElementRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
@@ -129,6 +137,7 @@ export function WorkspaceSshTerminalOverlay(props: WorkspaceSshTerminalOverlayPr
 
   const closeTab = useCallback(
     (tabId: string) => {
+      locallyClosedTabIdsRef.current.add(tabId);
       void client
         .closeSshTerminalTab(tabId)
         .then(applyTabsSnapshot)
@@ -156,19 +165,58 @@ export function WorkspaceSshTerminalOverlay(props: WorkspaceSshTerminalOverlayPr
     setIsVisible(true);
     setError(null);
     const requestedTabId = tabIdFor(openRequest.sessionId, kind);
+    locallyClosedTabIdsRef.current.delete(requestedTabId);
+    const requestedSession = sessionsById.get(openRequest.sessionId);
+    if (requestedSession) {
+      const now = Date.now();
+      setTabsSnapshot((current) => {
+        if (current.tabs.some((tab) => tab.id === requestedTabId)) {
+          return current;
+        }
+        optimisticTabIdsRef.current.add(requestedTabId);
+        return {
+          projectPathKey:
+            current.projectPathKey || requestedSession.projectPathKey || projectPathKey,
+          tabs: [
+            ...current.tabs,
+            {
+              id: requestedTabId,
+              sessionId: requestedSession.id,
+              projectPathKey: requestedSession.projectPathKey || projectPathKey,
+              kind,
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+          revision: current.revision,
+        };
+      });
+      setActiveTabId(requestedTabId);
+    }
     void client
       .openSshTerminalTab({ sessionId: openRequest.sessionId, kind })
       .then((snapshot) => {
+        optimisticTabIdsRef.current.delete(requestedTabId);
+        if (locallyClosedTabIdsRef.current.has(requestedTabId)) {
+          return;
+        }
         applyTabsSnapshot(snapshot);
         setActiveTabId(requestedTabId);
       })
       .catch((error: unknown) => {
+        if (optimisticTabIdsRef.current.delete(requestedTabId)) {
+          setTabsSnapshot((current) => ({
+            ...current,
+            tabs: current.tabs.filter((tab) => tab.id !== requestedTabId),
+          }));
+        }
         setError(error instanceof Error ? error.message : String(error));
       });
-  }, [applyTabsSnapshot, cancelPendingHide, client, openRequest]);
+  }, [applyTabsSnapshot, cancelPendingHide, client, openRequest, projectPathKey, sessionsById]);
 
   useEffect(() => {
     if (!projectPathKey || !isOpen) return;
+    if (openRequest && sessionsById.has(openRequest.sessionId)) return;
     let cancelled = false;
     void client
       .listSshTerminalTabs(projectPathKey)
@@ -185,7 +233,7 @@ export function WorkspaceSshTerminalOverlay(props: WorkspaceSshTerminalOverlayPr
     return () => {
       cancelled = true;
     };
-  }, [applyTabsSnapshot, client, isOpen, projectPathKey]);
+  }, [applyTabsSnapshot, client, isOpen, openRequest, projectPathKey, sessionsById]);
 
   useEffect(() => {
     return client.subscribe((event) => {
@@ -327,12 +375,20 @@ export function WorkspaceSshTerminalOverlay(props: WorkspaceSshTerminalOverlayPr
                 className={cn("absolute inset-0 min-h-0", isActiveTerminal ? "block" : "hidden")}
               >
                 {tab.kind === "sftp" ? (
-                  <WorkspaceSftpPanel
-                    client={sftpClient}
-                    session={session}
-                    isActive={isActiveTerminal}
-                    onError={setError}
-                  />
+                  <Suspense
+                    fallback={
+                      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                        {t("workspaceSshTerminal.loading")}
+                      </div>
+                    }
+                  >
+                    <WorkspaceSftpPanel
+                      client={sftpClient}
+                      session={session}
+                      isActive={isActiveTerminal}
+                      onError={setError}
+                    />
+                  </Suspense>
                 ) : (
                   <XTermViewport
                     client={client}

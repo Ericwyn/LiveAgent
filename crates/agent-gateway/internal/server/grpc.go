@@ -128,6 +128,71 @@ func (s *GRPCServer) AgentConnect(stream gatewayv1.AgentGateway_AgentConnectServ
 	}
 }
 
+func (s *GRPCServer) AgentTerminalConnect(stream gatewayv1.AgentGateway_AgentTerminalConnectServer) error {
+	toAgent := make(chan *gatewayv1.TerminalStreamFrame, 4096)
+	cleanup := s.sm.RegisterTerminalStreamToAgent(toAgent)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+
+	sendErrCh := make(chan error, 1)
+	recvErrCh := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case frame := <-toAgent:
+				if frame == nil {
+					continue
+				}
+				if err := stream.Send(frame); err != nil {
+					sendErrCh <- err
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	go func() {
+		frame, err := stream.Recv()
+		for err == nil {
+			s.sm.BroadcastTerminalStreamFrame(frame)
+			frame, err = stream.Recv()
+		}
+		if err == io.EOF {
+			recvErrCh <- nil
+		} else {
+			recvErrCh <- err
+		}
+		cancel()
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return nil
+			}
+			return ctx.Err()
+		case err := <-sendErrCh:
+			cancel()
+			if err == nil || errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		case err := <-recvErrCh:
+			cancel()
+			if err == nil || errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
 func (s *GRPCServer) heartbeatLoop(ctx context.Context, sess *session.AgentSession) {
 	period := s.heartbeatPeriod()
 	ticker := time.NewTicker(period)

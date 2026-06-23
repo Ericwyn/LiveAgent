@@ -41,6 +41,11 @@ type syncHub struct {
 	terminalSubscribers map[int]chan *gatewayv1.TerminalEvent
 	terminalSessions    map[string]*gatewayv1.TerminalSession
 
+	terminalStreamMu          sync.Mutex
+	nextTerminalStreamSubID   int
+	terminalStreamSubscribers map[int]chan *gatewayv1.TerminalStreamFrame
+	terminalStreamToAgent     chan *gatewayv1.TerminalStreamFrame
+
 	sftpMu          sync.Mutex
 	nextSftpSubID   int
 	sftpSubscribers map[int]chan *gatewayv1.SftpEvent
@@ -48,11 +53,12 @@ type syncHub struct {
 
 func newSyncHub() *syncHub {
 	return &syncHub{
-		historySubscribers:  make(map[int]chan *gatewayv1.HistorySyncEvent),
-		settingsSubscribers: make(map[int]chan *gatewayv1.SettingsSyncEvent),
-		terminalSubscribers: make(map[int]chan *gatewayv1.TerminalEvent),
-		terminalSessions:    make(map[string]*gatewayv1.TerminalSession),
-		sftpSubscribers:     make(map[int]chan *gatewayv1.SftpEvent),
+		historySubscribers:        make(map[int]chan *gatewayv1.HistorySyncEvent),
+		settingsSubscribers:       make(map[int]chan *gatewayv1.SettingsSyncEvent),
+		terminalSubscribers:       make(map[int]chan *gatewayv1.TerminalEvent),
+		terminalSessions:          make(map[string]*gatewayv1.TerminalSession),
+		terminalStreamSubscribers: make(map[int]chan *gatewayv1.TerminalStreamFrame),
+		sftpSubscribers:           make(map[int]chan *gatewayv1.SftpEvent),
 	}
 }
 

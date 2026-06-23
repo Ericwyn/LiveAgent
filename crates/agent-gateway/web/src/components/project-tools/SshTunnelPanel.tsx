@@ -152,6 +152,18 @@ function isTerminalSessionNotFoundError(error: unknown) {
   return message.includes("terminal session not found") || message.includes("session not found");
 }
 
+let workspaceSshTerminalOverlayPreload: Promise<unknown> | null = null;
+
+function preloadWorkspaceSshTerminalOverlay() {
+  workspaceSshTerminalOverlayPreload ??= import(
+    "@/components/workspace-editor/WorkspaceSshTerminalOverlay"
+  ).catch((error) => {
+    workspaceSshTerminalOverlayPreload = null;
+    throw error;
+  });
+  return workspaceSshTerminalOverlayPreload;
+}
+
 function HostMetaTags(props: { host: SshHostConfig }) {
   const { host } = props;
   const { t } = useLocale();
@@ -1006,7 +1018,16 @@ export function SshTunnelPanel(props: SshTunnelPanelProps) {
                           title={t("projectTools.sshTunnelOpenBash")}
                           aria-label={t("projectTools.sshTunnelOpenBash")}
                           disabled={!connected}
-                          onClick={() => onOpenSession(session, "bash")}
+                          onFocus={() => {
+                            void preloadWorkspaceSshTerminalOverlay();
+                          }}
+                          onPointerEnter={() => {
+                            void preloadWorkspaceSshTerminalOverlay();
+                          }}
+                          onClick={() => {
+                            void preloadWorkspaceSshTerminalOverlay();
+                            onOpenSession(session, "bash");
+                          }}
                         >
                           <Terminal className="h-4 w-4" />
                         </button>
@@ -1017,7 +1038,16 @@ export function SshTunnelPanel(props: SshTunnelPanelProps) {
                             title={t("projectTools.sshTunnelOpenSftp")}
                             aria-label={t("projectTools.sshTunnelOpenSftp")}
                             disabled={!connected}
-                            onClick={() => onOpenSession(session, "sftp")}
+                            onFocus={() => {
+                              void preloadWorkspaceSshTerminalOverlay();
+                            }}
+                            onPointerEnter={() => {
+                              void preloadWorkspaceSshTerminalOverlay();
+                            }}
+                            onClick={() => {
+                              void preloadWorkspaceSshTerminalOverlay();
+                              onOpenSession(session, "sftp");
+                            }}
                           >
                             <FolderTree className="h-4 w-4" />
                           </button>

@@ -19,8 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AgentGateway_AgentConnect_FullMethodName = "/liveagent.gateway.v1.AgentGateway/AgentConnect"
-	AgentGateway_Authenticate_FullMethodName = "/liveagent.gateway.v1.AgentGateway/Authenticate"
+	AgentGateway_AgentConnect_FullMethodName         = "/liveagent.gateway.v1.AgentGateway/AgentConnect"
+	AgentGateway_AgentTerminalConnect_FullMethodName = "/liveagent.gateway.v1.AgentGateway/AgentTerminalConnect"
+	AgentGateway_Authenticate_FullMethodName         = "/liveagent.gateway.v1.AgentGateway/Authenticate"
 )
 
 // AgentGatewayClient is the client API for AgentGateway service.
@@ -28,6 +29,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type AgentGatewayClient interface {
 	AgentConnect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentEnvelope, GatewayEnvelope], error)
+	AgentTerminalConnect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TerminalStreamFrame, TerminalStreamFrame], error)
 	Authenticate(ctx context.Context, in *AuthRequest, opts ...grpc.CallOption) (*AuthResponse, error)
 }
 
@@ -52,6 +54,19 @@ func (c *agentGatewayClient) AgentConnect(ctx context.Context, opts ...grpc.Call
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentGateway_AgentConnectClient = grpc.BidiStreamingClient[AgentEnvelope, GatewayEnvelope]
 
+func (c *agentGatewayClient) AgentTerminalConnect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TerminalStreamFrame, TerminalStreamFrame], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &AgentGateway_ServiceDesc.Streams[1], AgentGateway_AgentTerminalConnect_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[TerminalStreamFrame, TerminalStreamFrame]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentGateway_AgentTerminalConnectClient = grpc.BidiStreamingClient[TerminalStreamFrame, TerminalStreamFrame]
+
 func (c *agentGatewayClient) Authenticate(ctx context.Context, in *AuthRequest, opts ...grpc.CallOption) (*AuthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AuthResponse)
@@ -67,6 +82,7 @@ func (c *agentGatewayClient) Authenticate(ctx context.Context, in *AuthRequest, 
 // for forward compatibility.
 type AgentGatewayServer interface {
 	AgentConnect(grpc.BidiStreamingServer[AgentEnvelope, GatewayEnvelope]) error
+	AgentTerminalConnect(grpc.BidiStreamingServer[TerminalStreamFrame, TerminalStreamFrame]) error
 	Authenticate(context.Context, *AuthRequest) (*AuthResponse, error)
 	mustEmbedUnimplementedAgentGatewayServer()
 }
@@ -80,6 +96,9 @@ type UnimplementedAgentGatewayServer struct{}
 
 func (UnimplementedAgentGatewayServer) AgentConnect(grpc.BidiStreamingServer[AgentEnvelope, GatewayEnvelope]) error {
 	return status.Errorf(codes.Unimplemented, "method AgentConnect not implemented")
+}
+func (UnimplementedAgentGatewayServer) AgentTerminalConnect(grpc.BidiStreamingServer[TerminalStreamFrame, TerminalStreamFrame]) error {
+	return status.Errorf(codes.Unimplemented, "method AgentTerminalConnect not implemented")
 }
 func (UnimplementedAgentGatewayServer) Authenticate(context.Context, *AuthRequest) (*AuthResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Authenticate not implemented")
@@ -111,6 +130,13 @@ func _AgentGateway_AgentConnect_Handler(srv interface{}, stream grpc.ServerStrea
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentGateway_AgentConnectServer = grpc.BidiStreamingServer[AgentEnvelope, GatewayEnvelope]
+
+func _AgentGateway_AgentTerminalConnect_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(AgentGatewayServer).AgentTerminalConnect(&grpc.GenericServerStream[TerminalStreamFrame, TerminalStreamFrame]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentGateway_AgentTerminalConnectServer = grpc.BidiStreamingServer[TerminalStreamFrame, TerminalStreamFrame]
 
 func _AgentGateway_Authenticate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AuthRequest)
@@ -146,6 +172,12 @@ var AgentGateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "AgentConnect",
 			Handler:       _AgentGateway_AgentConnect_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "AgentTerminalConnect",
+			Handler:       _AgentGateway_AgentTerminalConnect_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},

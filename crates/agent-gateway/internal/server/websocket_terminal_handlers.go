@@ -71,9 +71,6 @@ func (c *websocketConnection) handleTerminalRequest(req websocketRequest) {
 		return
 	}
 	projectPathKey := strings.TrimSpace(body.ProjectPathKey)
-	if action == "attach" || action == "snapshot" {
-		c.rememberTerminalSession(body.SessionID, projectPathKey)
-	}
 
 	response, err := c.awaitAgentResponse(req.ID, &gatewayv1.GatewayEnvelope{
 		RequestId: req.ID,
@@ -200,8 +197,6 @@ func (c *websocketConnection) rememberTerminalInterest(action string, body webso
 	switch action {
 	case "list", "create", "create_ssh", "answer_ssh_prompt", "close_project":
 		c.rememberTerminalProject(projectPathKey)
-	case "attach", "snapshot":
-		c.rememberTerminalSession(sessionID, projectPathKey)
 	}
 }
 
@@ -214,7 +209,7 @@ func (c *websocketConnection) terminalRequestAllowed(action string, body websock
 		return c.sm.WebTerminalEnabled() || c.sm.WebSshTerminalEnabled()
 	case "close_project":
 		return c.sm.WebTerminalEnabled() || c.sm.WebSshTerminalEnabled()
-	case "attach", "snapshot", "input", "resize", "rename", "close", "detach":
+	case "rename", "close":
 		if c.sm.TerminalSessionKind(body.SessionID) == "ssh" {
 			return c.sm.WebSshTerminalEnabled()
 		}
@@ -232,18 +227,4 @@ func terminalPermissionError(action string) string {
 	default:
 		return "web terminal is disabled in desktop Remote settings"
 	}
-}
-
-func (c *websocketConnection) handleTerminalDetach(req websocketRequest) {
-	var body websocketTerminalRequestPayload
-	if err := decodeWebSocketPayload(req.Payload, &body); err != nil {
-		_ = c.writeError(req.ID, "invalid terminal.detach payload")
-		return
-	}
-	if !c.terminalRequestAllowed("detach", body) {
-		_ = c.writeError(req.ID, terminalPermissionError("detach"))
-		return
-	}
-	c.forgetTerminalInterest(body.SessionID, body.ProjectPathKey)
-	_ = c.writeResponse(req.ID, map[string]any{"action": "detach"})
 }

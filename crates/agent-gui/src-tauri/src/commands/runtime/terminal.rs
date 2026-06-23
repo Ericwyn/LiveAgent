@@ -7,7 +7,7 @@ use crate::runtime::terminal::{
     terminal_shell_options as runtime_terminal_shell_options, SshTerminalTabsSnapshot,
     TerminalListResponse, TerminalReadTailResponse, TerminalSessionRecord, TerminalSessionRegistry,
     TerminalShellOptionsResponse, TerminalSnapshotResponse, TerminalSshCreateResponse,
-    TerminalSshExecResponse, TerminalSshLatencyResponse,
+    TerminalSshExecResponse, TerminalSshLatencyResponse, TerminalStreamSnapshotResponse,
 };
 
 #[tauri::command(rename_all = "snake_case")]
@@ -134,31 +134,31 @@ pub fn ssh_terminal_tab_close(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn terminal_snapshot(
+pub fn terminal_stream_attach(
     registry: State<'_, Arc<TerminalSessionRegistry>>,
     session_id: String,
     max_bytes: Option<usize>,
-) -> Result<TerminalSnapshotResponse, String> {
-    registry.snapshot(session_id, max_bytes)
+) -> Result<TerminalStreamSnapshotResponse, String> {
+    registry.stream_attach(session_id, max_bytes)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn terminal_input(
+pub fn terminal_stream_input(
     registry: State<'_, Arc<TerminalSessionRegistry>>,
     session_id: String,
-    data: String,
-) -> Result<TerminalSessionRecord, String> {
-    registry.input(session_id, data)
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    registry.input_bytes(session_id, bytes)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn terminal_resize(
+pub fn terminal_stream_resize(
     registry: State<'_, Arc<TerminalSessionRegistry>>,
     session_id: String,
     cols: u16,
     rows: u16,
-) -> Result<TerminalSessionRecord, String> {
-    registry.resize(session_id, cols, rows)
+) -> Result<(), String> {
+    registry.stream_resize(session_id, cols, rows)
 }
 
 #[tauri::command(rename_all = "snake_case")]

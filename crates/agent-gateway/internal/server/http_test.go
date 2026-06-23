@@ -99,6 +99,53 @@ func TestWebSocketRejectsForeignOrigin(t *testing.T) {
 	}
 }
 
+func TestNewHTTPServerRoutesTerminalStreamWebSocket(t *testing.T) {
+	ts := httptest.NewServer(NewHTTPServer(&config.Config{Token: "dev-token"}, session.NewManager()))
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws/terminal"
+	assertTerminalStreamWebSocketReady(t, wsURL, ts.URL)
+}
+
+func TestNewHTTPServerRoutesTerminalStreamWebSocketFallback(t *testing.T) {
+	ts := httptest.NewServer(NewHTTPServer(&config.Config{Token: "dev-token"}, session.NewManager()))
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?terminal=1"
+	assertTerminalStreamWebSocketReady(t, wsURL, ts.URL)
+}
+
+func assertTerminalStreamWebSocketReady(t *testing.T, wsURL string, origin string) {
+	t.Helper()
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{
+		"Origin": []string{origin},
+	})
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("terminal stream websocket status = %d, err = %v", resp.StatusCode, err)
+		}
+		t.Fatalf("dial terminal stream websocket: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set terminal stream auth write deadline: %v", err)
+	}
+	if err := conn.WriteJSON(map[string]any{"type": "auth", "token": "dev-token"}); err != nil {
+		t.Fatalf("write terminal stream auth: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set terminal stream auth read deadline: %v", err)
+	}
+	var authResp map[string]any
+	if err := conn.ReadJSON(&authResp); err != nil {
+		t.Fatalf("read terminal stream auth response: %v", err)
+	}
+	if authResp["type"] != "ready" {
+		t.Fatalf("terminal stream auth response = %#v, want ready", authResp)
+	}
+}
+
 func TestPublicHistoryShareResolvesWithoutAuthorization(t *testing.T) {
 	sm := session.NewManager()
 	sm.RecordAuthentication("desktop-agent", "0.9.0", "session-1")

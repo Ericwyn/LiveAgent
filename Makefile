@@ -27,6 +27,7 @@ DESKTOP_RELEASE_TAURI_CONFIG_FLAGS ?= --config $(DESKTOP_RELEASE_TAURI_CONFIG) $
 DEV_GATEWAY_TOKEN ?= dev-token
 DEV_GATEWAY_HTTP_ADDR ?= :8080
 DEV_GATEWAY_GRPC_ADDR ?= :50051
+DEV_WEBUI_PROXY_API ?= http://localhost:8080
 GATEWAY_DOCKER_IMAGE ?= liveagent-gateway:local
 RELEASE_TAG ?=
 
@@ -111,7 +112,7 @@ dev-gateway:
 	go -C $(AGENT_GATEWAY_DIR) run ./cmd/gateway --token=$(DEV_GATEWAY_TOKEN) --http-addr=$(DEV_GATEWAY_HTTP_ADDR) --grpc-addr=$(DEV_GATEWAY_GRPC_ADDR)
 
 dev-webui:
-	pnpm --dir $(AGENT_GATEWAY_WEB_DIR) dev -- --proxy-api=http://localhost:8080
+	npm_config_proxy_api=$(DEV_WEBUI_PROXY_API) pnpm --dir $(AGENT_GATEWAY_WEB_DIR) dev
 
 ## Gateway build and generated assets
 proto:

@@ -1,6 +1,7 @@
 package websocket_test
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"net"
@@ -15,6 +16,21 @@ import (
 	"github.com/liveagent/agent-gateway/internal/server"
 	"github.com/liveagent/agent-gateway/internal/session"
 )
+
+type terminalStreamHeader struct {
+	Kind           string         `json:"kind,omitempty"`
+	StreamID       string         `json:"streamId,omitempty"`
+	SessionID      string         `json:"sessionId,omitempty"`
+	ProjectPathKey string         `json:"projectPathKey,omitempty"`
+	StartOffset    uint64         `json:"startOffset,omitempty"`
+	EndOffset      uint64         `json:"endOffset,omitempty"`
+	Cols           uint32         `json:"cols,omitempty"`
+	Rows           uint32         `json:"rows,omitempty"`
+	MaxBytes       uint32         `json:"maxBytes,omitempty"`
+	Truncated      bool           `json:"truncated,omitempty"`
+	Error          string         `json:"error,omitempty"`
+	Session        map[string]any `json:"session,omitempty"`
+}
 
 func receiveNoTerminalEnvelope(t *testing.T, _ *websocket.Conn) {
 	t.Helper()
@@ -51,6 +67,116 @@ func assertTerminalEventKind(t *testing.T, env wsEnvelope, wantKind string) {
 	}
 	if payload.Kind != wantKind {
 		t.Fatalf("terminal event kind = %q data = %q, want %q", payload.Kind, payload.Data, wantKind)
+	}
+}
+
+func encodeTerminalStreamTestFrame(t *testing.T, header terminalStreamHeader, data []byte) []byte {
+	t.Helper()
+	header.Kind = strings.TrimSpace(header.Kind)
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		t.Fatalf("encode terminal stream header: %v", err)
+	}
+	payload := make([]byte, 4+len(headerBytes)+len(data))
+	payload[0] = 1
+	payload[1] = 1
+	binary.BigEndian.PutUint16(payload[2:4], uint16(len(headerBytes)))
+	copy(payload[4:], headerBytes)
+	copy(payload[4+len(headerBytes):], data)
+	return payload
+}
+
+func decodeTerminalStreamTestFrame(t *testing.T, payload []byte) (terminalStreamHeader, []byte) {
+	t.Helper()
+	if len(payload) < 4 || payload[0] != 1 {
+		t.Fatalf("invalid terminal stream payload: %#v", payload)
+	}
+	headerLen := int(binary.BigEndian.Uint16(payload[2:4]))
+	if len(payload) < 4+headerLen {
+		t.Fatalf("truncated terminal stream payload: %#v", payload)
+	}
+	var header terminalStreamHeader
+	if err := json.Unmarshal(payload[4:4+headerLen], &header); err != nil {
+		t.Fatalf("decode terminal stream header: %v", err)
+	}
+	return header, payload[4+headerLen:]
+}
+
+func dialTerminalStreamWebSocket(t *testing.T, sm *session.Manager) (*websocket.Conn, func()) {
+	t.Helper()
+	handler := server.NewTerminalWebSocketServer(&config.Config{
+		Token:                 "ws-token",
+		RequestTimeout:        time.Second,
+		WebSocketWriteTimeout: time.Second,
+	}, sm)
+	conn, cleanup := dialGatewayWebSocket(t, handler)
+	if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set terminal stream auth deadline: %v", err)
+	}
+	if err := conn.WriteJSON(map[string]any{"type": "auth", "token": "ws-token"}); err != nil {
+		t.Fatalf("send terminal stream auth: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set terminal stream auth read deadline: %v", err)
+	}
+	var authResp map[string]any
+	if err := conn.ReadJSON(&authResp); err != nil {
+		t.Fatalf("read terminal stream auth response: %v", err)
+	}
+	if authResp["type"] != "ready" {
+		t.Fatalf("terminal stream auth response = %#v", authResp)
+	}
+	return conn, cleanup
+}
+
+func sendTerminalStreamFrame(t *testing.T, conn *websocket.Conn, header terminalStreamHeader, data []byte) {
+	t.Helper()
+	if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set terminal stream write deadline: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, encodeTerminalStreamTestFrame(t, header, data)); err != nil {
+		t.Fatalf("send terminal stream frame: %v", err)
+	}
+}
+
+func receiveTerminalStreamFrame(t *testing.T, conn *websocket.Conn) (terminalStreamHeader, []byte) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set terminal stream read deadline: %v", err)
+	}
+	messageType, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read terminal stream frame: %v", err)
+	}
+	if messageType != websocket.BinaryMessage {
+		t.Fatalf("terminal stream message type = %d, want binary", messageType)
+	}
+	return decodeTerminalStreamTestFrame(t, payload)
+}
+
+func receiveNoTerminalStreamFrame(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		t.Fatalf("set terminal stream short deadline: %v", err)
+	}
+	_, _, err := conn.ReadMessage()
+	if err == nil {
+		t.Fatal("unexpected terminal stream frame")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("terminal stream read returned %v, want timeout", err)
+	}
+}
+
+func readTerminalStreamOutbound(t *testing.T, ch <-chan *gatewayv1.TerminalStreamFrame) *gatewayv1.TerminalStreamFrame {
+	t.Helper()
+	select {
+	case frame := <-ch:
+		return frame
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for terminal stream frame to reach agent")
+		return nil
 	}
 }
 
@@ -181,21 +307,7 @@ func TestWebSocketSshTerminalPermissionIsIndependentFromLocalTerminal(t *testing
 		t.Fatalf("create_ssh ssh metadata = %#v", createPayload.Session["ssh"])
 	}
 
-	sendEnvelope(t, conn, "terminal-input-ssh-enabled", "terminal.input", map[string]any{
-		"session_id":       " ssh-1 ",
-		"project_path_key": " /workspace/project ",
-		"data":             "pwd\n",
-	})
-	inputOutbound := readOutboundEnvelope(t, agentSession)
-	inputReq := inputOutbound.GetTerminalRequest()
-	if inputReq == nil {
-		t.Fatalf("ssh terminal input outbound payload = %T, want TerminalRequest", inputOutbound.GetPayload())
-	}
-	if inputReq.GetAction() != "input" ||
-		inputReq.GetSessionId() != "ssh-1" ||
-		inputReq.GetData() != "pwd\n" {
-		t.Fatalf("ssh terminal input request = %#v", inputReq)
-	}
+	_ = agentSession
 }
 
 func TestWebSocketSshTerminalCreateRejectedWithoutSshPermission(t *testing.T) {
@@ -619,7 +731,7 @@ func TestWebSocketTerminalReplaysCachedSessionsAfterAuth(t *testing.T) {
 	}
 }
 
-func TestWebSocketTerminalForwardsInteractiveRequestsWhenEnabled(t *testing.T) {
+func TestWebSocketTerminalForwardsControlRequestsWhenEnabled(t *testing.T) {
 	t.Parallel()
 
 	sm, agentSession, conn, cleanup := newTerminalWebSocketTest(t, true)
@@ -682,79 +794,17 @@ func TestWebSocketTerminalForwardsInteractiveRequestsWhenEnabled(t *testing.T) {
 		t.Fatalf("terminal create payload = %#v", payload)
 	}
 
-	sendEnvelope(t, conn, "terminal-input-enabled", "terminal.input", map[string]any{
-		"session_id":       " terminal-1 ",
-		"project_path_key": " /workspace/project ",
-		"data":             "pwd\n",
-	})
-	inputOutbound := readOutboundEnvelope(t, agentSession)
-	inputReq := inputOutbound.GetTerminalRequest()
-	if inputReq == nil {
-		t.Fatalf("terminal input outbound payload = %T, want TerminalRequest", inputOutbound.GetPayload())
-	}
-	if inputReq.GetAction() != "input" ||
-		inputReq.GetSessionId() != "terminal-1" ||
-		inputReq.GetProjectPathKey() != "/workspace/project" ||
-		inputReq.GetData() != "pwd\n" {
-		t.Fatalf("terminal input request = %#v", inputReq)
-	}
-
-	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
-		RequestId: inputOutbound.GetRequestId(),
-		Timestamp: time.Now().Unix(),
-		Payload: &gatewayv1.AgentEnvelope_TerminalResponse{
-			TerminalResponse: &gatewayv1.TerminalResponse{
-				Action: "input",
-				Session: &gatewayv1.TerminalSession{
-					Id:             "terminal-1",
-					ProjectPathKey: "/workspace/project",
-					Cwd:            "/workspace/project",
-					Shell:          "zsh",
-					Title:          "Dev",
-					Cols:           120,
-					Rows:           32,
-					CreatedAt:      1,
-					UpdatedAt:      3,
-					Running:        true,
-				},
-			},
-		},
-	})
-	inputResponse := receiveEnvelope(t, conn)
-	if inputResponse.ID != "terminal-input-enabled" || inputResponse.Type != "response" {
-		t.Fatalf("terminal input response = %#v", inputResponse)
-	}
+	_ = sm
 }
 
-func TestWebSocketTerminalEventsForwardMetadataAndRequireAttachForOutput(t *testing.T) {
+func TestWebSocketTerminalEventsForwardMetadataOnly(t *testing.T) {
 	t.Parallel()
 
-	sm, agentSession, conn, cleanup := newTerminalWebSocketTest(t, true)
+	sm, _, conn, cleanup := newTerminalWebSocketTest(t, true)
 	defer cleanup()
 
 	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
-		RequestId: "event-unsubscribed",
-		Timestamp: time.Now().Unix(),
-		Payload: &gatewayv1.AgentEnvelope_TerminalEvent{
-			TerminalEvent: &gatewayv1.TerminalEvent{
-				Kind:           "output",
-				SessionId:      "terminal-1",
-				ProjectPathKey: "/workspace/project",
-				Session: &gatewayv1.TerminalSession{
-					Id:             "terminal-1",
-					ProjectPathKey: "/workspace/project",
-					Cwd:            "/workspace/project",
-					Title:          "Terminal 1",
-					Running:        true,
-				},
-				Data: "secret\n",
-			},
-		},
-	})
-	receiveNoTerminalEnvelope(t, conn)
-
-	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
-		RequestId: "event-unsubscribed-created",
+		RequestId: "event-created",
 		Timestamp: time.Now().Unix(),
 		Payload: &gatewayv1.AgentEnvelope_TerminalEvent{
 			TerminalEvent: &gatewayv1.TerminalEvent{
@@ -774,177 +824,166 @@ func TestWebSocketTerminalEventsForwardMetadataAndRequireAttachForOutput(t *test
 	createdEvent := receiveEnvelope(t, conn)
 	assertTerminalEventKind(t, createdEvent, "created")
 
-	sendEnvelope(t, conn, "terminal-list-for-events", "terminal.list", map[string]any{
-		"project_path_key": "/workspace/project",
-	})
-	listOutbound := readOutboundEnvelope(t, agentSession)
 	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
-		RequestId: listOutbound.GetRequestId(),
-		Timestamp: time.Now().Unix(),
-		Payload: &gatewayv1.AgentEnvelope_TerminalResponse{
-			TerminalResponse: &gatewayv1.TerminalResponse{
-				Action: "list",
-			},
-		},
-	})
-	listResponse := receiveEnvelope(t, conn)
-	if listResponse.ID != "terminal-list-for-events" || listResponse.Type != "response" {
-		t.Fatalf("terminal list response = %#v", listResponse)
-	}
-
-	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
-		RequestId: "event-project-output",
+		RequestId: "event-output",
 		Timestamp: time.Now().Unix(),
 		Payload: &gatewayv1.AgentEnvelope_TerminalEvent{
 			TerminalEvent: &gatewayv1.TerminalEvent{
-				Kind:           "output",
-				SessionId:      "terminal-1",
-				ProjectPathKey: "/workspace/project",
-				Session: &gatewayv1.TerminalSession{
-					Id:             "terminal-1",
-					ProjectPathKey: "/workspace/project",
-					Cwd:            "/workspace/project",
-					Title:          "Terminal 1",
-					Running:        true,
-				},
-				Data: "still-hidden\n",
+				Kind:              "output",
+				SessionId:         "terminal-1",
+				ProjectPathKey:    "/workspace/project",
+				Data:              []byte("legacy-hidden\n"),
+				OutputStartOffset: 0,
+				OutputEndOffset:   14,
 			},
 		},
 	})
 	receiveNoTerminalEnvelope(t, conn)
+}
 
-	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
-		RequestId: "event-project-exit",
-		Timestamp: time.Now().Unix(),
-		Payload: &gatewayv1.AgentEnvelope_TerminalEvent{
-			TerminalEvent: &gatewayv1.TerminalEvent{
-				Kind:           "exit",
-				SessionId:      "terminal-1",
-				ProjectPathKey: "/workspace/project",
-				Session: &gatewayv1.TerminalSession{
-					Id:             "terminal-1",
-					ProjectPathKey: "/workspace/project",
-					Cwd:            "/workspace/project",
-					Title:          "Terminal 1",
-					Running:        false,
-				},
-			},
-		},
-	})
-	exitEvent := receiveEnvelope(t, conn)
-	assertTerminalEventKind(t, exitEvent, "exit")
+func TestTerminalStreamWebSocketForwardsBinaryFrames(t *testing.T) {
+	t.Parallel()
 
-	sendEnvelope(t, conn, "terminal-attach-for-output", "terminal.attach", map[string]any{
-		"session_id":       "terminal-1",
-		"project_path_key": "/workspace/project",
-	})
-	attachOutbound := readOutboundEnvelope(t, agentSession)
-	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
-		RequestId: "event-attach-pending-output",
-		Timestamp: time.Now().Unix(),
-		Payload: &gatewayv1.AgentEnvelope_TerminalEvent{
-			TerminalEvent: &gatewayv1.TerminalEvent{
-				Kind:           "output",
-				SessionId:      "terminal-1",
-				ProjectPathKey: "/workspace/project",
-				Session: &gatewayv1.TerminalSession{
-					Id:             "terminal-1",
-					ProjectPathKey: "/workspace/project",
-					Cwd:            "/workspace/project",
-					Title:          "Terminal 1",
-					Running:        true,
-				},
-				Data:              "visible-before-attach-response\n",
-				OutputStartOffset: 10,
-				OutputEndOffset:   41,
-			},
-		},
-	})
-	pendingOutputEvent := receiveEnvelope(t, conn)
-	assertTerminalEventKind(t, pendingOutputEvent, "output")
-	var pendingOutputPayload struct {
-		Data              string `json:"data"`
-		OutputStartOffset uint64 `json:"output_start_offset"`
-		OutputEndOffset   uint64 `json:"output_end_offset"`
-	}
-	if err := json.Unmarshal(pendingOutputEvent.Payload, &pendingOutputPayload); err != nil {
-		t.Fatalf("decode terminal attach-pending output event: %v", err)
-	}
-	if pendingOutputPayload.Data != "visible-before-attach-response\n" ||
-		pendingOutputPayload.OutputStartOffset != 10 ||
-		pendingOutputPayload.OutputEndOffset != 41 {
-		t.Fatalf("terminal attach-pending output payload = %#v", pendingOutputPayload)
-	}
-	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
-		RequestId: attachOutbound.GetRequestId(),
-		Timestamp: time.Now().Unix(),
-		Payload: &gatewayv1.AgentEnvelope_TerminalResponse{
-			TerminalResponse: &gatewayv1.TerminalResponse{
-				Action: "attach",
-				Session: &gatewayv1.TerminalSession{
-					Id:             "terminal-1",
-					ProjectPathKey: "/workspace/project",
-					Cwd:            "/workspace/project",
-					Title:          "Terminal 1",
-					Running:        true,
-				},
-			},
-		},
-	})
-	attachResponse := receiveEnvelope(t, conn)
-	if attachResponse.ID != "terminal-attach-for-output" || attachResponse.Type != "response" {
-		t.Fatalf("terminal attach response = %#v", attachResponse)
+	sm := session.NewManager()
+	sm.ApplySettingsJSON(`{"remote":{"enableWebTerminal":true}}`)
+	toAgent := make(chan *gatewayv1.TerminalStreamFrame, 16)
+	cleanupAgent := sm.RegisterTerminalStreamToAgent(toAgent)
+	defer cleanupAgent()
+
+	conn, cleanup := dialTerminalStreamWebSocket(t, sm)
+	defer cleanup()
+
+	sendTerminalStreamFrame(t, conn, terminalStreamHeader{
+		Kind:           "attach",
+		StreamID:       "stream-1",
+		SessionID:      "terminal-1",
+		ProjectPathKey: "/workspace/project",
+		MaxBytes:       4096,
+	}, nil)
+	attach := readTerminalStreamOutbound(t, toAgent)
+	if attach.GetKind() != "attach" ||
+		attach.GetStreamId() != "stream-1" ||
+		attach.GetSessionId() != "terminal-1" ||
+		attach.GetProjectPathKey() != "/workspace/project" ||
+		attach.GetMaxBytes() != 4096 {
+		t.Fatalf("attach frame = %#v", attach)
 	}
 
-	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
-		RequestId: "event-attached-output",
-		Timestamp: time.Now().Unix(),
-		Payload: &gatewayv1.AgentEnvelope_TerminalEvent{
-			TerminalEvent: &gatewayv1.TerminalEvent{
-				Kind:           "output",
-				SessionId:      "terminal-1",
-				ProjectPathKey: "/workspace/project",
-				Session: &gatewayv1.TerminalSession{
-					Id:             "terminal-1",
-					ProjectPathKey: "/workspace/project",
-					Cwd:            "/workspace/project",
-					Title:          "Terminal 1",
-					Running:        true,
-				},
-				Data: "visible\n",
-			},
+	sm.BroadcastTerminalStreamFrame(&gatewayv1.TerminalStreamFrame{
+		Kind:           "snapshot",
+		StreamId:       "stream-1",
+		SessionId:      "terminal-1",
+		ProjectPathKey: "/workspace/project",
+		StartOffset:    7,
+		EndOffset:      13,
+		Data:           []byte("ready\n"),
+		Session: &gatewayv1.TerminalSession{
+			Id:             "terminal-1",
+			ProjectPathKey: "/workspace/project",
+			Cwd:            "/workspace/project",
+			Title:          "Terminal 1",
+			Running:        true,
 		},
 	})
-	outputEvent := receiveEnvelope(t, conn)
-	assertTerminalEventKind(t, outputEvent, "output")
-
-	sendEnvelope(t, conn, "terminal-detach-for-output", "terminal.detach", map[string]any{
-		"session_id":       "terminal-1",
-		"project_path_key": "/workspace/project",
-	})
-	detachResponse := receiveEnvelope(t, conn)
-	if detachResponse.ID != "terminal-detach-for-output" || detachResponse.Type != "response" {
-		t.Fatalf("terminal detach response = %#v", detachResponse)
+	snapshotHeader, snapshotData := receiveTerminalStreamFrame(t, conn)
+	if snapshotHeader.Kind != "snapshot" ||
+		snapshotHeader.StreamID != "stream-1" ||
+		snapshotHeader.StartOffset != 7 ||
+		snapshotHeader.EndOffset != 13 ||
+		string(snapshotData) != "ready\n" ||
+		snapshotHeader.Session["id"] != "terminal-1" {
+		t.Fatalf("snapshot frame header=%#v data=%q", snapshotHeader, string(snapshotData))
 	}
 
-	sm.DispatchFromAgent(&gatewayv1.AgentEnvelope{
-		RequestId: "event-detached-output",
-		Timestamp: time.Now().Unix(),
-		Payload: &gatewayv1.AgentEnvelope_TerminalEvent{
-			TerminalEvent: &gatewayv1.TerminalEvent{
-				Kind:           "output",
-				SessionId:      "terminal-1",
-				ProjectPathKey: "/workspace/project",
-				Session: &gatewayv1.TerminalSession{
-					Id:             "terminal-1",
-					ProjectPathKey: "/workspace/project",
-					Cwd:            "/workspace/project",
-					Title:          "Terminal 1",
-					Running:        true,
-				},
-				Data: "hidden-again\n",
-			},
-		},
+	sendTerminalStreamFrame(t, conn, terminalStreamHeader{
+		Kind:           "input",
+		StreamID:       "stream-1",
+		SessionID:      "terminal-1",
+		ProjectPathKey: "/workspace/project",
+	}, []byte("pwd\n"))
+	input := readTerminalStreamOutbound(t, toAgent)
+	if input.GetKind() != "input" || string(input.GetData()) != "pwd\n" {
+		t.Fatalf("input frame = %#v data=%q", input, string(input.GetData()))
+	}
+
+	sendTerminalStreamFrame(t, conn, terminalStreamHeader{
+		Kind:           "resize",
+		StreamID:       "stream-1",
+		SessionID:      "terminal-1",
+		ProjectPathKey: "/workspace/project",
+		Cols:           132,
+		Rows:           40,
+	}, nil)
+	resize := readTerminalStreamOutbound(t, toAgent)
+	if resize.GetKind() != "resize" || resize.GetCols() != 132 || resize.GetRows() != 40 {
+		t.Fatalf("resize frame = %#v", resize)
+	}
+}
+
+func TestTerminalStreamWebSocketOutputRequiresAttach(t *testing.T) {
+	t.Parallel()
+
+	sm := session.NewManager()
+	sm.ApplySettingsJSON(`{"remote":{"enableWebTerminal":true}}`)
+	toAgent := make(chan *gatewayv1.TerminalStreamFrame, 16)
+	cleanupAgent := sm.RegisterTerminalStreamToAgent(toAgent)
+	defer cleanupAgent()
+
+	conn, cleanup := dialTerminalStreamWebSocket(t, sm)
+	defer cleanup()
+
+	sm.BroadcastTerminalStreamFrame(&gatewayv1.TerminalStreamFrame{
+		Kind:           "output",
+		SessionId:      "terminal-1",
+		ProjectPathKey: "/workspace/project",
+		StartOffset:    0,
+		EndOffset:      7,
+		Data:           []byte("hidden\n"),
 	})
-	assertNoTerminalEnvelopeAtEnd(t, conn)
+
+	sendTerminalStreamFrame(t, conn, terminalStreamHeader{
+		Kind:           "attach",
+		StreamID:       "stream-1",
+		SessionID:      "terminal-1",
+		ProjectPathKey: "/workspace/project",
+	}, nil)
+	_ = readTerminalStreamOutbound(t, toAgent)
+
+	sm.BroadcastTerminalStreamFrame(&gatewayv1.TerminalStreamFrame{
+		Kind:           "output",
+		SessionId:      "terminal-1",
+		ProjectPathKey: "/workspace/project",
+		StartOffset:    7,
+		EndOffset:      15,
+		Data:           []byte("visible\n"),
+	})
+	outputHeader, outputData := receiveTerminalStreamFrame(t, conn)
+	if outputHeader.Kind != "output" ||
+		outputHeader.SessionID != "terminal-1" ||
+		outputHeader.StartOffset != 7 ||
+		outputHeader.EndOffset != 15 ||
+		string(outputData) != "visible\n" {
+		t.Fatalf("output frame header=%#v data=%q", outputHeader, string(outputData))
+	}
+
+	sendTerminalStreamFrame(t, conn, terminalStreamHeader{
+		Kind:           "detach",
+		StreamID:       "stream-1",
+		SessionID:      "terminal-1",
+		ProjectPathKey: "/workspace/project",
+	}, nil)
+	detach := readTerminalStreamOutbound(t, toAgent)
+	if detach.GetKind() != "detach" {
+		t.Fatalf("detach frame = %#v", detach)
+	}
+
+	sm.BroadcastTerminalStreamFrame(&gatewayv1.TerminalStreamFrame{
+		Kind:           "output",
+		SessionId:      "terminal-1",
+		ProjectPathKey: "/workspace/project",
+		StartOffset:    15,
+		EndOffset:      28,
+		Data:           []byte("hidden-again\n"),
+	})
+	receiveNoTerminalStreamFrame(t, conn)
 }

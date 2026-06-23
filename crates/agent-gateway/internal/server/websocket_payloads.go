@@ -293,12 +293,13 @@ func websocketTerminalResponsePayload(resp *gatewayv1.TerminalResponse) map[stri
 	payload := map[string]any{
 		"action":        strings.TrimSpace(resp.GetAction()),
 		"sessions":      sessions,
-		"output":        resp.GetOutput(),
+		"output":        string(resp.GetOutput()),
+		"output_bytes":  resp.GetOutput(),
 		"truncated":     resp.GetTruncated(),
 		"shell_options": shellOptions,
 		"default_shell": resp.GetDefaultShell(),
 	}
-	if resp.GetOutputStartOffset() != 0 || resp.GetOutputEndOffset() != 0 || resp.GetOutput() != "" {
+	if resp.GetOutputStartOffset() != 0 || resp.GetOutputEndOffset() != 0 || len(resp.GetOutput()) > 0 {
 		payload["output_start_offset"] = resp.GetOutputStartOffset()
 		payload["output_end_offset"] = resp.GetOutputEndOffset()
 	}
@@ -333,9 +334,12 @@ func websocketTerminalEventPayload(event *gatewayv1.TerminalEvent) map[string]an
 		"kind":             strings.TrimSpace(event.GetKind()),
 		"session_id":       strings.TrimSpace(event.GetSessionId()),
 		"project_path_key": strings.TrimSpace(event.GetProjectPathKey()),
-		"data":             event.GetData(),
 	}
-	if event.GetOutputStartOffset() != 0 || event.GetOutputEndOffset() != 0 || event.GetData() != "" {
+	if len(event.GetData()) > 0 {
+		payload["data"] = string(event.GetData())
+		payload["data_bytes"] = event.GetData()
+	}
+	if event.GetOutputStartOffset() != 0 || event.GetOutputEndOffset() != 0 || len(event.GetData()) > 0 {
 		payload["output_start_offset"] = event.GetOutputStartOffset()
 		payload["output_end_offset"] = event.GetOutputEndOffset()
 	}

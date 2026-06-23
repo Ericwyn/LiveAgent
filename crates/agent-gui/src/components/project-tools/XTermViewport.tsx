@@ -6,9 +6,11 @@ import { type CSSProperties, useEffect, useRef } from "react";
 import { cn } from "../../lib/shared/utils";
 import type {
   TerminalClient,
-  TerminalEvent,
   TerminalSession,
   TerminalSnapshot,
+  TerminalStreamChunk,
+  TerminalStreamHandle,
+  TerminalStreamInputState,
 } from "../../lib/terminal/types";
 
 type XTermViewportProps = {
@@ -22,11 +24,14 @@ type XTermViewportProps = {
   onInitialSnapshotConsumed?: (sessionId: string) => void;
 };
 
+const SNAPSHOT_ATTACH_RETRY_MIN_MS = 500;
+const SNAPSHOT_ATTACH_RETRY_MAX_MS = 5_000;
+
 function terminalTheme(theme: "light" | "dark") {
   if (theme === "dark") {
     return {
       background: "#0b0f14",
-      foreground: "#d6deeb",
+      foreground: "#4ade80",
       cursor: "#f8fafc",
       cursorAccent: "#0b0f14",
       selectionBackground: "#2c3e57",
@@ -142,12 +147,18 @@ export function XTermViewport({
     let snapshotLoaded = false;
     let loadingSnapshot = false;
     let lastOutputOffset = 0;
-    const bufferedEvents: TerminalEvent[] = [];
+    let streamHandle: TerminalStreamHandle | null = null;
+    let inputPausedByStream = false;
+    let inputBackpressureMessageActive = false;
+    let snapshotRetryTimer: number | null = null;
+    let snapshotRetryDelayMs = SNAPSHOT_ATTACH_RETRY_MIN_MS;
+    const bufferedChunks: TerminalStreamChunk[] = [];
+    const encoder = new TextEncoder();
     const term = new XTerm({
       cursorBlink: true,
       cursorStyle: "block",
       cursorInactiveStyle: "outline",
-      disableStdin: !sessionRef.current.running,
+      disableStdin: true,
       fontFamily:
         '"SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Code", Consolas, "Liberation Mono", monospace',
       fontSize: 13,
@@ -186,10 +197,7 @@ export function XTermViewport({
       if (!terminalContainerHasSize(container)) return;
       try {
         fit.fit();
-        const s = sessionRef.current;
-        void clientRef.current
-          .resize(s.id, term.cols, term.rows, s.projectPathKey)
-          .catch(() => undefined);
+        streamHandle?.resize(term.cols, term.rows);
       } catch {
         // xterm fit can throw while the panel is hidden or measuring at zero size.
       }
@@ -205,12 +213,33 @@ export function XTermViewport({
     resizeObserver.observe(container);
     window.setTimeout(fitAndResize, 0);
 
+    const applyStdinState = () => {
+      term.options.disableStdin = !sessionRef.current.running || inputPausedByStream;
+    };
+
+    const applyInputState = (state: TerminalStreamInputState) => {
+      inputPausedByStream = state.paused;
+      applyStdinState();
+      if (state.paused) {
+        inputBackpressureMessageActive = true;
+        onErrorRef.current(terminalInputPausedMessage(state));
+      } else if (inputBackpressureMessageActive) {
+        inputBackpressureMessageActive = false;
+        onErrorRef.current(null);
+      }
+    };
+
     const dataDisposable = term.onData((data) => {
-      const s = sessionRef.current;
-      if (!s.running) return;
-      void clientRef.current.input(s.id, data, s.projectPathKey).catch((error) => {
-        onErrorRef.current(error instanceof Error ? error.message : String(error));
-      });
+      if (!streamHandle || term.options.disableStdin) return;
+      const accepted = streamHandle.write(encoder.encode(data));
+      if (!accepted && !inputPausedByStream) {
+        applyInputState({
+          paused: true,
+          queuedBytes: 0,
+          highWaterBytes: 256 * 1024,
+          reason: "slow",
+        });
+      }
     });
 
     const getTouchScrollRowHeight = () =>
@@ -286,24 +315,30 @@ export function XTermViewport({
     container.addEventListener("touchend", handleTouchEnd);
     container.addEventListener("touchcancel", handleTouchCancel);
 
+    const snapshotBytes = (snapshot: TerminalSnapshot) => {
+      if (snapshot.outputBytes) return snapshot.outputBytes;
+      return encoder.encode(snapshot.output);
+    };
+
     const applySnapshot = (snapshot: TerminalSnapshot) => {
-      if (snapshot.output) {
-        term.write(snapshot.output);
+      const bytes = snapshotBytes(snapshot);
+      if (bytes.byteLength > 0) {
+        term.write(bytes);
       }
       lastOutputOffset = terminalSnapshotEndOffset(snapshot);
       snapshotLoaded = true;
       loadingSnapshot = false;
-      term.options.disableStdin = !snapshot.session.running;
-      replayBufferedEvents();
+      applyStdinState();
+      replayBufferedChunks();
       window.setTimeout(fitAndResize, 0);
     };
 
-    const replayBufferedEvents = () => {
-      const events = bufferedEvents.splice(0);
-      for (const event of events) {
-        writeTerminalEvent(
+    const replayBufferedChunks = () => {
+      const chunks = bufferedChunks.splice(0);
+      for (const chunk of chunks) {
+        writeTerminalChunk(
           term,
-          event,
+          chunk,
           (nextOffset) => {
             lastOutputOffset = nextOffset;
           },
@@ -312,54 +347,96 @@ export function XTermViewport({
       }
     };
 
+    const clearSnapshotRetryTimer = () => {
+      if (snapshotRetryTimer !== null) {
+        window.clearTimeout(snapshotRetryTimer);
+        snapshotRetryTimer = null;
+      }
+    };
+
+    const scheduleSnapshotRetry = () => {
+      if (disposed || streamHandle || snapshotRetryTimer !== null) return;
+      const delay = snapshotRetryDelayMs;
+      snapshotRetryDelayMs = Math.min(
+        snapshotRetryDelayMs * 2,
+        SNAPSHOT_ATTACH_RETRY_MAX_MS,
+      );
+      snapshotRetryTimer = window.setTimeout(() => {
+        snapshotRetryTimer = null;
+        loadSnapshot();
+      }, delay);
+    };
+
     const loadSnapshot = () => {
       if (disposed || loadingSnapshot) return;
-      const initial = initialSnapshotRef.current;
-      if (initial?.session.id === sessionRef.current.id) {
-        initialSnapshotRef.current = undefined;
-        onInitialSnapshotConsumedRef.current?.(initial.session.id);
-        applySnapshot(initial);
-        return;
-      }
       loadingSnapshot = true;
       const s = sessionRef.current;
-      void clientRef.current
-        .snapshot(s.id, undefined, s.projectPathKey)
-        .then((snapshot) => {
-          if (disposed) return;
+      void clientRef.current.stream
+        .attach(s)
+        .then((handle) => {
+          if (disposed) {
+            handle.dispose();
+            return;
+          }
+          streamHandle = handle;
+          clearSnapshotRetryTimer();
+          snapshotRetryDelayMs = SNAPSHOT_ATTACH_RETRY_MIN_MS;
+          onErrorRef.current(null);
+          const unsubscribeOutput = handle.subscribeOutput((chunk) => {
+            if (disposed || chunk.sessionId !== sessionRef.current.id) return;
+            if (snapshotLoaded && !loadingSnapshot) {
+              writeTerminalChunk(
+                term,
+                chunk,
+                (nextOffset) => {
+                  lastOutputOffset = nextOffset;
+                },
+                lastOutputOffset,
+              );
+            } else {
+              bufferedChunks.push(chunk);
+            }
+          });
+          streamOutputUnsubscribe = unsubscribeOutput;
+          streamInputUnsubscribe = handle.subscribeInputState((state) => {
+            if (disposed) return;
+            applyInputState(state);
+          });
+          const snapshot: TerminalSnapshot = {
+            session: handle.snapshot.session,
+            output: "",
+            outputBytes: handle.snapshot.bytes,
+            truncated: handle.snapshot.truncated,
+            outputStartOffset: handle.snapshot.outputStartOffset,
+            outputEndOffset: handle.snapshot.outputEndOffset,
+          };
+          const initial = initialSnapshotRef.current;
+          if (initial?.session.id === sessionRef.current.id) {
+            initialSnapshotRef.current = undefined;
+            onInitialSnapshotConsumedRef.current?.(initial.session.id);
+          }
           applySnapshot(snapshot);
         })
         .catch((error) => {
           loadingSnapshot = false;
           if (!disposed) {
             onErrorRef.current(error instanceof Error ? error.message : String(error));
-            snapshotLoaded = true;
-            replayBufferedEvents();
+            snapshotLoaded = false;
+            applyStdinState();
+            scheduleSnapshotRetry();
           }
         });
     };
 
+    let streamOutputUnsubscribe: (() => void) | null = null;
+    let streamInputUnsubscribe: (() => void) | null = null;
     const unsubscribe = clientRef.current.subscribe((event) => {
       if (disposed || event.sessionId !== session.id) return;
-      if (event.kind === "output" && event.data) {
-        if (snapshotLoaded && !loadingSnapshot) {
-          writeTerminalEvent(
-            term,
-            event,
-            (nextOffset) => {
-              lastOutputOffset = nextOffset;
-            },
-            lastOutputOffset,
-          );
-        } else {
-          bufferedEvents.push(event);
-        }
-      }
       if (event.kind === "exit" || event.kind === "closed" || event.kind === "reconnecting") {
         term.options.disableStdin = true;
       }
       if (event.kind === "reconnected") {
-        term.options.disableStdin = false;
+        applyStdinState();
         window.setTimeout(fitAndResize, 0);
       }
     });
@@ -377,13 +454,15 @@ export function XTermViewport({
         window.clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;
       }
+      clearSnapshotRetryTimer();
       container.removeEventListener("pointerdown", handlePointerDown);
       container.removeEventListener("touchstart", handleTouchStart);
       container.removeEventListener("touchmove", handleTouchMove);
       container.removeEventListener("touchend", handleTouchEnd);
       container.removeEventListener("touchcancel", handleTouchCancel);
-      const s = sessionRef.current;
-      void clientRef.current.detach(s.id, s.projectPathKey).catch(() => undefined);
+      streamOutputUnsubscribe?.();
+      streamInputUnsubscribe?.();
+      streamHandle?.dispose();
       term.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -396,6 +475,16 @@ export function XTermViewport({
       className={cn("project-terminal-viewport h-full min-h-0 w-full overflow-hidden", className)}
     />
   );
+}
+
+function terminalInputPausedMessage(state: TerminalStreamInputState) {
+  if (state.reason === "offline") {
+    return "终端连接正在恢复，已暂停输入以避免过期按键。";
+  }
+  if (state.reason === "closed") {
+    return "终端输入已关闭。";
+  }
+  return "终端连接较慢，已暂停输入以避免输入队列过大。";
 }
 
 function terminalSnapshotEndOffset(snapshot: TerminalSnapshot) {
@@ -412,19 +501,19 @@ function terminalSnapshotEndOffset(snapshot: TerminalSnapshot) {
     snapshot.outputStartOffset >= 0
       ? snapshot.outputStartOffset
       : 0;
-  return startOffset + utf8ByteLength(snapshot.output);
+  return startOffset + (snapshot.outputBytes?.byteLength ?? new TextEncoder().encode(snapshot.output).byteLength);
 }
 
-function writeTerminalEvent(
+function writeTerminalChunk(
   term: XTerm,
-  event: TerminalEvent,
+  chunk: TerminalStreamChunk,
   setLastOutputOffset: (offset: number) => void,
   lastOutputOffset: number,
 ): "written" | "skipped" {
-  const data = event.data ?? "";
-  if (!data) return "skipped";
-  const startOffset = event.outputStartOffset;
-  const endOffset = event.outputEndOffset;
+  const data = chunk.bytes;
+  if (data.byteLength === 0) return "skipped";
+  const startOffset = chunk.startOffset;
+  const endOffset = chunk.endOffset;
   if (
     typeof startOffset === "number" &&
     Number.isFinite(startOffset) &&
@@ -434,46 +523,11 @@ function writeTerminalEvent(
   ) {
     if (endOffset <= lastOutputOffset) return "skipped";
     const alreadyWritten = Math.max(0, lastOutputOffset - startOffset);
-    term.write(alreadyWritten > 0 ? sliceUtf8Bytes(data, alreadyWritten) : data);
+    term.write(alreadyWritten > 0 ? data.subarray(alreadyWritten) : data);
     setLastOutputOffset(endOffset);
     return "written";
   }
   term.write(data);
-  setLastOutputOffset(lastOutputOffset + utf8ByteLength(data));
+  setLastOutputOffset(lastOutputOffset + data.byteLength);
   return "written";
-}
-
-function sliceUtf8Bytes(value: string, byteOffset: number) {
-  if (byteOffset <= 0) return value;
-  let consumed = 0;
-  let index = 0;
-  for (const segment of value) {
-    const next = consumed + utf8ByteLengthOfCodePoint(segment);
-    if (next <= byteOffset) {
-      consumed = next;
-      index += segment.length;
-      continue;
-    }
-    if (consumed < byteOffset) {
-      index += segment.length;
-    }
-    return value.slice(index);
-  }
-  return "";
-}
-
-function utf8ByteLength(value: string) {
-  let length = 0;
-  for (const segment of value) {
-    length += utf8ByteLengthOfCodePoint(segment);
-  }
-  return length;
-}
-
-function utf8ByteLengthOfCodePoint(value: string) {
-  const codePoint = value.codePointAt(0) ?? 0;
-  if (codePoint <= 0x7f) return 1;
-  if (codePoint <= 0x7ff) return 2;
-  if (codePoint <= 0xffff) return 3;
-  return 4;
 }

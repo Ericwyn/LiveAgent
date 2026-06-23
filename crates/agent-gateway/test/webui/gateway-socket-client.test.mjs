@@ -43,7 +43,7 @@ class FakeWebSocket {
   }
 
   send(raw) {
-    this.sent.push(JSON.parse(raw));
+    this.sent.push(typeof raw === "string" ? JSON.parse(raw) : raw);
   }
 
   open() {
@@ -53,6 +53,10 @@ class FakeWebSocket {
 
   receive(envelope) {
     this.onmessage?.({ data: JSON.stringify(envelope) });
+  }
+
+  receiveRaw(data) {
+    this.onmessage?.({ data });
   }
 
   close(event = {}) {
@@ -152,6 +156,34 @@ async function connectAndAuth(index = 0) {
   return socket;
 }
 
+function encodeTerminalStreamFrame(header, data = new Uint8Array()) {
+  const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+  const payload = new Uint8Array(4 + headerBytes.byteLength + data.byteLength);
+  payload[0] = 1;
+  payload[1] = { attach: 1, input: 2, resize: 3, detach: 4, output: 5, snapshot: 6, error: 7 }[
+    header.kind
+  ] ?? 0;
+  new DataView(payload.buffer).setUint16(2, headerBytes.byteLength, false);
+  payload.set(headerBytes, 4);
+  payload.set(data, 4 + headerBytes.byteLength);
+  return payload;
+}
+
+function decodeTerminalStreamFrame(payload) {
+  const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
+  assert.equal(bytes[0], 1);
+  const headerLength = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(
+    2,
+    false,
+  );
+  const headerStart = 4;
+  const headerEnd = headerStart + headerLength;
+  return {
+    header: JSON.parse(new TextDecoder().decode(bytes.subarray(headerStart, headerEnd))),
+    data: bytes.slice(headerEnd),
+  };
+}
+
 test("GatewayWebSocketClient authenticates once and sends status requests over /ws", async () => {
   installBrowser();
   const loader = createWebModuleLoader();
@@ -172,6 +204,177 @@ test("GatewayWebSocketClient authenticates once and sends status requests over /
   const status = await statusPromise;
   assert.deepEqual(status, { online: true, agent_id: "desktop-agent" });
   resetGatewayWebSocketClient();
+});
+
+test("BrowserGatewayTerminalStreamClient connects to /ws/terminal and attaches with binary frames", async () => {
+  installBrowser();
+  const loader = createWebModuleLoader();
+  const { BrowserGatewayTerminalStreamClient } = loader.loadModule(
+    "src/lib/terminal/gatewayTerminalStreamClient.ts",
+  );
+
+  const session = {
+    id: "terminal-1",
+    projectPathKey: "/workspace/project",
+    cwd: "/workspace/project",
+    shell: "zsh",
+    title: "Terminal 1",
+    kind: "local",
+    cols: 80,
+    rows: 24,
+    createdAt: 1,
+    updatedAt: 2,
+    running: true,
+  };
+  const client = new BrowserGatewayTerminalStreamClient("token");
+  const attachPromise = client.attach(session, { maxBytes: 8192 });
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+  await waitFor(() => socket.sent.length >= 1, "terminal stream auth");
+  assert.equal(socket.url, "wss://gateway.example/ws/terminal");
+  assert.deepEqual(socket.sent[0], { type: "auth", token: "token" });
+
+  socket.receive({ type: "ready" });
+  await waitFor(() => socket.sent.length >= 2, "terminal stream attach frame");
+  const attachFrame = decodeTerminalStreamFrame(socket.sent[1]);
+  assert.equal(attachFrame.header.kind, "attach");
+  assert.equal(attachFrame.header.sessionId, "terminal-1");
+  assert.equal(attachFrame.header.projectPathKey, "/workspace/project");
+  assert.equal(attachFrame.header.maxBytes, 8192);
+
+  socket.receiveRaw(
+    encodeTerminalStreamFrame(
+      {
+        kind: "snapshot",
+        streamId: attachFrame.header.streamId,
+        session,
+        startOffset: 10,
+        endOffset: 13,
+      },
+      new Uint8Array([112, 119, 100]),
+    ).buffer,
+  );
+  const handle = await attachPromise;
+  assert.equal(handle.snapshot.session.id, "terminal-1");
+  assert.deepEqual([...handle.snapshot.bytes], [112, 119, 100]);
+  assert.equal(handle.snapshot.outputStartOffset, 10);
+  handle.dispose();
+  client.dispose();
+});
+
+test("BrowserGatewayTerminalStreamClient retries attach while desktop stream is offline", async () => {
+  installBrowser();
+  const loader = createWebModuleLoader();
+  const { BrowserGatewayTerminalStreamClient } = loader.loadModule(
+    "src/lib/terminal/gatewayTerminalStreamClient.ts",
+  );
+
+  const session = {
+    id: "terminal-1",
+    projectPathKey: "/workspace/project",
+    cwd: "/workspace/project",
+    shell: "zsh",
+    title: "Terminal 1",
+    kind: "local",
+    cols: 80,
+    rows: 24,
+    createdAt: 1,
+    updatedAt: 2,
+    running: true,
+  };
+  const client = new BrowserGatewayTerminalStreamClient("token");
+  const attachPromise = client.attach(session);
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+  await waitFor(() => socket.sent.length >= 1, "terminal stream auth");
+  socket.receive({ type: "ready" });
+  await waitFor(() => socket.sent.length >= 2, "terminal stream attach frame");
+  const firstAttach = decodeTerminalStreamFrame(socket.sent[1]);
+
+  socket.receiveRaw(
+    encodeTerminalStreamFrame({
+      kind: "error",
+      streamId: firstAttach.header.streamId,
+      sessionId: "terminal-1",
+      error: "desktop agent is offline",
+    }).buffer,
+  );
+
+  await waitFor(() => socket.sent.length >= 3, "retry terminal stream attach frame");
+  const retryAttach = decodeTerminalStreamFrame(socket.sent[2]);
+  assert.equal(retryAttach.header.kind, "attach");
+  assert.equal(retryAttach.header.streamId, firstAttach.header.streamId);
+  assert.equal(retryAttach.header.sessionId, "terminal-1");
+
+  socket.receiveRaw(
+    encodeTerminalStreamFrame(
+      {
+        kind: "snapshot",
+        streamId: retryAttach.header.streamId,
+        session,
+        startOffset: 0,
+        endOffset: 2,
+      },
+      new Uint8Array([111, 107]),
+    ).buffer,
+  );
+  const handle = await attachPromise;
+  assert.deepEqual([...handle.snapshot.bytes], [111, 107]);
+  handle.dispose();
+  client.dispose();
+});
+
+test("BrowserGatewayTerminalStreamClient falls back to /ws terminal query when /ws/terminal fails", async () => {
+  installBrowser();
+  const loader = createWebModuleLoader();
+  const { BrowserGatewayTerminalStreamClient } = loader.loadModule(
+    "src/lib/terminal/gatewayTerminalStreamClient.ts",
+  );
+
+  const session = {
+    id: "terminal-1",
+    projectPathKey: "/workspace/project",
+    cwd: "/workspace/project",
+    shell: "zsh",
+    title: "Terminal 1",
+    kind: "local",
+    cols: 80,
+    rows: 24,
+    createdAt: 1,
+    updatedAt: 2,
+    running: true,
+  };
+  const client = new BrowserGatewayTerminalStreamClient("token");
+  const attachPromise = client.attach(session);
+
+  await waitFor(() => FakeWebSocket.instances.length >= 1, "primary terminal stream socket");
+  const primarySocket = FakeWebSocket.instances[0];
+  assert.equal(primarySocket.url, "wss://gateway.example/ws/terminal");
+  primarySocket.onerror?.({ type: "error" });
+
+  await waitFor(() => FakeWebSocket.instances.length >= 2, "fallback terminal stream socket");
+  const fallbackSocket = FakeWebSocket.instances[1];
+  assert.equal(fallbackSocket.url, "wss://gateway.example/ws?terminal=1");
+  fallbackSocket.open();
+  await waitFor(() => fallbackSocket.sent.length >= 1, "fallback terminal stream auth");
+  assert.deepEqual(fallbackSocket.sent[0], { type: "auth", token: "token" });
+  fallbackSocket.receive({ type: "ready" });
+  await waitFor(() => fallbackSocket.sent.length >= 2, "fallback terminal stream attach frame");
+  const attachFrame = decodeTerminalStreamFrame(fallbackSocket.sent[1]);
+  fallbackSocket.receiveRaw(
+    encodeTerminalStreamFrame({
+      kind: "snapshot",
+      streamId: attachFrame.header.streamId,
+      session,
+      startOffset: 0,
+      endOffset: 0,
+    }).buffer,
+  );
+
+  const handle = await attachPromise;
+  assert.equal(handle.snapshot.session.id, "terminal-1");
+  handle.dispose();
+  client.dispose();
 });
 
 test("GatewayWebSocketClient sends git requests with workdir and args", async () => {
@@ -1071,16 +1274,58 @@ test("Gateway SharedWorker terminal metadata reaches every page while output sta
   globalThis.onconnect = previousOnConnect;
 });
 
-test("Gateway SharedWorker forwards terminal output while attach request is pending", async () => {
+test("Gateway SharedWorker forwards terminal stream snapshot and output messages", async () => {
   installBrowser();
   const loader = createWebModuleLoader();
   const gatewaySocketPath = loader.resolveLocal("src/lib/gatewaySocket.ts");
   const clientInstances = [];
-  let resolveSnapshot = null;
+  const streamSession = {
+    id: "terminal-1",
+    projectPathKey: "/workspace/project",
+    cwd: "/workspace/project",
+    shell: "zsh",
+    title: "Terminal 1",
+    cols: 80,
+    rows: 24,
+    createdAt: 1,
+    updatedAt: 2,
+    running: true,
+  };
+  let resolveAttach = null;
+  const outputListeners = [];
 
   class MockGatewayWebSocketClient {
     terminalListeners = [];
     calls = [];
+    terminalStream = {
+      attach: (session, options) => {
+        this.calls.push(["terminalStream.attach", session.id, options?.maxBytes]);
+        return new Promise((resolve) => {
+          resolveAttach = () => {
+            resolve({
+              snapshot: {
+                session,
+                bytes: new Uint8Array([112, 119, 100]),
+                truncated: false,
+                outputStartOffset: 10,
+                outputEndOffset: 13,
+              },
+              write: (bytes) => {
+                this.calls.push(["terminalStream.write", [...bytes]]);
+                return true;
+              },
+              resize: (cols, rows) => this.calls.push(["terminalStream.resize", cols, rows]),
+              dispose: () => this.calls.push(["terminalStream.dispose", session.id]),
+              subscribeOutput: (listener) => {
+                outputListeners.push(listener);
+                return () => {};
+              },
+              subscribeInputState: () => () => {},
+            });
+          };
+        });
+      },
+    };
 
     constructor(token) {
       this.token = token;
@@ -1106,13 +1351,6 @@ test("Gateway SharedWorker forwards terminal output while attach request is pend
 
     subscribeSftpTransfers() {
       return () => {};
-    }
-
-    snapshotTerminal(sessionId, maxBytes, projectPathKey) {
-      this.calls.push(["snapshotTerminal", sessionId, maxBytes, projectPathKey]);
-      return new Promise((resolve) => {
-        resolveSnapshot = resolve;
-      });
     }
 
     dispose() {}
@@ -1133,73 +1371,110 @@ test("Gateway SharedWorker forwards terminal output while attach request is pend
   globalThis.onconnect({ ports: [port] });
   port.emit({ type: "connect", connection_id: "connection-1", token: "token" });
   port.emit({
-    type: "request",
+    type: "terminal_stream_attach",
     connection_id: "connection-1",
-    request_id: "terminal-attach",
-    method: "terminal.attach",
-    payload: {
-      session_id: "terminal-1",
-      project_path_key: "/workspace/project",
-    },
+    stream_id: "page-stream-1",
+    session: streamSession,
+    max_bytes: 8192,
   });
   await waitFor(
-    () => clientInstances[0]?.calls.some((call) => call[0] === "snapshotTerminal"),
-    "terminal attach request",
+    () => clientInstances[0]?.calls.some((call) => call[0] === "terminalStream.attach"),
+    "terminal stream attach",
   );
+  assert.deepEqual(clientInstances[0].calls.at(-1), [
+    "terminalStream.attach",
+    "terminal-1",
+    8192,
+  ]);
 
-  const event = {
-    kind: "output",
+  resolveAttach();
+  await waitFor(
+    () => port.messages.some((message) => message.type === "terminal_stream_snapshot"),
+    "terminal stream snapshot",
+  );
+  const snapshotMessage = port.messages.find((message) => message.type === "terminal_stream_snapshot");
+  assert.equal(snapshotMessage.connection_id, "connection-1");
+  assert.equal(snapshotMessage.stream_id, "page-stream-1");
+  assert.deepEqual([...snapshotMessage.payload.bytes], [112, 119, 100]);
+  assert.equal(snapshotMessage.payload.outputStartOffset, 10);
+
+  outputListeners[0]({
     sessionId: "terminal-1",
     projectPathKey: "/workspace/project",
-    session: {
-      id: "terminal-1",
-      projectPathKey: "/workspace/project",
-      cwd: "/workspace/project",
-      shell: "zsh",
-      title: "Terminal 1",
-      cols: 80,
-      rows: 24,
-      createdAt: 1,
-      updatedAt: 2,
-      running: true,
-    },
-    data: "pwd\r\n",
-    outputStartOffset: 10,
-    outputEndOffset: 15,
-  };
-  clientInstances[0].terminalListeners[0](event);
-  await waitFor(
-    () =>
-      port.messages.some(
-        (message) => message.event_type === "terminal" && message.payload === event,
-      ),
-    "attach-pending terminal output",
-  );
-
-  resolveSnapshot({
-    session: event.session,
-    output: "",
-    truncated: false,
-    outputStartOffset: 15,
-    outputEndOffset: 15,
+    bytes: new Uint8Array([13, 10]),
+    startOffset: 13,
+    endOffset: 15,
   });
   await waitFor(
-    () => port.messages.some((message) => message.request_id === "terminal-attach"),
-    "terminal attach response",
+    () => port.messages.some((message) => message.type === "terminal_stream_output"),
+    "terminal stream output",
   );
+  const outputMessage = port.messages.find((message) => message.type === "terminal_stream_output");
+  assert.equal(outputMessage.connection_id, "connection-1");
+  assert.equal(outputMessage.stream_id, "page-stream-1");
+  assert.deepEqual([...outputMessage.payload.bytes], [13, 10]);
+  assert.equal(outputMessage.payload.startOffset, 13);
 
   globalThis.onconnect = previousOnConnect;
 });
 
-test("Gateway SharedWorker keeps upstream terminal attached until every port detaches", async () => {
+test("Gateway SharedWorker keeps one upstream terminal stream until every port detaches", async () => {
   installBrowser();
   const loader = createWebModuleLoader();
   const gatewaySocketPath = loader.resolveLocal("src/lib/gatewaySocket.ts");
   const clientInstances = [];
+  const streamSession = {
+    id: "terminal-1",
+    projectPathKey: "/workspace/project",
+    cwd: "/workspace/project",
+    shell: "zsh",
+    title: "Terminal 1",
+    cols: 80,
+    rows: 24,
+    createdAt: 1,
+    updatedAt: 2,
+    running: true,
+  };
+  const outputListeners = [];
+  const inputStateListeners = [];
+  const currentInputState = {
+    paused: false,
+    queuedBytes: 17,
+    highWaterBytes: 256 * 1024,
+  };
 
   class MockGatewayWebSocketClient {
     terminalListeners = [];
     calls = [];
+    terminalStream = {
+      attach: async (session, options) => {
+        this.calls.push(["terminalStream.attach", session.id, options?.maxBytes]);
+        return {
+          snapshot: {
+            session,
+            bytes: new Uint8Array(),
+            truncated: false,
+            outputStartOffset: 0,
+            outputEndOffset: 0,
+          },
+          write: (bytes) => {
+            this.calls.push(["terminalStream.write", [...bytes]]);
+            return true;
+          },
+          resize: (cols, rows) => this.calls.push(["terminalStream.resize", cols, rows]),
+          dispose: () => this.calls.push(["terminalStream.dispose", session.id]),
+          subscribeOutput: (listener) => {
+            outputListeners.push(listener);
+            return () => this.calls.push(["terminalStream.unsubscribe", session.id]);
+          },
+          subscribeInputState: (listener) => {
+            inputStateListeners.push(listener);
+            listener(currentInputState);
+            return () => this.calls.push(["terminalStream.inputState.unsubscribe", session.id]);
+          },
+        };
+      },
+    };
 
     constructor(token) {
       this.token = token;
@@ -1225,32 +1500,6 @@ test("Gateway SharedWorker keeps upstream terminal attached until every port det
 
     subscribeSftpTransfers() {
       return () => {};
-    }
-
-    async snapshotTerminal(sessionId, maxBytes, projectPathKey) {
-      this.calls.push(["snapshotTerminal", sessionId, maxBytes, projectPathKey]);
-      return {
-        session: {
-          id: sessionId,
-          projectPathKey,
-          cwd: projectPathKey,
-          shell: "zsh",
-          title: "Terminal 1",
-          cols: 80,
-          rows: 24,
-          createdAt: 1,
-          updatedAt: 1,
-          running: true,
-        },
-        output: "",
-        truncated: false,
-        outputStartOffset: 0,
-        outputEndOffset: 0,
-      };
-    }
-
-    async detachTerminal(sessionId, projectPathKey) {
-      this.calls.push(["detachTerminal", sessionId, projectPathKey]);
     }
 
     dispose() {}
@@ -1275,99 +1524,104 @@ test("Gateway SharedWorker keeps upstream terminal attached until every port det
   secondPort.emit({ type: "connect", connection_id: "connection-2", token: "token" });
 
   firstPort.emit({
-    type: "request",
+    type: "terminal_stream_attach",
     connection_id: "connection-1",
-    request_id: "first-attach",
-    method: "terminal.attach",
-    payload: {
-      session_id: "terminal-1",
-      project_path_key: "/workspace/project",
-    },
+    stream_id: "first-stream",
+    session: streamSession,
+    max_bytes: 4096,
   });
+  await waitFor(
+    () => firstPort.messages.some((message) => message.type === "terminal_stream_snapshot"),
+    "first terminal stream snapshot",
+  );
+
   secondPort.emit({
-    type: "request",
+    type: "terminal_stream_attach",
     connection_id: "connection-2",
-    request_id: "second-attach",
-    method: "terminal.attach",
-    payload: {
-      session_id: "terminal-1",
-      project_path_key: "/workspace/project",
-    },
+    stream_id: "second-stream",
+    session: streamSession,
+    max_bytes: 4096,
   });
   await waitFor(
     () =>
-      firstPort.messages.some((message) => message.request_id === "first-attach") &&
-      secondPort.messages.some((message) => message.request_id === "second-attach"),
-    "terminal attach responses",
+      secondPort.messages.some((message) => message.type === "terminal_stream_snapshot") &&
+      secondPort.messages.some((message) => message.type === "terminal_stream_input_state"),
+    "second terminal stream snapshot and input state",
   );
+  assert.equal(
+    clientInstances[0].calls.filter((call) => call[0] === "terminalStream.attach").length,
+    1,
+  );
+  assert.equal(inputStateListeners.length, 1);
+  const secondInputState = secondPort.messages.find(
+    (message) => message.type === "terminal_stream_input_state",
+  );
+  assert.equal(secondInputState.stream_id, "second-stream");
+  assert.deepEqual(secondInputState.payload, currentInputState);
 
   firstPort.emit({
-    type: "request",
+    type: "terminal_stream_write",
     connection_id: "connection-1",
-    request_id: "first-detach",
-    method: "terminal.detach",
-    payload: {
-      session_id: "terminal-1",
-      project_path_key: "/workspace/project",
-    },
+    stream_id: "first-stream",
+    session_id: "terminal-1",
+    bytes: new Uint8Array([97, 98]),
   });
   await waitFor(
-    () => firstPort.messages.some((message) => message.request_id === "first-detach"),
-    "first terminal detach response",
+    () => clientInstances[0].calls.some((call) => call[0] === "terminalStream.write"),
+    "terminal stream write",
   );
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(clientInstances[0].calls.at(-1), ["terminalStream.write", [97, 98]]);
+
+  firstPort.emit({
+    type: "terminal_stream_resize",
+    connection_id: "connection-1",
+    stream_id: "first-stream",
+    session_id: "terminal-1",
+    cols: 100,
+    rows: 30,
+  });
+  await waitFor(
+    () => clientInstances[0].calls.some((call) => call[0] === "terminalStream.resize"),
+    "terminal stream resize",
+  );
+  assert.deepEqual(clientInstances[0].calls.at(-1), ["terminalStream.resize", 100, 30]);
+
+  firstPort.emit({
+    type: "terminal_stream_detach",
+    connection_id: "connection-1",
+    stream_id: "first-stream",
+    session_id: "terminal-1",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(
-    clientInstances[0].calls.some((call) => call[0] === "detachTerminal"),
+    clientInstances[0].calls.some((call) => call[0] === "terminalStream.dispose"),
     false,
   );
 
   const firstPortMessageCount = firstPort.messages.length;
-  const event = {
-    kind: "output",
+  outputListeners[0]({
     sessionId: "terminal-1",
     projectPathKey: "/workspace/project",
-    session: {
-      id: "terminal-1",
-      projectPathKey: "/workspace/project",
-      cwd: "/workspace/project",
-      shell: "zsh",
-      title: "Terminal 1",
-      cols: 80,
-      rows: 24,
-      createdAt: 1,
-      updatedAt: 2,
-      running: true,
-    },
-    data: "pwd\r\n",
-  };
-  clientInstances[0].terminalListeners[0](event);
-  assert.equal(firstPort.messages.length, firstPortMessageCount);
-  assert.deepEqual(secondPort.messages.at(-1), {
-    type: "event",
-    event_type: "terminal",
-    payload: event,
-    connection_id: "connection-2",
+    bytes: new Uint8Array([112, 119, 100]),
+    startOffset: 0,
+    endOffset: 3,
   });
+  assert.equal(firstPort.messages.length, firstPortMessageCount);
+  assert.equal(secondPort.messages.at(-1).type, "terminal_stream_output");
+  assert.equal(secondPort.messages.at(-1).stream_id, "second-stream");
+  assert.deepEqual([...secondPort.messages.at(-1).payload.bytes], [112, 119, 100]);
 
   secondPort.emit({
-    type: "request",
+    type: "terminal_stream_detach",
     connection_id: "connection-2",
-    request_id: "second-detach",
-    method: "terminal.detach",
-    payload: {
-      session_id: "terminal-1",
-      project_path_key: "/workspace/project",
-    },
+    stream_id: "second-stream",
+    session_id: "terminal-1",
   });
   await waitFor(
-    () => clientInstances[0].calls.some((call) => call[0] === "detachTerminal"),
-    "upstream terminal detach",
+    () => clientInstances[0].calls.some((call) => call[0] === "terminalStream.dispose"),
+    "upstream terminal stream dispose",
   );
-  assert.deepEqual(clientInstances[0].calls.at(-1), [
-    "detachTerminal",
-    "terminal-1",
-    "/workspace/project",
-  ]);
+  assert.deepEqual(clientInstances[0].calls.at(-1), ["terminalStream.dispose", "terminal-1"]);
 
   globalThis.onconnect = previousOnConnect;
 });

@@ -6,6 +6,7 @@ option go_package = "github.com/liveagent/agent-gateway/internal/proto/v1;gatewa
 
 service AgentGateway {
   rpc AgentConnect(stream AgentEnvelope) returns (stream GatewayEnvelope);
+  rpc AgentTerminalConnect(stream TerminalStreamFrame) returns (stream TerminalStreamFrame);
   rpc Authenticate(AuthRequest) returns (AuthResponse);
 }
 
@@ -390,7 +391,7 @@ message TerminalResponse {
   string action = 1;
   repeated TerminalSession sessions = 2;
   TerminalSession session = 3;
-  string output = 4;
+  bytes output = 4;
   bool truncated = 5;
   repeated TerminalShellOption shell_options = 6;
   string default_shell = 7;
@@ -406,10 +407,27 @@ message TerminalEvent {
   string session_id = 2;
   string project_path_key = 3;
   TerminalSession session = 4;
-  string data = 5;
+  bytes data = 5;
   uint64 output_start_offset = 6;
   uint64 output_end_offset = 7;
   TerminalSshTabsSnapshot ssh_tabs = 8;
+}
+
+message TerminalStreamFrame {
+  string kind = 1;
+  string stream_id = 2;
+  string session_id = 3;
+  string project_path_key = 4;
+  uint64 seq = 5;
+  uint64 start_offset = 6;
+  uint64 end_offset = 7;
+  uint32 cols = 8;
+  uint32 rows = 9;
+  uint32 max_bytes = 10;
+  bool truncated = 11;
+  string error = 12;
+  TerminalSession session = 13;
+  bytes data = 14;
 }
 
 message GitRequest {
