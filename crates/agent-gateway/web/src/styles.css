@@ -1185,6 +1185,10 @@ html[data-liveagent-webui="gateway"] .settings-section-shell {
   min-width: 0;
 }
 
+html[data-liveagent-webui="gateway"] .settings-back-bar {
+  display: none;
+}
+
 html[data-liveagent-webui="gateway"] .settings-section-actions,
 html[data-liveagent-webui="gateway"] .settings-card-actions,
 html[data-liveagent-webui="gateway"] .settings-modal-actions {
@@ -2389,6 +2393,8 @@ html[data-liveagent-webui="gateway"] .project-terminal-viewport .xterm-viewport:
   }
 
   html[data-liveagent-webui="gateway"] .settings-back-bar {
+    display: flex;
+    align-items: center;
     order: 1;
     border-top: 0;
     border-bottom: 1px solid hsl(var(--border) / 0.72);

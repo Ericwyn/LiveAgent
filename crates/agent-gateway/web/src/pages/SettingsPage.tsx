@@ -207,6 +207,17 @@ export function SettingsPage(props: SettingsPageProps) {
   return (
     <div className="settings-page-shell flex h-full bg-background">
       <aside className="settings-sidebar flex w-60 shrink-0 flex-col border-r border-border/60 bg-muted/20">
+        <div className="settings-back-bar">
+          <button
+            type="button"
+            onClick={onBack}
+            className="settings-back-button flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+          >
+            <ArrowLeft className="h-3.5 w-3.5 shrink-0" />
+            <span>{t("settings.backToChat")}</span>
+          </button>
+        </div>
+
         <div className="settings-sidebar-header border-b border-border/60 px-3 pb-3 pt-3">
           <button
             type="button"
