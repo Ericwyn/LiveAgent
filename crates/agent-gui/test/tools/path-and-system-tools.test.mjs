@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
@@ -483,8 +484,8 @@ test("file tools allow direct mutations inside enabled Skills when mutation is g
   });
 
   assert.equal(result.isError, false);
-  assert.match(result.content[0].text, /Write: skill:\/\/demo\/SKILL\.md/);
-  assert.match(result.content[0].text, /mode=rewrite/);
+  assert.match(result.content[0].text, /File created successfully at: skill:\/\/demo\/SKILL\.md/);
+  assert.doesNotMatch(result.content[0].text, /mode=rewrite/);
   assert.deepEqual(invocations, [
     {
       command: "fs_write_text",
@@ -498,6 +499,36 @@ test("file tools allow direct mutations inside enabled Skills when mutation is g
       },
     },
   ]);
+});
+
+test("Write schema accepts legacy empty mode without exposing it as required behavior", async () => {
+  const fsLoader = createTsModuleLoader();
+  const fsTools = fsLoader.loadModule("src/lib/tools/fsTools.ts");
+  const fileToolState = fsLoader.loadModule("src/lib/tools/fileToolState.ts");
+  const bundle = fsTools.createFsTools({
+    workdir: "/workspace",
+    fileState: fileToolState.createFileToolState(),
+  });
+  const writeTool = bundle.tools.find((tool) => tool.name === "Write");
+
+  assert.ok(writeTool);
+  assert.match(writeTool.description, /Pass only `path` and `content`; do not set `mode`/);
+  const args = validateToolArguments(writeTool, {
+    type: "toolCall",
+    id: "legacy-empty-mode",
+    name: "Write",
+    arguments: {
+      path: "test8/gomoku.html",
+      mode: "",
+      content: "",
+    },
+  });
+
+  assert.deepEqual(args, {
+    path: "test8/gomoku.html",
+    mode: "",
+    content: "",
+  });
 });
 
 test("Write preflight blocks existing files before content streaming but allows new files", async () => {
@@ -560,6 +591,272 @@ test("Write preflight blocks existing files before content streaming but allows 
       args: {
         workdir: "/workspace",
         path: "new.html",
+      },
+    },
+  ]);
+});
+
+test("Write preflight gives generic filename guidance for directory paths", async () => {
+  const invocations = [];
+  const fsLoader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          invocations.push({ command, args });
+          assert.equal(command, "fs_path_status");
+          return {
+            path: args.path,
+            exists: args.path === "output",
+            kind: args.path === "output" ? "dir" : null,
+            sizeBytes: args.path === "output" ? 96 : null,
+            mtimeMs: args.path === "output" ? 55 : null,
+          };
+        },
+      },
+    },
+  });
+  const fsTools = fsLoader.loadModule("src/lib/tools/fsTools.ts");
+  const fileToolState = fsLoader.loadModule("src/lib/tools/fileToolState.ts");
+  const bundle = fsTools.createFsTools({
+    workdir: "/workspace",
+    fileState: fileToolState.createFileToolState(),
+  });
+
+  const writeTool = bundle.tools.find((tool) => tool.name === "Write");
+  assert.match(writeTool.description, /notes\/todo\.txt/);
+  assert.match(writeTool.description, /does not choose filenames from directory paths/);
+  assert.match(writeTool.description, /do not set `mode`/);
+
+  const blocked = await bundle.preflightToolCall({
+    type: "toolCall",
+    id: "stream-write-directory",
+    name: "Write",
+    arguments: {
+      path: "output",
+      content: "",
+    },
+  });
+
+  assert.equal(blocked.toolResult.isError, true);
+  assert.match(blocked.toolResult.content[0].text, /directory, not a file: output/);
+  assert.match(blocked.toolResult.content[0].text, /path="output\/file\.txt"/);
+  assert.match(blocked.toolResult.content[0].text, /does not choose a filename/);
+  assert.equal(blocked.toolCall.arguments.content, "");
+  assert.deepEqual(invocations, [
+    {
+      command: "fs_path_status",
+      args: {
+        workdir: "/workspace",
+        path: "output",
+      },
+    },
+  ]);
+});
+
+test("Write does not infer filenames from content when path is a directory", async () => {
+  const invocations = [];
+  const fsLoader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          invocations.push({ command, args });
+          assert.equal(command, "fs_write_text");
+          assert.equal(args.path, "test8");
+          throw new Error("Cannot write to a directory path");
+        },
+      },
+    },
+  });
+  const fsTools = fsLoader.loadModule("src/lib/tools/fsTools.ts");
+  const fileToolState = fsLoader.loadModule("src/lib/tools/fileToolState.ts");
+  const bundle = fsTools.createFsTools({
+    workdir: "/workspace",
+    fileState: fileToolState.createFileToolState(),
+  });
+
+  const result = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "write-content-dir",
+    name: "Write",
+    arguments: {
+      path: "test8",
+      content: '{"ok":true}\n',
+    },
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /directory, not a file: test8/);
+  assert.match(result.content[0].text, /path="test8\/file\.txt"/);
+  assert.doesNotMatch(result.content[0].text, /data\.json|index\.html/);
+  assert.deepEqual(invocations, [
+    {
+      command: "fs_write_text",
+      args: {
+        workdir: "/workspace",
+        path: "test8",
+        content: '{"ok":true}\n',
+        mode: "rewrite",
+        expected_mtime_ms: undefined,
+        expected_content_hash: undefined,
+      },
+    },
+  ]);
+});
+
+test("Write preserves extensionless file paths instead of adding a content-derived extension", async () => {
+  const invocations = [];
+  const fsLoader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          invocations.push({ command, args });
+          assert.equal(command, "fs_write_text");
+          return {
+            existedBefore: false,
+            bytesWritten: args.content.length,
+            mtimeMs: 125,
+            contentHash: "hash-index",
+            totalLines: 2,
+          };
+        },
+      },
+    },
+  });
+  const fsTools = fsLoader.loadModule("src/lib/tools/fsTools.ts");
+  const fileToolState = fsLoader.loadModule("src/lib/tools/fileToolState.ts");
+  const bundle = fsTools.createFsTools({
+    workdir: "/workspace",
+    fileState: fileToolState.createFileToolState(),
+  });
+
+  const result = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "write-extensionless",
+    name: "Write",
+    arguments: {
+      path: "scripts/run",
+      content: "#!/usr/bin/env bash\necho ok\n",
+    },
+  });
+
+  assert.equal(result.isError, false);
+  assert.match(result.content[0].text, /File created successfully at: scripts\/run/);
+  assert.equal(result.details.path, "scripts/run");
+  assert.deepEqual(invocations, [
+    {
+      command: "fs_write_text",
+      args: {
+        workdir: "/workspace",
+        path: "scripts/run",
+        content: "#!/usr/bin/env bash\necho ok\n",
+        mode: "rewrite",
+        expected_mtime_ms: undefined,
+        expected_content_hash: undefined,
+      },
+    },
+  ]);
+});
+
+test("Write replays the Gomoku failure sequence with generic directory recovery guidance", async () => {
+  const invocations = [];
+  const fsLoader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          invocations.push({ command, args });
+          if (command === "fs_path_status") {
+            return {
+              path: args.path,
+              exists: args.path === "test8",
+              kind: args.path === "test8" ? "dir" : null,
+              sizeBytes: args.path === "test8" ? 96 : null,
+              mtimeMs: args.path === "test8" ? 55 : null,
+            };
+          }
+          assert.equal(command, "fs_write_text");
+          return {
+            existedBefore: false,
+            bytesWritten: args.content.length,
+            mtimeMs: 126,
+            contentHash: "hash-gomoku",
+            totalLines: 2,
+          };
+        },
+      },
+    },
+  });
+  const fsTools = fsLoader.loadModule("src/lib/tools/fsTools.ts");
+  const fileToolState = fsLoader.loadModule("src/lib/tools/fileToolState.ts");
+  const bundle = fsTools.createFsTools({
+    workdir: "/workspace",
+    fileState: fileToolState.createFileToolState(),
+  });
+  const writeTool = bundle.tools.find((tool) => tool.name === "Write");
+
+  assert.deepEqual(
+    validateToolArguments(writeTool, {
+      type: "toolCall",
+      id: "gomoku-empty-mode",
+      name: "Write",
+      arguments: {
+        path: "test8/gomoku.html",
+        mode: "",
+        content: "",
+      },
+    }),
+    {
+      path: "test8/gomoku.html",
+      mode: "",
+      content: "",
+    },
+  );
+
+  const directoryBlocked = await bundle.preflightToolCall({
+    type: "toolCall",
+    id: "gomoku-directory-empty",
+    name: "Write",
+    arguments: {
+      path: "test8",
+      content: "",
+    },
+  });
+
+  assert.equal(directoryBlocked.toolResult.isError, true);
+  assert.match(directoryBlocked.toolResult.content[0].text, /directory, not a file: test8/);
+  assert.match(directoryBlocked.toolResult.content[0].text, /path="test8\/file\.txt"/);
+  assert.doesNotMatch(directoryBlocked.toolResult.content[0].text, /mode constant|index\.html/);
+
+  const recovered = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "gomoku-directory-html",
+    name: "Write",
+    arguments: {
+      path: "test8/index.html",
+      content: "<!doctype html>\n<html></html>\n",
+    },
+  });
+
+  assert.equal(recovered.isError, false);
+  assert.match(recovered.content[0].text, /File created successfully at: test8\/index\.html/);
+  assert.doesNotMatch(recovered.content[0].text, /mode=rewrite|target=/);
+  assert.equal(recovered.details.path, "test8/index.html");
+  assert.deepEqual(invocations, [
+    {
+      command: "fs_path_status",
+      args: {
+        workdir: "/workspace",
+        path: "test8",
+      },
+    },
+    {
+      command: "fs_write_text",
+      args: {
+        workdir: "/workspace",
+        path: "test8/index.html",
+        content: "<!doctype html>\n<html></html>\n",
+        mode: "rewrite",
+        expected_mtime_ms: undefined,
+        expected_content_hash: undefined,
       },
     },
   ]);

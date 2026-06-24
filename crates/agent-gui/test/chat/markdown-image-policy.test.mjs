@@ -222,6 +222,20 @@ test("agent tool rules keep local file discovery on file tools instead of Bash",
   assert.match(suffix, /Do not run Bash cat\/ls\/find\/grep/);
 });
 
+test("agent tool rules steer new files to concrete Write paths", () => {
+  const suffix = agentRunnerModule.buildToolsSuffix("/workspace", [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+  ]);
+  assert.match(suffix, /New files: call Write with a file path that includes the filename and the full content/);
+  assert.match(suffix, /parent directories are created automatically/);
+  assert.match(suffix, /Do not set `mode`/);
+  assert.match(suffix, /path must include the intended filename, not just a directory/);
+  assert.match(suffix, /write \/ create files via heredocs, `tee`, `touch`, `cp`, or `mkdir`/);
+});
+
 test("agent tool rules keep workspace and Skills deletion on Delete", () => {
   const suffix = agentRunnerModule.buildToolsSuffix("/workspace", [
     "Delete",

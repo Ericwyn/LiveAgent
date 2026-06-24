@@ -188,6 +188,11 @@ function previewSnippet(input: string, maxChars = 500) {
   return `${text.slice(0, maxChars)}\n...(${text.length} chars total)...`;
 }
 
+function childDisplayPath(parent: string, fileName: string) {
+  const base = parent && parent !== "." ? parent.replace(/\/+$/g, "") : "";
+  return base ? `${base}/${fileName}` : fileName;
+}
+
 function formatLineWindow(startLine: number, numLines: number, totalLines: number) {
   if (totalLines === 0 || numLines === 0) return "empty";
   const endLine = startLine + numLines - 1;
@@ -304,6 +309,53 @@ export function createFsTools(params: {
     return `Write requires a full-file Read first for existing files: ${formatResolvedTarget(resolved)}. Retry with Read using the same path before rewriting. Do not use Bash for workspace or Skill file operations.`;
   }
 
+  function buildWriteDirectoryPathMessage(resolved: ResolvedPath) {
+    const directoryPath = formatResolvedTarget(resolved);
+    const examplePath = childDisplayPath(directoryPath, "file.txt");
+    return [
+      `Write.path points to a directory, not a file: ${directoryPath}.`,
+      `Retry Write with the intended filename appended to that directory, for example path="${examplePath}" if file.txt is the file you mean.`,
+      "Write creates missing parent directories, but it does not choose a filename from a directory path.",
+    ].join(" ");
+  }
+
+  type NormalizedWriteArgs = {
+    path: unknown;
+    content: string;
+    hasContentArgument: boolean;
+    mode: "rewrite";
+  };
+
+  function normalizeWriteArgs(args: unknown): NormalizedWriteArgs {
+    const record =
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {};
+    assertKnownArguments("Write", record, ["path", "content", "mode"]);
+    const mode = record.mode;
+    if (mode !== undefined && mode !== null && mode !== "" && mode !== "rewrite") {
+      throw new Error("Write.mode is deprecated. Omit it, or pass rewrite for compatibility.");
+    }
+    if ("content" in record && typeof record.content !== "string") {
+      throw new Error("Write.content must be a string.");
+    }
+    return {
+      path: record.path,
+      content: typeof record.content === "string" ? record.content : "",
+      hasContentArgument: "content" in record,
+      mode: "rewrite",
+    };
+  }
+
+  async function resolveWriteTarget(writeArgs: NormalizedWriteArgs) {
+    const resolved = await pathResolver.resolvePath(writeArgs.path, {
+      label: "Write.path",
+      intent: "write",
+      required: true,
+    });
+    return { resolved, path: backendPath(resolved) };
+  }
+
   async function readPathStatus(resolved: ResolvedPath, path: string) {
     return invokePathFileCommand<PathStatusCommandResponse>({
       toolName: "Write",
@@ -316,16 +368,23 @@ export function createFsTools(params: {
     });
   }
 
-  function completeWriteToolCallForPreflight(toolCall: ToolCall): ToolCall {
-    const args = toolCall.arguments && typeof toolCall.arguments === "object"
-      ? toolCall.arguments
-      : {};
-    if (typeof args.content === "string") return toolCall;
+  function completeWriteToolCallForPreflight(
+    toolCall: ToolCall,
+    normalized?: { path?: string; content?: string },
+  ): ToolCall {
+    const args =
+      toolCall.arguments && typeof toolCall.arguments === "object" ? toolCall.arguments : {};
     return {
       ...toolCall,
       arguments: {
         ...args,
-        content: "",
+        ...(typeof normalized?.path === "string" ? { path: normalized.path } : {}),
+        content:
+          typeof normalized?.content === "string"
+            ? normalized.content
+            : typeof args.content === "string"
+              ? args.content
+              : "",
       },
     };
   }
@@ -472,7 +531,7 @@ export function createFsTools(params: {
   const toolWrite: Tool = {
     name: "Write",
     description:
-      "Create a new text file or fully rewrite an existing workspace or enabled Skill file. There is no append mode — to add content, Read the file first, then either Write the full new content or use Edit to insert. Existing files must have been Read first so the tool can validate version metadata and reject stale rewrites.",
+      "Create a new text file or fully overwrite an existing workspace or enabled Skill text file. Pass only `path` and `content`; do not set `mode`. For new files, `path` must include the intended filename, for example `notes/todo.txt`; Write creates missing parent directories but does not choose filenames from directory paths. Existing files must have been fully Read first so the tool can reject stale rewrites. Use Edit for small changes.",
     parameters: strictToolParameters({
       path: Type.String({
         description:
@@ -480,8 +539,9 @@ export function createFsTools(params: {
       }),
       content: Type.String({ description: "Entire text content to write" }),
       mode: Type.Optional(
-        Type.Literal("rewrite", {
-          description: "Only rewrite is supported; append is intentionally disabled",
+        Type.Union([Type.Literal("rewrite"), Type.Literal("")], {
+          description:
+            "Deprecated compatibility field. Omit this argument; empty string and rewrite are accepted as rewrite.",
         }),
       ),
     }),
@@ -1355,18 +1415,10 @@ export function createFsTools(params: {
   async function execWrite(args: any, signal?: AbortSignal): Promise<ToolOk<WriteResultDetails>> {
     if (signal?.aborted) throw new Error("Cancelled");
 
-    const resolved = await pathResolver.resolvePath(args?.path, {
-      label: "Write.path",
-      intent: "write",
-      required: true,
-    });
-    const path = backendPath(resolved);
+    const writeArgs = normalizeWriteArgs(args);
+    const { resolved, path } = await resolveWriteTarget(writeArgs);
     if (!path) throw new Error("Write.path must identify a file");
-    const content = typeof args?.content === "string" ? args.content : "";
-    const mode = typeof args?.mode === "string" ? args.mode : "rewrite";
-    if (mode !== "rewrite") {
-      throw new Error("Write.mode only supports rewrite");
-    }
+    const content = writeArgs.content;
 
     const latest = fileState.getLatest(statePathKey(resolved));
     if (latest?.kind === "text" && latest.isPartialView) {
@@ -1374,19 +1426,27 @@ export function createFsTools(params: {
     }
     const fullSnapshot = fileState.getLatestFullText(statePathKey(resolved));
 
-    const res = await invokePathFileCommand<WriteCommandResponse>({
-      toolName: "Write",
-      resolved,
-      command: "fs_write_text",
-      args: {
-        workdir: resolved.workdir,
-        path,
-        content,
-        mode: "rewrite",
-        expected_mtime_ms: fullSnapshot?.mtimeMs,
-        expected_content_hash: fullSnapshot?.contentHash,
-      },
-    });
+    let res: WriteCommandResponse;
+    try {
+      res = await invokePathFileCommand<WriteCommandResponse>({
+        toolName: "Write",
+        resolved,
+        command: "fs_write_text",
+        args: {
+          workdir: resolved.workdir,
+          path,
+          content,
+          mode: "rewrite",
+          expected_mtime_ms: fullSnapshot?.mtimeMs,
+          expected_content_hash: fullSnapshot?.contentHash,
+        },
+      });
+    } catch (error) {
+      if (/Cannot write to a directory path/i.test(asErrorMessage(error))) {
+        throw new Error(buildWriteDirectoryPathMessage(resolved));
+      }
+      throw error;
+    }
 
     const details: WriteResultDetails = {
       kind: "write",
@@ -1410,11 +1470,9 @@ export function createFsTools(params: {
       content: [
         {
           type: "text",
-          text:
-            `Write: ${formatResolvedTarget(resolved)}\n` +
-            `mode=rewrite\n` +
-            `target=${details.existedBefore ? "existing" : "new"}\n` +
-            `bytesWritten=${details.bytesWritten}`,
+          text: details.existedBefore
+            ? `File updated successfully at: ${formatResolvedTarget(resolved)}`
+            : `File created successfully at: ${formatResolvedTarget(resolved)}`,
         },
       ],
       details,
@@ -1427,18 +1485,16 @@ export function createFsTools(params: {
   ): Promise<BuiltinToolPreflightResult | null> {
     if (signal?.aborted) return null;
 
-    const rawPath = typeof toolCall.arguments?.path === "string" ? toolCall.arguments.path : "";
+    const writeArgs = normalizeWriteArgs(toolCall.arguments);
+    const rawPath = typeof writeArgs.path === "string" ? writeArgs.path : "";
     if (!rawPath.trim()) return null;
 
-    const resolved = await pathResolver.resolvePath(rawPath, {
-      label: "Write.path",
-      intent: "write",
-      required: true,
-    });
-    const path = backendPath(resolved);
+    const { resolved, path } = await resolveWriteTarget(writeArgs);
     if (!path) {
       return {
-        toolCall: completeWriteToolCallForPreflight(toolCall),
+        toolCall: completeWriteToolCallForPreflight(toolCall, {
+          content: writeArgs.content,
+        }),
         toolResult: buildToolErrorResult(toolCall, "Write.path must identify a file"),
       };
     }
@@ -1452,7 +1508,10 @@ export function createFsTools(params: {
     const latest = fileState.getLatest(key);
     if (latest?.kind === "text" && latest.isPartialView) {
       return {
-        toolCall: completeWriteToolCallForPreflight(toolCall),
+        toolCall: completeWriteToolCallForPreflight(toolCall, {
+          path: resolved.displayPath,
+          content: writeArgs.content,
+        }),
         toolResult: buildToolErrorResult(toolCall, buildWriteRequiresFullReadMessage(resolved)),
       };
     }
@@ -1468,11 +1527,18 @@ export function createFsTools(params: {
       return null;
     }
 
-    const completedToolCall = completeWriteToolCallForPreflight(toolCall);
+    const completedToolCall = completeWriteToolCallForPreflight(toolCall, {
+      path: resolved.displayPath,
+      content: writeArgs.content,
+    });
     if (status.kind === "dir") {
+      if (!writeArgs.hasContentArgument) return null;
       return {
         toolCall: completedToolCall,
-        toolResult: buildToolErrorResult(toolCall, "Cannot write to a directory path"),
+        toolResult: buildToolErrorResult(
+          toolCall,
+          buildWriteDirectoryPathMessage(resolved),
+        ),
       };
     }
 

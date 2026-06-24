@@ -198,7 +198,8 @@ export function buildToolsSuffix(
     }
     if (canWrite) {
       lines.push(
-        "- Read a file at least once before Write or Edit. If the file changes after that Read, the next Write/Edit is rejected — Read it again, then retry.",
+        "- Existing files: Read the full file before Write or Edit; stale writes are rejected, so re-Read if needed.",
+        "- New files: call Write with a file path that includes the filename and the full content; parent directories are created automatically.",
       );
     }
     if (has("Read")) {
@@ -215,7 +216,7 @@ export function buildToolsSuffix(
     }
     if (has("Write")) {
       lines.push(
-        "- Write creates a new file or fully overwrites an existing one. There is no append mode — to add content, Read first, then either Write the full new content or use Edit to insert.",
+        "- Write fully creates or overwrites one text file. Do not set `mode`. The path must include the intended filename, not just a directory.",
       );
     }
     if (has("Edit")) {
@@ -239,6 +240,11 @@ export function buildToolsSuffix(
     if (has("Bash")) {
       const alts: string[] = [];
       if (hasReadFamily) alts.push("read / list / search via `cat`, `ls`, `find`, `grep`, or `rg`");
+      if (has("Write")) {
+        alts.push(
+          "write / create files via heredocs, `tee`, `touch`, `cp`, or `mkdir` just to prepare a parent directory",
+        );
+      }
       if (has("Delete")) alts.push("delete via `rm`, `rmdir`, `unlink`, or `find -delete`");
       if (alts.length > 0) {
         lines.push(
