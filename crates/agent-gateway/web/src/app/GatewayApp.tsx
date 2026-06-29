@@ -4049,6 +4049,21 @@ export default function GatewayApp() {
         pendingDraftConversationMigrationRef.current?.draftConversationId === activeConversationId
       ) {
         pendingDraftConversationMigrationRef.current = null;
+        if (startedAsDraftConversation && isLocalDraftConversationId(activeConversationId)) {
+          optimisticTitleConversationIdsRef.current.delete(activeConversationId);
+          unlockHistoryTitlePosition(activeConversationId);
+          updateHistoryItems((current) =>
+            current.filter((item) => item.id !== activeConversationId),
+          );
+          if (
+            conversationIdRef.current === activeConversationId ||
+            selectedHistoryIdRef.current === activeConversationId
+          ) {
+            startNewConversation({
+              workdir: isAgentMode ? activeWorkspaceProjectPath || undefined : undefined,
+            });
+          }
+        }
       }
       for (const conversationIdValue of lockedConversationIds) {
         chatStartLocksRef.current.delete(conversationIdValue);
@@ -6140,6 +6155,17 @@ export default function GatewayApp() {
               setHistoryError(null);
               if (sidebarRunningConversationIds.has(id)) {
                 setHistoryError("后台任务仍在运行，暂时不能删除该对话。");
+                return;
+              }
+              if (isLocalDraftConversationId(id)) {
+                optimisticTitleConversationIdsRef.current.delete(id);
+                unlockHistoryTitlePosition(id);
+                updateHistoryItems((current) => current.filter((item) => item.id !== id));
+                if (conversationIdRef.current === id || selectedHistoryIdRef.current === id) {
+                  startNewConversation({
+                    workdir: isAgentMode ? activeWorkspaceProjectPath || undefined : undefined,
+                  });
+                }
                 return;
               }
               void (async () => {
