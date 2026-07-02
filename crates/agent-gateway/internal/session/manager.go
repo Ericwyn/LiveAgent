@@ -34,11 +34,12 @@ type AuthSnapshot struct {
 }
 
 type Manager struct {
-	registry  *sessionRegistry
-	syncHub   *syncHub
-	chatStore *chatRunStore
-	tunnels   *tunnelStore
-	cmdQueue  *commandQueue
+	registry    *sessionRegistry
+	syncHub     *syncHub
+	chatStore   *chatRunStore
+	convStreams *conversationStreamStore
+	tunnels     *tunnelStore
+	cmdQueue    *commandQueue
 }
 
 type AgentSession struct {
@@ -146,12 +147,14 @@ type Status struct {
 }
 
 func NewManager() *Manager {
-	return &Manager{
+	m := &Manager{
 		registry:  newSessionRegistry(),
 		syncHub:   newSyncHub(),
 		chatStore: newChatRunStore(),
 		tunnels:   newTunnelStore(),
 		cmdQueue:  newCommandQueue(defaultCommandQueueTimeout),
 	}
+	m.convStreams = newConversationStreamStore(m.IsOnline)
+	return m
 }
 

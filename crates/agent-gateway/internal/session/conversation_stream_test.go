@@ -1,0 +1,613 @@
+package session
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	gatewayv1 "github.com/liveagent/agent-gateway/internal/proto/v1"
+)
+
+func tokenEvent(conversationID string, text string) *gatewayv1.ChatEvent {
+	data, _ := json.Marshal(map[string]any{"text": text})
+	return &gatewayv1.ChatEvent{
+		Type:           gatewayv1.ChatEvent_TOKEN,
+		ConversationId: conversationID,
+		Data:           string(data),
+	}
+}
+
+func doneEvent(conversationID string) *gatewayv1.ChatEvent {
+	return &gatewayv1.ChatEvent{
+		Type:           gatewayv1.ChatEvent_DONE,
+		ConversationId: conversationID,
+		Data:           `{"title":"Final title"}`,
+	}
+}
+
+func startedControl(runID string, conversationID string) *gatewayv1.ChatControlEvent {
+	return &gatewayv1.ChatControlEvent{
+		RequestId:      runID,
+		ConversationId: conversationID,
+		Type:           "started",
+		State:          "running",
+	}
+}
+
+func completedControl(runID string, conversationID string) *gatewayv1.ChatControlEvent {
+	return &gatewayv1.ChatControlEvent{
+		RequestId:      runID,
+		ConversationId: conversationID,
+		Type:           "completed",
+		State:          "completed",
+	}
+}
+
+func drainEvents(t *testing.T, ch <-chan *ConversationEvent, count int) []*ConversationEvent {
+	t.Helper()
+	events := make([]*ConversationEvent, 0, count)
+	timeout := time.After(2 * time.Second)
+	for len(events) < count {
+		select {
+		case event, ok := <-ch:
+			if !ok {
+				t.Fatalf("event channel closed after %d events, want %d", len(events), count)
+			}
+			events = append(events, event)
+		case <-timeout:
+			t.Fatalf("timed out after %d events, want %d", len(events), count)
+		}
+	}
+	return events
+}
+
+func eventTypes(events []*ConversationEvent) []string {
+	types := make([]string, 0, len(events))
+	for _, event := range events {
+		types = append(types, event.Type)
+	}
+	return types
+}
+
+func TestConversationStreamSeqMonotonicAcrossRuns(t *testing.T) {
+	m := NewManager()
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+	m.ingestChatEvent("run-1", tokenEvent("conv-1", "hello"))
+	m.ingestChatEvent("run-1", doneEvent("conv-1"))
+	m.ingestChatControl("run-2", startedControl("run-2", "conv-1"))
+	m.ingestChatEvent("run-2", tokenEvent("conv-1", "again"))
+
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+
+	var lastSeq int64
+	for _, event := range sub.Events {
+		if event.Seq <= lastSeq {
+			t.Fatalf("seq not monotonic: %d after %d (types %v)", event.Seq, lastSeq, eventTypes(sub.Events))
+		}
+		lastSeq = event.Seq
+	}
+	types := eventTypes(sub.Events)
+	want := []string{"run_started", "token", "run_finished", "run_started", "token"}
+	if len(types) != len(want) {
+		t.Fatalf("replayed types = %v, want %v", types, want)
+	}
+	for i := range want {
+		if types[i] != want[i] {
+			t.Fatalf("replayed types = %v, want %v", types, want)
+		}
+	}
+	if sub.Activity == nil || sub.Activity.RunID != "run-2" || sub.Activity.State != RunActivityRunning {
+		t.Fatalf("activity = %#v, want running run-2", sub.Activity)
+	}
+}
+
+func TestRunFinishedExactlyOnceForDuplicateTerminals(t *testing.T) {
+	cases := []struct {
+		name   string
+		first  func(m *Manager)
+		second func(m *Manager)
+	}{
+		{
+			name:   "done event then completed control",
+			first:  func(m *Manager) { m.ingestChatEvent("run-1", doneEvent("conv-1")) },
+			second: func(m *Manager) { m.ingestChatControl("run-1", completedControl("run-1", "conv-1")) },
+		},
+		{
+			name:  "completed control then terminal snapshot",
+			first: func(m *Manager) { m.ingestChatControl("run-1", completedControl("run-1", "conv-1")) },
+			second: func(m *Manager) {
+				m.ingestRuntimeSnapshot(&gatewayv1.ChatRuntimeSnapshot{
+					RunId: "run-1", ConversationId: "conv-1", State: "completed",
+				})
+			},
+		},
+		{
+			name: "terminal snapshot then done event",
+			first: func(m *Manager) {
+				m.ingestRuntimeSnapshot(&gatewayv1.ChatRuntimeSnapshot{
+					RunId: "run-1", ConversationId: "conv-1", State: "cancelled",
+				})
+			},
+			second: func(m *Manager) { m.ingestChatEvent("run-1", doneEvent("conv-1")) },
+		},
+		{
+			name:   "force finish then late done",
+			first:  func(m *Manager) { m.ForceFinishRun("run-1", "cancelled", "", "") },
+			second: func(m *Manager) { m.ingestChatEvent("run-1", doneEvent("conv-1")) },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager()
+			m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+			m.ingestChatEvent("run-1", tokenEvent("conv-1", "hello"))
+			tc.first(m)
+			tc.second(m)
+
+			sub := m.SubscribeConversationStream("conv-1", 0, "")
+			defer sub.Cleanup()
+			finished := 0
+			for _, event := range sub.Events {
+				if event.Type == StreamEventRunFinished {
+					finished++
+				}
+			}
+			if finished != 1 {
+				t.Fatalf("run_finished count = %d, want 1 (types %v)", finished, eventTypes(sub.Events))
+			}
+			if sub.Activity != nil {
+				t.Fatalf("activity should be cleared, got %#v", sub.Activity)
+			}
+		})
+	}
+}
+
+func TestSupersessionFinishesPreviousRunFirst(t *testing.T) {
+	m := NewManager()
+	m.ingestChatControl("run-a", startedControl("run-a", "conv-1"))
+	m.ingestChatEvent("run-a", tokenEvent("conv-1", "a"))
+
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+
+	// A queued prompt auto-send: run-b starts before run-a's terminal arrives.
+	m.ingestChatControl("run-b", startedControl("run-b", "conv-1"))
+	m.ingestChatEvent("run-b", tokenEvent("conv-1", "b"))
+
+	live := drainEvents(t, sub.EventCh, 3)
+	types := eventTypes(live)
+	if types[0] != StreamEventRunFinished || live[0].RunID != "run-a" {
+		t.Fatalf("first live event = %s/%s, want run_finished/run-a", types[0], live[0].RunID)
+	}
+	if live[0].Payload["reason"] != "superseded" {
+		t.Fatalf("superseded reason missing: %#v", live[0].Payload)
+	}
+	if types[1] != StreamEventRunStarted || live[1].RunID != "run-b" {
+		t.Fatalf("second live event = %s/%s, want run_started/run-b", types[1], live[1].RunID)
+	}
+	if types[2] != "token" || live[2].RunID != "run-b" {
+		t.Fatalf("third live event = %s/%s, want token/run-b", types[2], live[2].RunID)
+	}
+
+	// The late terminal for run-a is swallowed.
+	m.ingestChatControl("run-a", completedControl("run-a", "conv-1"))
+	m.ingestChatEvent("run-b", tokenEvent("conv-1", "b2"))
+	next := drainEvents(t, sub.EventCh, 1)
+	if next[0].Type != "token" || next[0].RunID != "run-b" {
+		t.Fatalf("late terminal leaked: got %s/%s", next[0].Type, next[0].RunID)
+	}
+}
+
+func TestSubscribeResumeAndResetSemantics(t *testing.T) {
+	m := NewManager()
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+	m.ingestChatEvent("run-1", tokenEvent("conv-1", "one"))
+	m.ingestChatEvent("run-1", tokenEvent("conv-1", "two"))
+
+	base := m.SubscribeConversationStream("conv-1", 0, "")
+	base.Cleanup()
+	epoch := base.StreamEpoch
+	latest := base.LatestSeq
+
+	resume := m.SubscribeConversationStream("conv-1", latest-1, epoch)
+	resume.Cleanup()
+	if resume.Reset {
+		t.Fatalf("resume within buffer should not reset")
+	}
+	if len(resume.Events) != 1 || resume.Events[0].Seq != latest {
+		t.Fatalf("resume replay = %v", eventTypes(resume.Events))
+	}
+
+	ahead := m.SubscribeConversationStream("conv-1", latest+100, epoch)
+	ahead.Cleanup()
+	if !ahead.Reset || len(ahead.Events) != int(latest) {
+		t.Fatalf("client ahead of gateway must reset with full replay, got reset=%v events=%d", ahead.Reset, len(ahead.Events))
+	}
+
+	wrongEpoch := m.SubscribeConversationStream("conv-1", latest, "different-epoch")
+	wrongEpoch.Cleanup()
+	if !wrongEpoch.Reset {
+		t.Fatalf("epoch mismatch must reset")
+	}
+
+	// Gap: force eviction of the early events.
+	m.convStreams.mu.Lock()
+	stream := m.convStreams.streams["conv-1"]
+	stream.evictedThroughSeq = 2
+	m.convStreams.mu.Unlock()
+	gap := m.SubscribeConversationStream("conv-1", 1, epoch)
+	gap.Cleanup()
+	if !gap.Reset {
+		t.Fatalf("resume below evicted floor must reset")
+	}
+}
+
+func TestStartChatCommandSeedsAndAgentEchoSwallowed(t *testing.T) {
+	m := NewManager()
+	start := m.StartChatCommand("run-1", "conv-1", "/workspace", "client-1", []map[string]any{
+		{"type": "user_message", "message": "hello"},
+	})
+	if start.AcceptedSeq <= 0 {
+		t.Fatalf("accepted seq = %d, want > 0", start.AcceptedSeq)
+	}
+
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+	if len(sub.Events) != 1 || sub.Events[0].Type != "user_message" {
+		t.Fatalf("seeded replay = %v", eventTypes(sub.Events))
+	}
+	if sub.Events[0].Payload["client_request_id"] != "client-1" {
+		t.Fatalf("seeded user_message missing client_request_id: %#v", sub.Events[0].Payload)
+	}
+	if sub.Activity == nil || sub.Activity.State != RunActivityQueued {
+		t.Fatalf("activity = %#v, want queued", sub.Activity)
+	}
+
+	// Agent starts the run and echoes the user message: the echo is swallowed.
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+	userEcho, _ := json.Marshal(map[string]any{"message": "hello"})
+	m.ingestChatEvent("run-1", &gatewayv1.ChatEvent{
+		Type:           gatewayv1.ChatEvent_USER_MESSAGE,
+		ConversationId: "conv-1",
+		Data:           string(userEcho),
+	})
+	m.ingestChatEvent("run-1", tokenEvent("conv-1", "hi"))
+
+	live := drainEvents(t, sub.EventCh, 2)
+	types := eventTypes(live)
+	if types[0] != StreamEventRunStarted || types[1] != "token" {
+		t.Fatalf("live types = %v, want [run_started token]", types)
+	}
+}
+
+func TestPendingRunBindsOnFirstAgentSignal(t *testing.T) {
+	m := NewManager()
+	updates, cleanupWatch := m.WatchChatCommand("run-1")
+	defer cleanupWatch()
+
+	start := m.StartChatCommand("run-1", "", "/workspace", "client-1", []map[string]any{
+		{"type": "user_message", "message": "hello"},
+	})
+	if start.ConversationID != "" || start.AcceptedSeq != 0 {
+		t.Fatalf("pending start = %#v", start)
+	}
+
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-new"))
+
+	select {
+	case update := <-updates:
+		if update.Phase != "bound" || update.ConversationID != "conv-new" || update.ClientRequestID != "client-1" {
+			t.Fatalf("bound update = %#v", update)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no bound update")
+	}
+
+	sub := m.SubscribeConversationStream("conv-new", 0, "")
+	defer sub.Cleanup()
+	types := eventTypes(sub.Events)
+	want := []string{"user_message", "run_started"}
+	if len(types) != len(want) || types[0] != want[0] || types[1] != want[1] {
+		t.Fatalf("bound replay = %v, want %v", types, want)
+	}
+}
+
+func TestQueuedInGUICompensatesSeededEntries(t *testing.T) {
+	m := NewManager()
+	updates, cleanupWatch := m.WatchChatCommand("run-1")
+	defer cleanupWatch()
+
+	m.StartChatCommand("run-1", "conv-1", "", "client-1", []map[string]any{
+		{"type": "user_message", "message": "queued prompt"},
+	})
+	m.ingestChatControl("run-1", &gatewayv1.ChatControlEvent{
+		RequestId:      "run-1",
+		ConversationId: "conv-1",
+		Type:           "queued_in_gui",
+	})
+
+	select {
+	case update := <-updates:
+		if update.Phase != "queued_in_gui" {
+			t.Fatalf("update = %#v", update)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no queued_in_gui update")
+	}
+
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+	types := eventTypes(sub.Events)
+	if len(types) != 2 || types[0] != "user_message" || types[1] != StreamEventRunQueued {
+		t.Fatalf("replay = %v, want [user_message run_queued]", types)
+	}
+	if sub.Activity != nil {
+		t.Fatalf("queued_in_gui must clear activity, got %#v", sub.Activity)
+	}
+	if m.ChatCommandSettled("run-1") != true {
+		t.Fatalf("queued_in_gui command must count as settled")
+	}
+
+	// Later auto-send: the agent echo must now pass through.
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+	userEcho, _ := json.Marshal(map[string]any{"message": "queued prompt"})
+	m.ingestChatEvent("run-1", &gatewayv1.ChatEvent{
+		Type:           gatewayv1.ChatEvent_USER_MESSAGE,
+		ConversationId: "conv-1",
+		Data:           string(userEcho),
+	})
+	live := drainEvents(t, sub.EventCh, 2)
+	types = eventTypes(live)
+	if types[0] != StreamEventRunStarted || types[1] != "user_message" {
+		t.Fatalf("auto-send live types = %v, want [run_started user_message]", types)
+	}
+}
+
+func TestFailChatCommandPendingAndBound(t *testing.T) {
+	m := NewManager()
+	updates, cleanupWatch := m.WatchChatCommand("run-pending")
+	defer cleanupWatch()
+	m.StartChatCommand("run-pending", "", "", "client-1", nil)
+	m.FailChatCommand("run-pending", "desktop_runtime_unavailable", "agent offline")
+	select {
+	case update := <-updates:
+		if update.Phase != "failed" || update.ErrorCode != "desktop_runtime_unavailable" {
+			t.Fatalf("failed update = %#v", update)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no failed update")
+	}
+
+	m.StartChatCommand("run-bound", "conv-1", "", "client-2", []map[string]any{
+		{"type": "user_message", "message": "hello"},
+	})
+	m.FailChatCommand("run-bound", "startup_timeout", "did not start")
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+	last := sub.Events[len(sub.Events)-1]
+	if last.Type != StreamEventRunFinished || last.Payload["status"] != "failed" {
+		t.Fatalf("bound failure tail = %s %#v", last.Type, last.Payload)
+	}
+	if !m.ChatCommandSettled("run-bound") {
+		t.Fatalf("failed command should be settled")
+	}
+}
+
+func TestActivityHubCarriesRunIDs(t *testing.T) {
+	m := NewManager()
+	activity, cleanup := m.SubscribeChatActivity()
+	defer cleanup()
+
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+	m.ingestChatEvent("run-1", doneEvent("conv-1"))
+
+	running := <-activity
+	if !running.Running || running.RunID != "run-1" || running.State != RunActivityRunning {
+		t.Fatalf("running activity = %#v", running)
+	}
+	idle := <-activity
+	if idle.Running || idle.ConversationID != "conv-1" {
+		t.Fatalf("idle activity = %#v", idle)
+	}
+
+	// A late subscriber replays current activity.
+	m.ingestChatControl("run-2", startedControl("run-2", "conv-2"))
+	late, lateCleanup := m.SubscribeChatActivity()
+	defer lateCleanup()
+	replayed := <-late
+	if replayed.ConversationID != "conv-2" || replayed.RunID != "run-2" || !replayed.Running {
+		t.Fatalf("late replay = %#v", replayed)
+	}
+}
+
+func TestEvictionProtectsActiveRunUntilHardCap(t *testing.T) {
+	m := NewManager()
+	m.convStreams.eventRetention = time.Millisecond
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+	m.ingestChatEvent("run-1", tokenEvent("conv-1", "one"))
+	time.Sleep(5 * time.Millisecond)
+	m.ingestChatEvent("run-1", tokenEvent("conv-1", "two"))
+
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	sub.Cleanup()
+	if len(sub.Events) != 3 {
+		t.Fatalf("active run events must survive retention, got %v", eventTypes(sub.Events))
+	}
+
+	// After the run finishes, retention applies again.
+	m.ingestChatEvent("run-1", doneEvent("conv-1"))
+	time.Sleep(5 * time.Millisecond)
+	m.convStreams.mu.Lock()
+	stream := m.convStreams.streams["conv-1"]
+	m.convStreams.evictStreamLocked(stream, time.Now())
+	remaining := len(stream.events)
+	evictedThrough := stream.evictedThroughSeq
+	m.convStreams.mu.Unlock()
+	if remaining != 0 || evictedThrough == 0 {
+		t.Fatalf("idle stream should evict all expired events, remaining=%d evictedThrough=%d", remaining, evictedThrough)
+	}
+
+	// Hard cap evicts even active-run events and flags truncation via the
+	// evicted floor so subscribers get a reset.
+	m2 := NewManager()
+	m2.convStreams.maxEvents = 4
+	m2.ingestChatControl("run-1", startedControl("run-1", "conv-x"))
+	for i := 0; i < 10; i++ {
+		m2.ingestChatEvent("run-1", tokenEvent("conv-x", "t"))
+	}
+	m2.convStreams.mu.Lock()
+	streamX := m2.convStreams.streams["conv-x"]
+	if len(streamX.events) > 4 {
+		m2.convStreams.mu.Unlock()
+		t.Fatalf("hard cap not enforced: %d events", len(streamX.events))
+	}
+	if streamX.evictedThroughSeq == 0 {
+		m2.convStreams.mu.Unlock()
+		t.Fatalf("evictedThroughSeq not advanced under hard cap")
+	}
+	m2.convStreams.mu.Unlock()
+}
+
+func TestReaperForceFinishesStaleRunsOnlyWhenOnline(t *testing.T) {
+	m := NewManager()
+	m.convStreams.staleRunTimeout = time.Millisecond
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+	time.Sleep(5 * time.Millisecond)
+
+	// Agent offline: the run is left alone.
+	m.convStreams.reap(time.Now())
+	if activities := m.ActiveConversationActivities(); len(activities) != 1 {
+		t.Fatalf("offline reap must not finish runs, activities=%d", len(activities))
+	}
+
+	// Agent online: the silent run is force-finished.
+	m.SetSession(&AgentSession{
+		toAgent: make(chan *OutboundEnvelope, 1),
+		done:    make(chan struct{}),
+		streams: make(map[string]*agentStream),
+	})
+	m.convStreams.reap(time.Now())
+	if activities := m.ActiveConversationActivities(); len(activities) != 0 {
+		t.Fatalf("online reap must finish stale runs, activities=%d", len(activities))
+	}
+
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	sub.Cleanup()
+	last := sub.Events[len(sub.Events)-1]
+	if last.Type != StreamEventRunFinished || last.Payload["error_code"] != "stale_run" {
+		t.Fatalf("stale finish tail = %s %#v", last.Type, last.Payload)
+	}
+}
+
+func TestCancellingStateAndWatchdog(t *testing.T) {
+	m := NewManager()
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+
+	runID, ok := m.MarkConversationCancelling("conv-1", "")
+	if !ok || runID != "run-1" {
+		t.Fatalf("cancelling = %q %v", runID, ok)
+	}
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+	if sub.Activity == nil || sub.Activity.State != RunActivityCancelling {
+		t.Fatalf("activity = %#v, want cancelling", sub.Activity)
+	}
+
+	// The agent's real terminal wins over the watchdog.
+	m.ingestChatControl("run-1", &gatewayv1.ChatControlEvent{
+		RequestId: "run-1", ConversationId: "conv-1", Type: "cancelled", State: "cancelled",
+	})
+	m.ForceFinishRun("run-1", "cancelled", "cancel_timeout", "watchdog")
+
+	finished := 0
+	for _, event := range drainEvents(t, sub.EventCh, 1) {
+		if event.Type == StreamEventRunFinished {
+			finished++
+			if event.Payload["error_code"] == "cancel_timeout" {
+				t.Fatalf("watchdog overrode the agent terminal: %#v", event.Payload)
+			}
+		}
+	}
+	if finished != 1 {
+		t.Fatalf("run_finished count = %d", finished)
+	}
+}
+
+func TestGatewayRestartSnapshotRebuildsStream(t *testing.T) {
+	// A fresh manager simulates a restarted gateway: the first thing it sees
+	// for the conversation is a runtime snapshot of an in-flight run.
+	m := NewManager()
+	m.ingestRuntimeSnapshot(&gatewayv1.ChatRuntimeSnapshot{
+		RunId:          "run-1",
+		ConversationId: "conv-1",
+		State:          "running",
+		Revision:       7,
+		EntriesJson:    `[{"kind":"assistant","text":"partial"}]`,
+		ToolStatus:     "Vibing",
+	})
+
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+	if sub.Activity == nil || sub.Activity.RunID != "run-1" {
+		t.Fatalf("activity = %#v", sub.Activity)
+	}
+	if sub.Activity.ToolStatus != "Vibing" {
+		t.Fatalf("tool status = %q", sub.Activity.ToolStatus)
+	}
+	if sub.Snapshot == nil || sub.Snapshot.Revision != 7 {
+		t.Fatalf("late joiner must get the snapshot, got %#v", sub.Snapshot)
+	}
+
+	// Live continuation streams normally afterwards.
+	m.ingestChatEvent("run-1", tokenEvent("conv-1", "more"))
+	live := drainEvents(t, sub.EventCh, 1)
+	if live[0].Type != "token" {
+		t.Fatalf("live continuation = %v", eventTypes(live))
+	}
+}
+
+func TestSubscriberOverflowClosesAndResumes(t *testing.T) {
+	m := NewManager()
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+
+	for i := 0; i < conversationSubscriberBuffer+8; i++ {
+		m.ingestChatEvent("run-1", tokenEvent("conv-1", "x"))
+	}
+
+	deadline := time.After(2 * time.Second)
+	closed := false
+	received := 0
+	for !closed {
+		select {
+		case _, ok := <-sub.EventCh:
+			if !ok {
+				closed = true
+				break
+			}
+			received++
+			if received > conversationSubscriberBuffer+8 {
+				t.Fatalf("received more events than sent")
+			}
+		case <-deadline:
+			t.Fatalf("subscriber channel never closed on overflow")
+		}
+	}
+	if !sub.Overflowed() {
+		t.Fatalf("overflow flag not set")
+	}
+
+	// Resume from the last seen seq replays the tail without loss.
+	resume := m.SubscribeConversationStream("conv-1", int64(received)+1, sub.StreamEpoch)
+	resume.Cleanup()
+	if resume.Reset {
+		t.Fatalf("resume after overflow should not reset while buffer covers the gap")
+	}
+	total := received + len(resume.Events)
+	if total < conversationSubscriberBuffer+8 {
+		t.Fatalf("lost events across overflow: saw %d", total)
+	}
+}
