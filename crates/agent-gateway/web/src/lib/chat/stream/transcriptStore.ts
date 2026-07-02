@@ -386,75 +386,120 @@ export function createTranscriptStore(): TranscriptStore {
       // tool entries match by tool-call identity, immune to live-path
       // trimming) and keep tail entries where they are: committed only takes
       // what the tail is not showing.
-      const existingByKey = new Map<string, ChatEntry>();
+      //
+      // Dedup keys are NOT unique across the transcript (a repeated user
+      // prompt, id-less tool calls sharing name + round across runs), so
+      // matching is occurrence-aware: each rendered occurrence can be
+      // adopted at most once, consumed in transcript order — committed
+      // copies (older) before tail copies (newest). Two history entries can
+      // therefore never adopt the same id; duplicate ids corrupt both React
+      // keying and the virtualizer's measurement cache.
+      const committedQueueByKey = new Map<string, ChatEntry[]>();
       for (const entry of committed) {
-        existingByKey.set(chatEntryDedupKey(entry), entry);
+        const key = chatEntryDedupKey(entry);
+        const queue = committedQueueByKey.get(key);
+        if (queue) {
+          queue.push(entry);
+        } else {
+          committedQueueByKey.set(key, [entry]);
+        }
       }
-      const settledIndexByKey = new Map<string, number>();
+      const settledIndexQueueByKey = new Map<string, number[]>();
       settled.forEach((entry, index) => {
-        settledIndexByKey.set(chatEntryDedupKey(entry), index);
+        const key = chatEntryDedupKey(entry);
+        const queue = settledIndexQueueByKey.get(key);
+        if (queue) {
+          queue.push(index);
+        } else {
+          settledIndexQueueByKey.set(key, [index]);
+        }
       });
-      const liveIndexByKey = new Map<string, number>();
+      const liveIndexQueueByKey = new Map<string, number[]>();
       live.forEach((entry, index) => {
-        liveIndexByKey.set(chatEntryDedupKey(entry), index);
+        const key = chatEntryDedupKey(entry);
+        const queue = liveIndexQueueByKey.get(key);
+        if (queue) {
+          queue.push(index);
+        } else {
+          liveIndexQueueByKey.set(key, [index]);
+        }
       });
+
+      // Tail ids stay as-is and must never be re-issued to a committed entry.
+      const usedIds = new Set<string>();
+      for (const entry of settled) {
+        usedIds.add(entry.id);
+      }
+      for (const entry of live) {
+        usedIds.add(entry.id);
+      }
+      const uniqueId = (candidate: string) => {
+        if (!usedIds.has(candidate)) {
+          return candidate;
+        }
+        let suffix = 2;
+        while (usedIds.has(`${candidate}#${suffix}`)) {
+          suffix += 1;
+        }
+        return `${candidate}#${suffix}`;
+      };
 
       const nextCommitted: ChatEntry[] = [];
       let nextSettled = settled;
       let nextLive = live;
-      let changed = entries.length !== committed.length;
       let tailChanged = false;
       for (const entry of entries) {
         const key = chatEntryDedupKey(entry);
-        const settledIndex = settledIndexByKey.get(key);
-        const liveIndex = settledIndex === undefined ? liveIndexByKey.get(key) : undefined;
-        if (settledIndex !== undefined || liveIndex !== undefined) {
+        const committedMatch = committedQueueByKey.get(key)?.shift();
+        if (committedMatch) {
+          // Same logical entry: keep the rendered id, upgrade the payload
+          // (history carries full, untrimmed tool content).
+          const id = uniqueId(committedMatch.id);
+          nextCommitted.push(entry.id === id ? entry : { ...entry, id });
+          usedIds.add(id);
+          continue;
+        }
+        const settledIndex = settledIndexQueueByKey.get(key)?.shift();
+        if (settledIndex !== undefined) {
           // Already rendered in the tail region (folds in at run_started).
           // Upgrade the tail entry in place — same id, same position — with
           // the history payload: this is what gives the just-settled user
           // bubble its messageRef (edit-resend affordance) and tool cards
           // their full, untrimmed content.
-          if (settledIndex !== undefined) {
-            const existing = nextSettled[settledIndex];
-            if (existing) {
-              if (nextSettled === settled) {
-                nextSettled = settled.slice();
-              }
-              nextSettled[settledIndex] = { ...entry, id: existing.id };
-              tailChanged = true;
+          const existing = nextSettled[settledIndex];
+          if (existing) {
+            if (nextSettled === settled) {
+              nextSettled = settled.slice();
             }
-          } else if (liveIndex !== undefined) {
-            const existing = nextLive[liveIndex];
-            if (existing) {
-              if (nextLive === live) {
-                nextLive = live.slice();
-              }
-              nextLive[liveIndex] = { ...entry, id: existing.id };
-              tailChanged = true;
-            }
+            nextSettled[settledIndex] = { ...entry, id: existing.id };
+            tailChanged = true;
           }
-          changed = true;
           continue;
         }
-        const existing = existingByKey.get(key);
-        if (existing) {
-          // Same logical entry: keep the rendered id, upgrade the payload
-          // (history carries full, untrimmed tool content).
-          const upgraded = entry.id === existing.id ? entry : { ...entry, id: existing.id };
-          nextCommitted.push(upgraded);
-          if (existing !== upgraded) {
-            changed = true;
+        const liveIndex = liveIndexQueueByKey.get(key)?.shift();
+        if (liveIndex !== undefined) {
+          const existing = nextLive[liveIndex];
+          if (existing) {
+            if (nextLive === live) {
+              nextLive = live.slice();
+            }
+            nextLive[liveIndex] = { ...entry, id: existing.id };
+            tailChanged = true;
           }
-        } else {
-          nextCommitted.push(entry);
-          changed = true;
+          continue;
         }
+        const id = uniqueId(entry.id);
+        nextCommitted.push(entry.id === id ? entry : { ...entry, id });
+        usedIds.add(id);
       }
       if (tailChanged) {
         settled = nextSettled;
         live = nextLive;
       }
-      if (!tailChanged && !changed && nextCommitted.length === committed.length) {
+      const committedUnchanged =
+        nextCommitted.length === committed.length &&
+        nextCommitted.every((entry, index) => entry === committed[index]);
+      if (!tailChanged && committedUnchanged) {
         return;
       }
       committed = nextCommitted;

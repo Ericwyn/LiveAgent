@@ -2279,6 +2279,7 @@ export default function GatewayApp() {
       message,
       attachments: uploadedFiles,
       isEditResend: Boolean(options?.editMessageRef),
+      optimistic: options?.optimisticEcho !== false,
       submit: () => api.chatCommand(commandInput),
     });
 
@@ -2423,15 +2424,18 @@ export default function GatewayApp() {
         refreshChatQueueSnapshot(conversationIdValue);
         return true;
       }
-      // Same pipeline path as a normal send: `command_update queued_in_gui`
-      // (or the stream's run_queued event) refreshes the queue snapshot; a
-      // direct start settles through run_started.
+      // Same pipeline path as a normal send, minus the optimistic transcript
+      // echo — the prompt is queue-destined and must not flash a bubble.
+      // `command_update queued_in_gui` (or the stream's run_queued event)
+      // refreshes the queue snapshot; a direct start settles through
+      // run_started (whose deferred seeds then render the user message).
       const outcome = await sendChat(materialized.text, {
         conversationId: conversationIdValue,
         uploadedFiles: materialized.uploadedFiles,
         runtimeControls: chatRuntimeControlsForCurrentProvider,
         workdir: workdirForTurn,
         queuePolicy,
+        optimisticEcho: false,
       });
       if (!outcome) {
         // Benign no-op (client not ready): restore the composer without

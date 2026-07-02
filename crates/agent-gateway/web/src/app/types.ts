@@ -20,6 +20,9 @@ export type SendChatOptions = {
   workdir?: string;
   editMessageRef?: HistoryMessageRef;
   queuePolicy?: "auto" | "append" | "interrupt";
+  // false for queue-destined sends: no transcript echo, the queue panel owns
+  // the prompt until it actually runs.
+  optimisticEcho?: boolean;
 };
 
 export type SendChatFn = (

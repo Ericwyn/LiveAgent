@@ -684,3 +684,88 @@ func TestWatchChatCommandCleanupClosesChannel(t *testing.T) {
 		t.Fatalf("watch channel not closed by cleanup")
 	}
 }
+
+func TestSeedsDeferredWhileAnotherRunIsActive(t *testing.T) {
+	m := NewManager()
+	m.ingestChatControl("run-a", startedControl("run-a", "conv-1"))
+	m.ingestChatEvent("run-a", tokenEvent("conv-1", "streaming"))
+
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+
+	// Command accepted mid-run: nothing may reach the log yet — a seeded
+	// user_message here would flash a bubble until queued_in_gui compensates.
+	start := m.StartChatCommand("run-b", "conv-1", "", "client-b", []map[string]any{
+		{"type": "user_message", "message": "queued while busy"},
+	})
+	if start.AcceptedSeq != sub.LatestSeq {
+		t.Fatalf("deferred accept must not append events: acceptedSeq=%d latest=%d", start.AcceptedSeq, sub.LatestSeq)
+	}
+
+	// The desktop parks it: still nothing in the log (no run_queued needed).
+	m.ingestChatControl("run-b", &gatewayv1.ChatControlEvent{
+		RequestId: "run-b", ConversationId: "conv-1", Type: "queued_in_gui",
+	})
+	m.ingestChatEvent("run-a", tokenEvent("conv-1", "more"))
+	live := drainEvents(t, sub.EventCh, 1)
+	if live[0].Type != "token" {
+		t.Fatalf("expected only run-a token after deferred accept + park, got %v", eventTypes(live))
+	}
+
+	// The queued item eventually auto-sends: the agent echo is authoritative.
+	m.ingestChatEvent("run-a", doneEvent("conv-1"))
+	m.ingestChatControl("run-b", startedControl("run-b", "conv-1"))
+	echo, _ := json.Marshal(map[string]any{"message": "queued while busy"})
+	m.ingestChatEvent("run-b", &gatewayv1.ChatEvent{
+		Type: gatewayv1.ChatEvent_USER_MESSAGE, ConversationId: "conv-1", Data: string(echo),
+	})
+	tail := drainEvents(t, sub.EventCh, 3)
+	types := eventTypes(tail)
+	if types[0] != StreamEventRunFinished || types[1] != StreamEventRunStarted || types[2] != "user_message" {
+		t.Fatalf("auto-send tail = %v, want [run_finished run_started user_message]", types)
+	}
+}
+
+func TestDeferredSeedsFlushWhenRunStartsDirectly(t *testing.T) {
+	m := NewManager()
+	m.ingestChatControl("run-a", startedControl("run-a", "conv-1"))
+
+	m.StartChatCommand("run-b", "conv-1", "", "client-b", []map[string]any{
+		{"type": "user_message", "message": "interrupt prompt"},
+	})
+
+	// The desktop runs the command immediately (interrupt policy): the
+	// deferred seeds surface right before run_started, and the agent's echo
+	// is swallowed as usual.
+	m.ingestChatControl("run-b", startedControl("run-b", "conv-1"))
+	echo, _ := json.Marshal(map[string]any{"message": "interrupt prompt"})
+	m.ingestChatEvent("run-b", &gatewayv1.ChatEvent{
+		Type: gatewayv1.ChatEvent_USER_MESSAGE, ConversationId: "conv-1", Data: string(echo),
+	})
+	m.ingestChatEvent("run-b", tokenEvent("conv-1", "reply"))
+
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+	types := eventTypes(sub.Events)
+	want := []string{"run_started", "run_finished", "user_message", "run_started", "token"}
+	if len(types) != len(want) {
+		t.Fatalf("replay = %v, want %v", types, want)
+	}
+	for i := range want {
+		if types[i] != want[i] {
+			t.Fatalf("replay = %v, want %v", types, want)
+		}
+	}
+	userMessages := 0
+	for _, event := range sub.Events {
+		if event.Type == "user_message" {
+			userMessages++
+			if event.Payload["client_request_id"] != "client-b" {
+				t.Fatalf("seeded user_message missing client_request_id: %#v", event.Payload)
+			}
+		}
+	}
+	if userMessages != 1 {
+		t.Fatalf("user_message count = %d, want 1 (echo swallowed)", userMessages)
+	}
+}

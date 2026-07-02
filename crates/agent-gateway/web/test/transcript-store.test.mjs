@@ -541,3 +541,90 @@ test("history snapshot upgrades matching tail entries in place (messageRef arriv
   );
 });
 
+
+test("history merge is occurrence-aware: repeated dedup keys never share an id", () => {
+  const store = createTranscriptStore();
+  // Two identical user prompts and two id-less same-name tool calls in the
+  // same round across runs — every dedup key below collides.
+  store.applyHistorySnapshot([
+    { id: "hist-1", kind: "user", text: "继续", attachments: [] },
+    { id: "hist-2", kind: "assistant", text: "第一次回复", round: 0 },
+    { id: "hist-3", kind: "user", text: "继续", attachments: [] },
+    { id: "hist-4", kind: "assistant", text: "第二次回复", round: 0 },
+  ]);
+  store.flush();
+  let snapshot = store.getSnapshot();
+  assert.equal(snapshot.committed.length, 4);
+  let ids = snapshot.committed.map((entry) => entry.id);
+  assert.equal(new Set(ids).size, ids.length, `duplicate ids: ${ids.join(", ")}`);
+
+  // Re-merging the same snapshot keeps every occurrence, ids stay unique and
+  // stable (each occurrence adopts its own previous id, in order).
+  const before = snapshot.committed.map((entry) => entry.id);
+  store.applyHistorySnapshot([
+    { id: "hist-1b", kind: "user", text: "继续", attachments: [] },
+    { id: "hist-2b", kind: "assistant", text: "第一次回复", round: 0 },
+    { id: "hist-3b", kind: "user", text: "继续", attachments: [] },
+    { id: "hist-4b", kind: "assistant", text: "第二次回复", round: 0 },
+  ]);
+  store.flush();
+  snapshot = store.getSnapshot();
+  assert.deepEqual(
+    snapshot.committed.map((entry) => entry.id),
+    before,
+    "occurrences adopt their own previous ids in order",
+  );
+  assert.equal(snapshot.committed.length, 4, "no occurrence dropped");
+});
+
+test("history merge with a committed copy and an identical tail copy keeps both", () => {
+  const store = createTranscriptStore();
+  // Older identical prompt already in committed…
+  store.applyHistorySnapshot([
+    { id: "hist-1", kind: "user", text: "ok", attachments: [] },
+    { id: "hist-2", kind: "assistant", text: "先前的回复", round: 0 },
+  ]);
+  // …and the same text sent again in the current run (tail).
+  store.applyEvent(userMessage("run-2", 10, "ok"));
+  store.applyEvent(runStarted("run-2", 11));
+  store.applyEvent(runFinished("run-2", 12));
+  store.flush();
+
+  const tailUserId = store.getSnapshot().tail.find((entry) => entry.kind === "user")?.id;
+  assert.ok(tailUserId, "tail keeps the new occurrence");
+
+  // History now holds both occurrences: the older one matches the committed
+  // copy (id preserved), the newer one upgrades the tail copy in place with
+  // its messageRef — neither is dropped, no id is shared.
+  store.applyHistorySnapshot([
+    { id: "hist-1", kind: "user", text: "ok", attachments: [] },
+    { id: "hist-2", kind: "assistant", text: "先前的回复", round: 0 },
+    {
+      id: "hist-3",
+      kind: "user",
+      text: "ok",
+      attachments: [],
+      messageRef: {
+        segmentIndex: 0,
+        messageIndex: 2,
+        segmentId: "segment-1",
+        messageId: "message-3",
+        role: "user",
+        contentHash: "hash-3",
+      },
+    },
+    { id: "hist-4", kind: "assistant", text: "新的回复", round: 0 },
+  ]);
+  store.flush();
+  const snapshot = store.getSnapshot();
+  assert.equal(
+    snapshot.committed.filter((entry) => entry.kind === "user" && entry.text === "ok").length,
+    1,
+    "committed keeps the older occurrence",
+  );
+  const tailUser = snapshot.tail.find((entry) => entry.kind === "user");
+  assert.equal(tailUser?.id, tailUserId, "tail occurrence keeps its id");
+  assert.equal(tailUser?.messageRef?.messageId, "message-3", "tail occurrence gains its messageRef");
+  const allIds = [...snapshot.committed, ...snapshot.tail].map((entry) => entry.id);
+  assert.equal(new Set(allIds).size, allIds.length, `duplicate ids: ${allIds.join(", ")}`);
+});

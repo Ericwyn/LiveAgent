@@ -212,3 +212,32 @@ test("run signals with a known runId settle regardless of clientRequestId", asyn
   assert.equal(pipeline.hasPending("conv-1"), false);
 });
 
+
+test("optimistic:false suppresses the transcript echo for queue-destined sends", async () => {
+  const { pipeline, stores } = createHarness();
+  await pipeline.submit({
+    conversationId: "conv-1",
+    clientRequestId: "client-1",
+    message: "park me quietly",
+    optimistic: false,
+    submit: async () => ({ runId: "run-1", conversationId: "conv-1", acceptedSeq: 0 }),
+  });
+  // No store is touched at submit time — the transcript never sees the prompt.
+  const storeAfterSubmit = stores.get("conv-1");
+  if (storeAfterSubmit) {
+    assert.deepEqual(tailTexts(storeAfterSubmit), [], "no bubble flash");
+  }
+  assert.equal(pipeline.hasPending("conv-1"), true, "watchdog still armed");
+
+  // queued_in_gui settles it without ever having shown a bubble.
+  pipeline.handleCommandUpdate({
+    runId: "run-1",
+    clientRequestId: "client-1",
+    conversationId: "conv-1",
+    phase: "queued_in_gui",
+    errorCode: null,
+    message: null,
+  });
+  assert.equal(pipeline.hasPending("conv-1"), false);
+  assert.deepEqual(tailTexts(stores.get("conv-1")), []);
+});

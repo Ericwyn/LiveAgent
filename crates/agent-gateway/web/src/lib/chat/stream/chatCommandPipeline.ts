@@ -17,6 +17,10 @@ export type ChatCommandRequest = {
   // edit_resend commands seed an optimistic `rebased` truncation; compensation
   // paths (queued_in_gui / failed) need to know to restore the transcript.
   isEditResend?: boolean;
+  // Queue-destined submissions (a run is already streaming) skip the local
+  // echo: the prompt belongs in the queue panel, and a transcript bubble
+  // would just flash until the queued_in_gui compensation removed it.
+  optimistic?: boolean;
   submit: () => Promise<ChatCommandAccepted>;
 };
 
@@ -59,12 +63,13 @@ export class ChatCommandPipeline {
   }
 
   async submit(request: ChatCommandRequest): Promise<ChatCommandOutcome> {
-    const store = this.hooks.getTranscriptStore(request.conversationId);
-    store.addOptimisticUserEntry({
-      clientRequestId: request.clientRequestId,
-      text: request.message,
-      attachments: request.attachments as never,
-    });
+    if (request.optimistic !== false) {
+      this.hooks.getTranscriptStore(request.conversationId).addOptimisticUserEntry({
+        clientRequestId: request.clientRequestId,
+        text: request.message,
+        attachments: request.attachments as never,
+      });
+    }
 
     const pending: PendingChatCommand = {
       runId: null,

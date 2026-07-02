@@ -869,8 +869,22 @@ const GatewayTranscriptHistory = memo(function GatewayTranscriptHistory(props: {
     if (!readOnly && hasMoreHistory) {
       next.push({ key: "load-remote-history", kind: "loadRemoteHistory" });
     }
+    // Row keys feed both React reconciliation and the virtualizer's
+    // measurement cache; a duplicate key collapses row positions onto each
+    // other. The store guarantees unique entry ids, but keep the renderer
+    // safe against any upstream regression by suffixing repeats.
+    const seenKeys = new Set<string>();
     for (const item of items) {
-      next.push({ key: item.id, kind: "history", item });
+      let key = item.id;
+      if (seenKeys.has(key)) {
+        let suffix = 2;
+        while (seenKeys.has(`${key}#${suffix}`)) {
+          suffix += 1;
+        }
+        key = `${key}#${suffix}`;
+      }
+      seenKeys.add(key);
+      next.push({ key, kind: "history", item });
     }
     return next;
   }, [hasMoreHistory, items, readOnly]);

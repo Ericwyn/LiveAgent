@@ -159,6 +159,10 @@ func (s *conversationStreamStore) markRunQueuedInGUILocked(
 	record.queuedInGUI = true
 	seeded := record.userMessageSeeded
 	record.userMessageSeeded = false
+	// Seeds deferred at accept time never reached the log: drop them. The
+	// prompt now lives in the desktop queue (editable there), and the agent's
+	// echo is the authoritative text when the item eventually runs.
+	record.deferredSeeds = nil
 
 	if seeded {
 		payload := map[string]any{}

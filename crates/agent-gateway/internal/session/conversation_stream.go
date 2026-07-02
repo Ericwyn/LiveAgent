@@ -157,6 +157,11 @@ type chatRunRecord struct {
 	// run started via supersession still protects its seeded user_message
 	// from retention eviction.
 	firstSeededSeq int64
+	// deferredSeeds holds seeded payloads of a command accepted while another
+	// run was active: appended only when this run actually starts (or fails),
+	// dropped when it parks in the desktop prompt queue — so a queue-bound
+	// prompt never flashes a transcript bubble.
+	deferredSeeds []map[string]any
 	// queuedInGUI marks commands the desktop app parked in its prompt queue;
 	// the startup watchdog must leave them alone.
 	queuedInGUI bool
@@ -509,6 +514,7 @@ func (s *conversationStreamStore) runStartedLocked(
 			// The gateway-accepted command actually started: append the
 			// run_started log event now. StartedSeq keeps covering the seeded
 			// user_message so the whole run stays replayable.
+			s.flushDeferredSeedsLocked(stream, runID, s.runRecordLocked(runID, stream.conversationID), now)
 			payload := map[string]any{}
 			if stream.activity.ClientRequestID != "" {
 				payload["client_request_id"] = stream.activity.ClientRequestID
@@ -537,6 +543,7 @@ func (s *conversationStreamStore) runStartedLocked(
 		stream.workdir = workdir
 	}
 	record := s.runRecordLocked(runID, stream.conversationID)
+	s.flushDeferredSeedsLocked(stream, runID, record, now)
 	payload := map[string]any{}
 	if record.clientRequestID != "" {
 		payload["client_request_id"] = record.clientRequestID
@@ -765,6 +772,22 @@ func (m *Manager) StartChatCommand(
 	}
 	record := s.runRecordLocked(runID, conversationID)
 	record.clientRequestID = clientRequestID
+
+	if stream.activity != nil {
+		// A run is already active: this command is almost certainly headed
+		// for the desktop prompt queue. Seeding the user_message into the log
+		// now would flash a bubble on every viewer until the queued_in_gui
+		// compensation removes it — defer the seeds until the run actually
+		// starts (or fails); if it parks in the GUI queue they are dropped
+		// and the agent's own echo becomes authoritative.
+		record.deferredSeeds = seededPayloads
+		return ChatCommandStart{
+			RunID:          runID,
+			ConversationID: conversationID,
+			AcceptedSeq:    stream.lastSeq,
+		}
+	}
+
 	// Mark queued before seeding so the activity's StartedSeq covers the
 	// seeded user_message — the whole run replays from one cursor.
 	s.markRunQueuedLocked(stream, runID, clientRequestID, now)
@@ -775,6 +798,24 @@ func (m *Manager) StartChatCommand(
 		ConversationID: conversationID,
 		AcceptedSeq:    acceptedSeq,
 	}
+}
+
+// flushDeferredSeedsLocked appends seeds that were deferred because another
+// run was active at accept time. Called right before the run's run_started
+// event so the log keeps the normal [user_message, run_started, ...] shape.
+func (s *conversationStreamStore) flushDeferredSeedsLocked(
+	stream *conversationStream,
+	runID string,
+	record *chatRunRecord,
+	now time.Time,
+) {
+	if len(record.deferredSeeds) == 0 {
+		return
+	}
+	seeds := record.deferredSeeds
+	record.deferredSeeds = nil
+	s.appendSeededPayloadsLocked(stream, runID, record.clientRequestID, seeds, now)
+	record.userMessageSeeded = seededPayloadsIncludeUserMessage(seeds)
 }
 
 func (s *conversationStreamStore) appendSeededPayloadsLocked(
@@ -848,6 +889,9 @@ func (m *Manager) FailChatCommand(runID string, errorCode string, message string
 	if stream == nil {
 		return
 	}
+	// Seeds deferred at accept time surface now so the failure has its user
+	// message for context; runFinishedLocked follows with the error.
+	s.flushDeferredSeedsLocked(stream, runID, record, now)
 	s.runFinishedLocked(stream, runID, "failed", errorCode, message, nil, now)
 }
 
