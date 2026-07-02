@@ -69,21 +69,3 @@ func newSyncHub() *syncHub {
 	}
 }
 
-type chatRunStore struct {
-	chatCommandMu         sync.Mutex
-	chatMu                sync.Mutex
-	nextChatRunSubID      int
-	nextChatRunEpoch      int64
-	chatRuns              map[string]*chatRun
-	chatRunByConversation map[string]string
-
-	relayBufferRetention time.Duration
-}
-
-func newChatRunStore() *chatRunStore {
-	return &chatRunStore{
-		chatRuns:              make(map[string]*chatRun),
-		chatRunByConversation: make(map[string]string),
-		relayBufferRetention:  defaultRelayBufferRetention,
-	}
-}

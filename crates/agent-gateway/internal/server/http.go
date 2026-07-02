@@ -38,10 +38,8 @@ func NewHTTPServer(cfg *config.Config, sm *session.Manager) http.Handler {
 	rootMux.HandleFunc("GET /api/public/history-shares/{token}", publicHistoryShare(cfg, sm))
 
 	apiMux := http.NewServeMux()
-	chatLimiter := newChatRateLimiter()
 	apiMux.HandleFunc("GET /api/status", handler.Status(sm))
 	apiMux.HandleFunc("POST /api/files/import", handler.ImportReadableFiles(sm, cfg.RequestTimeout))
-	apiMux.HandleFunc("POST /api/chat/commands", chatCommandsHTTP(cfg, sm, chatLimiter))
 	rootMux.Handle("/api/", auth.HTTPMiddleware(cfg.Token, apiMux))
 
 	webFS, err := fs.Sub(gateway.WebUIAssets, "web/dist")

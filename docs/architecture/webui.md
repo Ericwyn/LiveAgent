@@ -26,7 +26,7 @@ WebUI 是 Gateway 承载的浏览器端操作台。它复用/复制了大量 GUI
 | socket 创建 | `getGatewayWebSocketClient(token)` 建立 `/ws` 连接。 |
 | 状态订阅 | 订阅 Gateway status，展示 Desktop Agent online/offline。 |
 | 请求响应 | 所有 request 带 id，Gateway 用同 id 返回 payload 或 error。 |
-| Chat 流 | 提交/编辑/取消走 `POST /api/chat/commands`，流式输出走 `GET /api/chat/events` fetch SSE。 |
+| Chat 流 | 提交/编辑/取消走 WebSocket `chat.command`；流式输出走按会话持久订阅 `chat.subscribe`（`chat.event` 推送，seq 续传）。 |
 | 断线恢复 | WebSocket client 处理普通同步重连；Chat SSE 在 history snapshot hydrate 后按同 conversation 单调递增的 `after_seq` 或 `Last-Event-ID` 跨 run 补齐缺失事件；观察正在运行的远程会话时优先使用 `history.list.running_conversations[].first_seq - 1` 作为当前 run 的订阅起点。 |
 
 ## WebUI 本地状态

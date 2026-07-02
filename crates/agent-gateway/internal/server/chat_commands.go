@@ -26,14 +26,6 @@ type chatCommandMessageRef struct {
 	ContentHash  string `json:"content_hash"`
 }
 
-type chatCommandStart struct {
-	RunID          string
-	ConversationID string
-	AcceptedSeq    int64
-	Created        bool
-	State          string
-}
-
 func newChatTraceID() string {
 	return strings.ReplaceAll(uuid.NewString(), "-", "")
 }
@@ -90,49 +82,21 @@ func normalizeChatQueuePolicy(value string) string {
 	}
 }
 
-func startAcceptedChatCommand(
-	sm *session.Manager,
-	requestID string,
-	body handler.ChatRequestBody,
-	initialPayloads []map[string]any,
-) (chatCommandStart, error) {
-	requestID = strings.TrimSpace(requestID)
-	if requestID == "" {
-		requestID = "chat-command-" + uuid.NewString()
-	}
-	snapshot, created, acceptedSeq, err := sm.StartAcceptedChatCommandRun(
-		requestID,
-		body.ConversationID,
-		body.Workdir,
-		initialPayloads,
-	)
-	if err != nil {
-		return chatCommandStart{}, err
-	}
-	runID := snapshot.RequestID
-	if runID == "" {
-		runID = requestID
-	}
-	return chatCommandStart{
-		RunID:          runID,
-		ConversationID: strings.TrimSpace(snapshot.ConversationID),
-		AcceptedSeq:    acceptedSeq,
-		Created:        created,
-		State:          strings.TrimSpace(snapshot.State),
-	}, nil
-}
-
+// dispatchAcceptedChatCommand delivers the accepted command to the agent and
+// arms the startup watchdog. cleanupWatch closes the caller's command-update
+// watch once the command has either settled or been failed.
 func dispatchAcceptedChatCommand(
 	parent context.Context,
 	cfg *config.Config,
 	sm *session.Manager,
-	start chatCommandStart,
+	cleanupWatch func(),
+	start session.ChatCommandStart,
 	body handler.ChatRequestBody,
 	baseMessageRef *chatCommandMessageRef,
 	traceID string,
 ) {
-	if !start.Created {
-		return
+	if cleanupWatch != nil {
+		defer cleanupWatch()
 	}
 	timeout := 2 * time.Minute
 	if cfg != nil && cfg.RequestTimeout > 0 {
@@ -146,13 +110,20 @@ func dispatchAcceptedChatCommand(
 		commandType = "chat.edit_resend"
 	}
 	if err := sm.SendToAgentContext(ctx, buildChatCommandEnvelope(start.RunID, commandType, body, baseMessageRef)); err != nil {
-		failAcceptedChatCommand(sm, start.RunID, body.ConversationID, "desktop_runtime_unavailable", err)
+		message := "chat command failed"
+		if err != nil && strings.TrimSpace(err.Error()) != "" {
+			message = strings.TrimSpace(err.Error())
+		}
+		sm.FailChatCommand(start.RunID, "desktop_runtime_unavailable", message)
 		return
 	}
 	logChatCommandSpan(traceID, "command_delivered", start.RunID, start.ConversationID, body.ClientRequestID, commandType)
 	watchAcceptedChatCommandStartup(parent, cfg, sm, start.RunID)
 }
 
+// watchAcceptedChatCommandStartup fails a command whose run never settled
+// (started, finished, or parked in the desktop prompt queue) within the
+// configured startup window.
 func watchAcceptedChatCommandStartup(
 	parent context.Context,
 	cfg *config.Config,
@@ -165,13 +136,17 @@ func watchAcceptedChatCommandStartup(
 	if !waitChatCommandWatchdog(parent, chatStartTimeout(cfg)) {
 		return
 	}
-	if sm.FailStartingChatRun(runID, "Desktop backend did not accept the remote chat request. Please retry.") {
+	if sm.ChatCommandSettled(runID) {
 		return
 	}
 	if !waitChatCommandWatchdog(parent, chatRenderStartTimeout(cfg)) {
 		return
 	}
-	sm.FailUnstartedChatRun(runID, "Desktop app accepted the remote chat request but did not start it. Please retry.")
+	if sm.ChatCommandSettled(runID) {
+		return
+	}
+	sm.FailChatCommand(runID, "startup_timeout",
+		"The desktop app did not start the remote chat request. Please retry.")
 }
 
 func waitChatCommandWatchdog(ctx context.Context, timeout time.Duration) bool {
@@ -237,20 +212,6 @@ func buildUserMessageAppendedPayload(
 		payload["reason"] = "edit_resend"
 	}
 	return payload
-}
-
-func failAcceptedChatCommand(
-	sm *session.Manager,
-	runID string,
-	conversationID string,
-	errorCode string,
-	err error,
-) {
-	message := "chat command failed"
-	if err != nil && strings.TrimSpace(err.Error()) != "" {
-		message = strings.TrimSpace(err.Error())
-	}
-	sm.MarkChatRunControl(runID, conversationID, "failed", errorCode, message)
 }
 
 func buildChatCommandEnvelope(

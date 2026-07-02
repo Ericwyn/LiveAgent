@@ -73,9 +73,6 @@ func websocketErrorMessage(err error) string {
 	if errors.Is(err, session.ErrAgentOffline) {
 		return "agent offline"
 	}
-	if errors.Is(err, session.ErrChatRunNotFound) {
-		return "chat stream not available"
-	}
 	return err.Error()
 }
 

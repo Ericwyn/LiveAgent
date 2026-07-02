@@ -112,22 +112,24 @@ type websocketConnection struct {
 	lastPongAt time.Time
 	lastPongMu sync.Mutex
 
-	historyEvents          <-chan *gatewayv1.HistorySyncEvent
-	historyEventsCleanup   func()
-	settingsEvents         <-chan *gatewayv1.SettingsSyncEvent
-	settingsEventsCleanup  func()
-	terminalEvents         <-chan *gatewayv1.TerminalEvent
-	terminalEventsCleanup  func()
-	sftpEvents             <-chan *gatewayv1.SftpEvent
-	sftpEventsCleanup      func()
-	chatQueueEvents        <-chan *gatewayv1.ChatQueueEvent
-	chatQueueEventsCleanup func()
-	heartbeatOnce          sync.Once
+	historyEvents             <-chan *gatewayv1.HistorySyncEvent
+	historyEventsCleanup      func()
+	settingsEvents            <-chan *gatewayv1.SettingsSyncEvent
+	settingsEventsCleanup     func()
+	terminalEvents            <-chan *gatewayv1.TerminalEvent
+	terminalEventsCleanup     func()
+	sftpEvents                <-chan *gatewayv1.SftpEvent
+	sftpEventsCleanup         func()
+	chatQueueEvents           <-chan *gatewayv1.ChatQueueEvent
+	chatQueueEventsCleanup    func()
+	chatActivityEvents        <-chan session.ConversationActivityEvent
+	chatActivityEventsCleanup func()
+	heartbeatOnce             sync.Once
 
 	terminalInterest *websocketTerminalInterestTracker
 
-	chatSubsMu sync.Mutex
-	chatSubs   map[string]*chatSubscription
+	chatStreamsMu sync.Mutex
+	chatStreams   map[string]*chatStreamSubscription
 }
 
 const maxHistoryListLimit = 200
@@ -238,7 +240,11 @@ func (c *websocketConnection) close() {
 			c.chatQueueEventsCleanup()
 			c.chatQueueEventsCleanup = nil
 		}
-		c.cleanupChatSubscriptions()
+		if c.chatActivityEventsCleanup != nil {
+			c.chatActivityEventsCleanup()
+			c.chatActivityEventsCleanup = nil
+		}
+		c.cleanupChatStreamSubscriptions()
 		_ = c.conn.Close()
 	})
 }
@@ -265,6 +271,7 @@ func (c *websocketConnection) handleAuth(req websocketRequest) {
 	c.startTerminalEventForwarder()
 	c.startSftpEventForwarder()
 	c.startChatQueueEventForwarder()
+	c.startChatActivityForwarder()
 	c.startWebSocketHeartbeat()
 	if err := c.writeResponse(req.ID, map[string]any{"ok": true}); err != nil {
 		c.close()
@@ -291,26 +298,33 @@ func (c *websocketConnection) startHistorySyncForwarder() {
 				if !ok {
 					return
 				}
-				payload := websocketHistorySyncPayload(event, c.sm.ActiveChatRunSummaries()...)
-				if payload["kind"] == "running" && payload["run_id"] == nil {
-					conversationID := historySyncPayloadConversationID(payload, event)
-					if conversationID != "" {
-						if summary, ok := c.sm.ConversationRunSummary(conversationID); ok {
-							enrichHistorySyncRunningPayload(payload, summary)
-						}
-					}
+				if err := c.writeEvent("history.event", websocketHistorySyncPayload(event)); err != nil {
+					return
 				}
-				if payload["kind"] == "idle" && payload["run_id"] == nil {
-					conversationID := historySyncPayloadConversationID(payload, event)
-					if conversationID != "" {
-						if summary, ok := c.sm.ConversationRunSummary(conversationID); ok {
-							if rid := strings.TrimSpace(summary.RequestID); rid != "" {
-								payload["run_id"] = rid
-							}
-						}
-					}
+			}
+		}
+	}()
+}
+
+func (c *websocketConnection) startChatActivityForwarder() {
+	if c.chatActivityEvents != nil || c.chatActivityEventsCleanup != nil {
+		return
+	}
+
+	activityEvents, cleanup := c.sm.SubscribeChatActivity()
+	c.chatActivityEvents = activityEvents
+	c.chatActivityEventsCleanup = cleanup
+
+	go func() {
+		for {
+			select {
+			case <-c.done:
+				return
+			case event, ok := <-activityEvents:
+				if !ok {
+					return
 				}
-				if err := c.writeEvent("history.event", payload); err != nil {
+				if err := c.writeEvent("chat.activity", websocketChatActivityPayload(event)); err != nil {
 					return
 				}
 			}

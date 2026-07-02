@@ -9,7 +9,6 @@ import (
 )
 
 var ErrAgentOffline = errors.New("agent offline")
-var ErrChatRunNotFound = errors.New("chat run not found")
 var ErrTunnelNotFound = errors.New("tunnel not found")
 var ErrTunnelExpired = errors.New("tunnel expired")
 var ErrTunnelOverLimit = errors.New("tunnel connection limit exceeded")
@@ -18,10 +17,6 @@ var ErrCommandQueueFull = errors.New("command queue full")
 var ErrCommandQueueTimeout = errors.New("command queue timeout: agent did not reconnect")
 
 const (
-	defaultRelayBufferRetention = 30 * time.Second
-	chatRunDoneRetention        = 5 * time.Minute
-	chatRunStaleRetention       = 30 * time.Minute
-
 	chatRuntimeReadyTTL      = 15 * time.Second
 	agentSessionHeartbeatTTL = 90 * time.Second
 	defaultRuntimeReadyState = "ready"
@@ -36,7 +31,6 @@ type AuthSnapshot struct {
 type Manager struct {
 	registry    *sessionRegistry
 	syncHub     *syncHub
-	chatStore   *chatRunStore
 	convStreams *conversationStreamStore
 	tunnels     *tunnelStore
 	cmdQueue    *commandQueue
@@ -65,71 +59,6 @@ type agentStream struct {
 	closeOnce sync.Once
 }
 
-type ChatBroadcastEvent struct {
-	RequestID  string
-	Event      *gatewayv1.ChatEvent
-	Control    *gatewayv1.ChatControlEvent
-	Payload    map[string]any
-	Seq        int64
-	Workdir    string
-	ReceivedAt time.Time
-}
-
-type ChatRunSnapshot struct {
-	RequestID      string
-	ConversationID string
-	Workdir        string
-	FirstSeq       int64
-	LatestSeq      int64
-	RunEpoch       int64
-	State          string
-	Done           bool
-}
-
-type ActiveChatRunSummary struct {
-	ConversationID string
-	RequestID      string
-	Workdir        string
-	FirstSeq       int64
-	LatestSeq      int64
-	RunEpoch       int64
-	UpdatedAt      int64
-}
-
-const (
-	ChatRunStateQueued        = "queued"
-	ChatRunStateDelivered     = "delivered"
-	ChatRunStateClaimed       = "claimed"
-	ChatRunStateStarting      = "starting"
-	ChatRunStateDesktopQueued = "desktop_queued"
-	ChatRunStateRunning       = "running"
-	ChatRunStateCompleted     = "completed"
-	ChatRunStateFailed        = "failed"
-	ChatRunStateCancelled     = "cancelled"
-)
-
-type chatRun struct {
-	requestID      string
-	conversationID string
-	workdir        string
-	runEpoch       int64
-	events         []*ChatBroadcastEvent
-	nextSeq        int64
-	state          string
-	done           bool
-	updatedAt      time.Time
-	expiresAt      time.Time
-	subscribers    map[int]*chatRunSubscriber
-
-	relayBufferRetention time.Duration
-}
-
-type chatRunSubscriber struct {
-	ch        chan *ChatBroadcastEvent
-	done      chan struct{}
-	closeOnce sync.Once
-}
-
 type Status struct {
 	Online                bool   `json:"online"`
 	AgentReady            bool   `json:"agent_ready"`
@@ -148,11 +77,10 @@ type Status struct {
 
 func NewManager() *Manager {
 	m := &Manager{
-		registry:  newSessionRegistry(),
-		syncHub:   newSyncHub(),
-		chatStore: newChatRunStore(),
-		tunnels:   newTunnelStore(),
-		cmdQueue:  newCommandQueue(defaultCommandQueueTimeout),
+		registry: newSessionRegistry(),
+		syncHub:  newSyncHub(),
+		tunnels:  newTunnelStore(),
+		cmdQueue: newCommandQueue(defaultCommandQueueTimeout),
 	}
 	m.convStreams = newConversationStreamStore(m.IsOnline)
 	return m

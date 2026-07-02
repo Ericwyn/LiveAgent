@@ -105,112 +105,69 @@ func websocketConversationSummaryPayload(conversation *gatewayv1.ConversationSum
 	return websocketProtoPayload(conversation, true)
 }
 
-func websocketActiveChatRunSummariesPayload(summaries []session.ActiveChatRunSummary) []map[string]any {
-	payload := make([]map[string]any, 0, len(summaries))
-	for _, summary := range summaries {
-		conversationID := strings.TrimSpace(summary.ConversationID)
-		if conversationID == "" {
-			continue
-		}
-		item := map[string]any{
-			"conversation_id": conversationID,
-			"cwd":             strings.TrimSpace(summary.Workdir),
-			"updated_at":      summary.UpdatedAt,
-		}
-		if requestID := strings.TrimSpace(summary.RequestID); requestID != "" {
-			item["run_id"] = requestID
-		}
-		if summary.FirstSeq > 0 {
-			item["first_seq"] = summary.FirstSeq
-		}
-		if summary.LatestSeq > 0 {
-			item["latest_seq"] = summary.LatestSeq
-		}
-		if summary.RunEpoch > 0 {
-			item["run_epoch"] = summary.RunEpoch
-		}
-		payload = append(payload, item)
-	}
-	return payload
-}
-
 func websocketHistoryShareStatusPayload(share *gatewayv1.HistoryShareStatus) map[string]any {
 	return websocketProtoPayload(share, true)
 }
 
-func websocketHistorySyncPayload(
-	event *gatewayv1.HistorySyncEvent,
-	activeRuns ...session.ActiveChatRunSummary,
-) map[string]any {
+func websocketHistorySyncPayload(event *gatewayv1.HistorySyncEvent) map[string]any {
 	payload := map[string]any{
 		"kind":            strings.TrimSpace(event.GetKind()),
 		"conversation_id": strings.TrimSpace(event.GetConversationId()),
 	}
-
 	if conversation := event.GetConversation(); conversation != nil {
 		payload["conversation"] = websocketConversationSummaryPayload(conversation)
 	}
-	if payload["kind"] == "running" {
-		conversationID := strings.TrimSpace(event.GetConversationId())
-		if conversationID == "" && event.GetConversation() != nil {
-			conversationID = strings.TrimSpace(event.GetConversation().GetId())
-		}
-		for _, summary := range activeRuns {
-			if strings.TrimSpace(summary.ConversationID) != conversationID {
-				continue
-			}
-			if requestID := strings.TrimSpace(summary.RequestID); requestID != "" {
-				payload["run_id"] = requestID
-			}
-			if summary.FirstSeq > 0 {
-				payload["first_seq"] = summary.FirstSeq
-			}
-			if summary.LatestSeq > 0 {
-				payload["latest_seq"] = summary.LatestSeq
-			}
-			if summary.RunEpoch > 0 {
-				payload["run_epoch"] = summary.RunEpoch
-			}
-			if summary.UpdatedAt > 0 {
-				payload["updated_at"] = summary.UpdatedAt
-			}
-			break
-		}
-	}
-
 	return payload
 }
 
-func historySyncPayloadConversationID(payload map[string]any, event *gatewayv1.HistorySyncEvent) string {
-	if cid, ok := payload["conversation_id"].(string); ok && cid != "" {
-		return cid
+func websocketChatActivityPayload(event session.ConversationActivityEvent) map[string]any {
+	payload := map[string]any{
+		"conversation_id": event.ConversationID,
+		"running":         event.Running,
+		"updated_at":      event.UpdatedAt.UnixMilli(),
 	}
-	if event != nil {
-		if cid := strings.TrimSpace(event.GetConversationId()); cid != "" {
-			return cid
-		}
-		if event.GetConversation() != nil {
-			return strings.TrimSpace(event.GetConversation().GetId())
-		}
+	if event.RunID != "" {
+		payload["run_id"] = event.RunID
 	}
-	return ""
+	if event.State != "" {
+		payload["state"] = event.State
+	}
+	if event.Workdir != "" {
+		payload["workdir"] = event.Workdir
+	}
+	return payload
 }
 
-func enrichHistorySyncRunningPayload(payload map[string]any, summary session.ActiveChatRunSummary) {
-	if requestID := strings.TrimSpace(summary.RequestID); requestID != "" {
-		payload["run_id"] = requestID
+func websocketRunActivityPayload(activity *session.RunActivity) map[string]any {
+	if activity == nil {
+		return nil
 	}
-	if summary.FirstSeq > 0 {
-		payload["first_seq"] = summary.FirstSeq
+	payload := map[string]any{
+		"run_id":      activity.RunID,
+		"state":       activity.State,
+		"started_seq": activity.StartedSeq,
+		"updated_at":  activity.UpdatedAt.UnixMilli(),
 	}
-	if summary.LatestSeq > 0 {
-		payload["latest_seq"] = summary.LatestSeq
+	if activity.ToolStatus != "" {
+		payload["tool_status"] = activity.ToolStatus
+		payload["tool_status_is_compaction"] = activity.ToolStatusIsCompaction
 	}
-	if summary.RunEpoch > 0 {
-		payload["run_epoch"] = summary.RunEpoch
+	if activity.ClientRequestID != "" {
+		payload["client_request_id"] = activity.ClientRequestID
 	}
-	if summary.UpdatedAt > 0 {
-		payload["updated_at"] = summary.UpdatedAt
+	return payload
+}
+
+func websocketRunSnapshotPayload(snapshot *session.RunSnapshot) map[string]any {
+	if snapshot == nil {
+		return nil
+	}
+	return map[string]any{
+		"run_id":                    snapshot.RunID,
+		"revision":                  snapshot.Revision,
+		"entries_json":              snapshot.EntriesJSON,
+		"tool_status":               snapshot.ToolStatus,
+		"tool_status_is_compaction": snapshot.ToolStatusIsCompaction,
 	}
 }
 

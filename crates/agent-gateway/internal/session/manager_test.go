@@ -2,7 +2,6 @@ package session
 
 import (
 	"testing"
-	"time"
 
 	gatewayv1 "github.com/liveagent/agent-gateway/internal/proto/v1"
 )
@@ -134,73 +133,30 @@ func TestTerminalSessionSnapshotPreservesSshMetadataAndSorts(t *testing.T) {
 	}
 }
 
-func TestChatRunShouldPruneRetainsRunningUntilStale(t *testing.T) {
-	now := time.Now()
-	running := &chatRun{
-		state:     ChatRunStateRunning,
-		updatedAt: now.Add(-15 * time.Minute),
-	}
-	if running.shouldPrune(now) {
-		t.Fatal("running chat should survive well before stale retention")
-	}
-
-	stale := &chatRun{
-		state:     ChatRunStateQueued,
-		updatedAt: now.Add(-(chatRunStaleRetention + time.Second)),
-	}
-	if !stale.shouldPrune(now) {
-		t.Fatal("non-done chat should prune after stale retention")
-	}
-
-	done := &chatRun{
-		done:      true,
-		expiresAt: now.Add(-time.Second),
-	}
-	if !done.shouldPrune(now) {
-		t.Fatal("done chat should prune after expiresAt")
-	}
-}
-
-func TestPruneExpiredChatRunsDropsNilEntries(t *testing.T) {
-	manager := NewManager()
-	manager.chatStore.chatMu.Lock()
-	manager.chatStore.chatRuns["nil-run"] = nil
-	manager.pruneExpiredChatRunsLocked(time.Now())
-	_, exists := manager.chatStore.chatRuns["nil-run"]
-	manager.chatStore.chatMu.Unlock()
-
-	if exists {
-		t.Fatal("nil chat run should be deleted during pruning")
-	}
-}
-
-func TestConversationRunSummaryReturnsCompletedRun(t *testing.T) {
+func TestActiveConversationActivitiesTracksRunLifecycle(t *testing.T) {
 	manager := NewManager()
 
-	snapshot, created, _, err := manager.StartAcceptedChatCommandRun("run-1", "conv-1", "/workspace", nil)
-	if err != nil || !created {
-		t.Fatalf("StartAcceptedChatCommandRun failed: err=%v created=%v", err, created)
-	}
-	_ = snapshot
+	manager.StartChatCommand("run-1", "conv-1", "/workspace", "client-1", nil)
+	manager.ingestChatControl("run-1", &gatewayv1.ChatControlEvent{
+		RequestId:      "run-1",
+		ConversationId: "conv-1",
+		Type:           "started",
+		State:          "running",
+	})
 
-	manager.MarkChatRunControl("run-1", "conv-1", "started", "", "")
-
-	summary, ok := manager.ConversationRunSummary("conv-1")
-	if !ok || summary.RequestID != "run-1" {
-		t.Fatalf("expected running run summary, got ok=%v summary=%+v", ok, summary)
-	}
-
-	manager.MarkChatRunControl("run-1", "conv-1", "completed", "", "")
-
-	summary, ok = manager.ConversationRunSummary("conv-1")
-	if !ok || summary.RequestID != "run-1" {
-		t.Fatalf("expected completed run summary via ConversationRunSummary, got ok=%v summary=%+v", ok, summary)
+	activities := manager.ActiveConversationActivities()
+	if len(activities) != 1 || activities[0].RunID != "run-1" || activities[0].State != RunActivityRunning {
+		t.Fatalf("activities = %#v, want running run-1", activities)
 	}
 
-	actives := manager.ActiveChatRunSummaries()
-	for _, s := range actives {
-		if s.ConversationID == "conv-1" {
-			t.Fatal("completed run should not appear in ActiveChatRunSummaries")
-		}
+	manager.ingestChatControl("run-1", &gatewayv1.ChatControlEvent{
+		RequestId:      "run-1",
+		ConversationId: "conv-1",
+		Type:           "completed",
+		State:          "completed",
+	})
+
+	if activities := manager.ActiveConversationActivities(); len(activities) != 0 {
+		t.Fatalf("completed run should not appear in activities, got %#v", activities)
 	}
 }

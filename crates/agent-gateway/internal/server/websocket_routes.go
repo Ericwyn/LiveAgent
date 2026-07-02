@@ -90,7 +90,6 @@ var websocketRequestHandlers = map[string]websocketRequestHandler{
 	"chat.unsubscribe":               (*websocketConnection).handleChatUnsubscribe,
 	"chat.command":                   (*websocketConnection).handleChatCommand,
 	"chat.cancel":                    (*websocketConnection).handleChatCancel,
-	"chat.replay":                    (*websocketConnection).handleChatReplay,
 	"chat_queue.get":                 (*websocketConnection).handleChatQueueRequest,
 	"chat_queue.get_item":            (*websocketConnection).handleChatQueueRequest,
 	"chat_queue.run_now":             (*websocketConnection).handleChatQueueRequest,

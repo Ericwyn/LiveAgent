@@ -9,7 +9,7 @@
 | gRPC stream | `AgentGateway.AgentTerminalConnect` | Desktop <-> Gateway | 终端专用字节流，承载 `TerminalStreamFrame`，避免 terminal IO 与 chat/settings/history 队头阻塞。 |
 | WebSocket | `GET /ws` | WebUI <-> Gateway | WebUI 非 Chat 请求/响应、状态广播、history/settings 等同步。 |
 | WebSocket | `GET /ws/terminal` | WebUI <-> Gateway | WebUI 终端专用二进制流；JSON 控制帧只用于 auth/error，热路径为 bytes frame。 |
-| HTTP Chat Command | `POST /api/chat/commands` | WebUI -> Gateway -> Desktop | Chat 提交、编辑重发、取消；命令先被 Gateway accepted，再异步下发桌面端。 |
+| WS Chat Command | WebSocket `chat.command` | WebUI -> Gateway -> Desktop | Chat 提交、编辑重发、取消；命令先被 Gateway accepted，再异步下发桌面端。 |
 | HTTP Chat Events | `GET /api/chat/events` | Gateway -> WebUI | fetch-based SSE；按 `conversation_id` 与 `after_seq` 恢复事件流。 |
 | HTTP API | `/api/status` | WebUI -> Gateway | 查询 Agent 在线状态。 |
 | HTTP upload | `/api/files/import` | WebUI -> Gateway -> Desktop | 上传可读文件并导入桌面 workspace。 |
@@ -28,10 +28,10 @@
 
 | 阶段 | WebUI -> Gateway | Gateway -> Desktop | Desktop -> Gateway -> WebUI |
 |---|---|---|---|
-| 提交 | `POST /api/chat/commands`，`type=chat.submit` | `ChatCommandRequest{type=chat.submit}` | 先返回 `run.accepted`，再通过 SSE 推送用户消息、runtime 与 token 事件。 |
-| 编辑重发 | `POST /api/chat/commands`，`type=chat.edit_resend` | `ChatCommandRequest{type=chat.edit_resend, base_message_ref}` | Gateway 先发布 `conversation.rebased` 与新用户消息事件，桌面端随后原子截断并运行新 turn。 |
+| 提交 | WS `chat.command`，`type=chat.submit` | `ChatCommandRequest{type=chat.submit}` | 响应携带 `run_id`/`accepted_seq`；用户消息与 token 事件经会话订阅 `chat.event` 推送。 |
+| 编辑重发 | WS `chat.command`，`type=chat.edit_resend` | `ChatCommandRequest{type=chat.edit_resend, base_message_ref}` | Gateway 先发布 `rebased` 与新用户消息事件，桌面端随后原子截断并运行新 turn。 |
 | 恢复 | `GET /api/chat/events?conversation_id=&after_seq=` | 无 | WebUI 先用 history snapshot/projection hydrate，再由 Gateway 从 SQLite `chat_events` 按 conversation seq 跨 run 补发缺失事件；内存缓存同样按 conversation 汇总最近 run 事件并负责实时 fan-out。 |
-| 取消 | `POST /api/chat/commands`，`type=chat.cancel` | `ChatCommandRequest{type=chat.cancel}` | 后续事件流发布 `run.cancelled` 或桌面端终态事件。 |
+| 取消 | WS `chat.command`，`type=chat.cancel` | `ChatCommandRequest{type=chat.cancel}` | Gateway 置 `cancelling` 状态，桌面端真实终态优先，超时由 watchdog 兜底 `run_finished(cancelled)`。 |
 | 完成 | 无 | 无 | `ChatEvent.type=DONE` 映射为 `run.completed` 终态。 |
 
 桌面端仍通过 `ChatEvent` 表达 `TOKEN`、`THINKING`、`TOOL_CALL`、`TOOL_RESULT`、`DONE`、`ERROR`、`TOOL_STATUS`、`HOSTED_SEARCH` 等低层事件。Gateway 对外统一附加同 conversation 内单调递增的 `seq`，并把控制事件规范化为 `run.accepted`、`user.message.appended`、`conversation.rebased`、`projection.updated`、`run.completed`、`run.failed`、`run.cancelled` 等 WebUI 事件。旧 WebSocket Chat 路由已下线。

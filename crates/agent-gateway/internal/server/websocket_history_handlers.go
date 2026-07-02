@@ -64,10 +64,22 @@ func (c *websocketConnection) handleHistoryList(req websocketRequest) {
 		conversations = append(conversations, websocketConversationSummaryPayload(conversation))
 	}
 
+	activities := c.sm.ActiveConversationActivities()
+	runningConversations := make([]map[string]any, 0, len(activities))
+	for _, activity := range activities {
+		runningConversations = append(runningConversations, map[string]any{
+			"conversation_id": activity.ConversationID,
+			"run_id":          activity.RunID,
+			"state":           activity.State,
+			"cwd":             activity.Workdir,
+			"updated_at":      activity.UpdatedAt.UnixMilli(),
+		})
+	}
+
 	_ = c.writeResponse(req.ID, map[string]any{
 		"conversations":         conversations,
 		"total_count":           resp.GetTotalCount(),
-		"running_conversations": websocketActiveChatRunSummariesPayload(c.sm.ActiveChatRunSummaries()),
+		"running_conversations": runningConversations,
 	})
 }
 

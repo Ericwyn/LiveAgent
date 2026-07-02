@@ -1,9 +1,6 @@
 package session
 
 import (
-	"strings"
-	"time"
-
 	gatewayv1 "github.com/liveagent/agent-gateway/internal/proto/v1"
 )
 
@@ -34,8 +31,6 @@ func (m *Manager) broadcastHistorySync(event *gatewayv1.HistorySyncEvent) {
 		return
 	}
 
-	m.releaseCompletedChatRunAfterHistoryUpsert(event)
-
 	m.syncHub.historyMu.Lock()
 	subscribers := make([]chan *gatewayv1.HistorySyncEvent, 0, len(m.syncHub.historySubscribers))
 	for _, ch := range m.syncHub.historySubscribers {
@@ -44,113 +39,9 @@ func (m *Manager) broadcastHistorySync(event *gatewayv1.HistorySyncEvent) {
 	m.syncHub.historyMu.Unlock()
 
 	for _, ch := range subscribers {
-		publishHistorySyncToSubscriber(ch, event)
-	}
-}
-
-func publishHistorySyncToSubscriber(ch chan *gatewayv1.HistorySyncEvent, event *gatewayv1.HistorySyncEvent) {
-	if ch == nil || event == nil {
-		return
-	}
-	select {
-	case ch <- event:
-		return
-	default:
-	}
-	if !isCriticalHistorySyncEvent(event) {
-		return
-	}
-	retained := drainCriticalHistorySyncEvents(ch)
-	if maxRetained := cap(ch) - 1; maxRetained > 0 && len(retained) > maxRetained {
-		retained = retained[len(retained)-maxRetained:]
-	}
-	retained = append(retained, event)
-	for _, retainedEvent := range retained {
 		select {
-		case ch <- retainedEvent:
+		case ch <- event:
 		default:
-			return
 		}
 	}
-}
-
-func drainCriticalHistorySyncEvents(ch chan *gatewayv1.HistorySyncEvent) []*gatewayv1.HistorySyncEvent {
-	retained := make([]*gatewayv1.HistorySyncEvent, 0)
-	for {
-		select {
-		case pending := <-ch:
-			if isCriticalHistorySyncEvent(pending) {
-				retained = append(retained, pending)
-			}
-		default:
-			return retained
-		}
-	}
-}
-
-func isCriticalHistorySyncEvent(event *gatewayv1.HistorySyncEvent) bool {
-	if event == nil {
-		return false
-	}
-	switch strings.TrimSpace(event.GetKind()) {
-	case "running", "idle":
-		return true
-	default:
-		return false
-	}
-}
-
-func (m *Manager) broadcastChatRunActivity(kind string, conversationID string, workdir string, updatedAt time.Time) {
-	kind = strings.TrimSpace(kind)
-	conversationID = strings.TrimSpace(conversationID)
-	if conversationID == "" {
-		return
-	}
-	if kind != "running" && kind != "idle" {
-		return
-	}
-	if updatedAt.IsZero() {
-		updatedAt = time.Now()
-	}
-
-	event := &gatewayv1.HistorySyncEvent{
-		Kind:           kind,
-		ConversationId: conversationID,
-	}
-	if workdir = strings.TrimSpace(workdir); workdir != "" {
-		event.Conversation = &gatewayv1.ConversationSummary{
-			Id:        conversationID,
-			Cwd:       workdir,
-			UpdatedAt: updatedAt.UnixMilli(),
-		}
-	}
-	m.broadcastHistorySync(event)
-}
-
-func historySyncConversationID(event *gatewayv1.HistorySyncEvent) string {
-	conversationID := strings.TrimSpace(event.GetConversationId())
-	if conversationID == "" && event.GetConversation() != nil {
-		conversationID = strings.TrimSpace(event.GetConversation().GetId())
-	}
-	return conversationID
-}
-
-func (m *Manager) releaseCompletedChatRunAfterHistoryUpsert(event *gatewayv1.HistorySyncEvent) {
-	if strings.TrimSpace(event.GetKind()) != "upsert" {
-		return
-	}
-
-	conversationID := historySyncConversationID(event)
-	if conversationID == "" {
-		return
-	}
-
-	m.chatStore.chatMu.Lock()
-	defer m.chatStore.chatMu.Unlock()
-	requestID := m.chatStore.chatRunByConversation[conversationID]
-	run := m.chatStore.chatRuns[requestID]
-	if run == nil || !run.done {
-		return
-	}
-	m.removeChatRunLocked(requestID, run)
 }
