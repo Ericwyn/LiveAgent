@@ -59,20 +59,6 @@ function createToolCall(argumentsValue) {
   };
 }
 
-test("delegate relative path normalization rejects Windows absolute paths", () => {
-  const loader = createTsModuleLoader();
-  const { normalizeRelativePath } = loader.loadModule("src/lib/tools/delegate/input.ts");
-
-  assert.equal(normalizeRelativePath(" docs\\report.md "), "docs/report.md");
-  assert.equal(normalizeRelativePath("docs/./report.md"), "docs/report.md");
-  assert.equal(normalizeRelativePath("docs//report.md"), "docs/report.md");
-  assert.equal(normalizeRelativePath("C:\\Users\\me\\report.md"), "");
-  assert.equal(normalizeRelativePath("C:/Users/me/report.md"), "");
-  assert.equal(normalizeRelativePath("\\\\server\\share\\report.md"), "");
-  assert.equal(normalizeRelativePath("safe:name.md"), "");
-  assert.equal(normalizeRelativePath("docs/../secret.md"), "");
-});
-
 function createSubagentIdentity(overrides = {}) {
   const logicalAgentId = overrides.logicalAgentId ?? "expert-a";
   const displayName = overrides.displayName ?? overrides.name ?? "Existing Expert";

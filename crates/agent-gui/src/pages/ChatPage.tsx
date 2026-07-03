@@ -161,6 +161,7 @@ import {
 } from "../lib/terminal/sessionStore";
 import { tauriTerminalClient } from "../lib/terminal/tauriTerminalClient";
 import type { TerminalSession } from "../lib/terminal/types";
+import { invokeFs } from "../lib/tools/fsBackend";
 import type { SkillAccessPolicy } from "../lib/tools/skillAccessPolicy";
 import type {
   LocalTunnelClient,
@@ -1017,7 +1018,7 @@ export function ChatPage(props: ChatPageProps) {
         return false;
       }
       try {
-        await invoke("fs_list", {
+        await invokeFs("fs_list", {
           workdir: path,
           path: null,
           depth: 1,

@@ -73,14 +73,14 @@ export function createBuiltinMetadataMap(
 }
 
 export type FsEntryKind = "file" | "dir";
-export type PathScope = "workspace" | "skill" | "external" | "temp" | "artifact";
+export type PathScope = "workspace" | "skill" | "external";
 
 export type ResolvedPathResultDetails = {
   scope?: PathScope;
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
 };
 
 export type ReadTextResultDetails = {
@@ -90,7 +90,7 @@ export type ReadTextResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
   startLine: number;
   numLines: number;
   totalLines: number;
@@ -108,7 +108,7 @@ export type ReadImageResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
   mimeType: string;
   sizeBytes: number;
   mtimeMs: number;
@@ -122,7 +122,7 @@ export type DisplayImageItemDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
   sourceType?: "path" | "url" | "base64" | "auto";
   renderMode?: "inline" | "proxy";
   sourceUrl?: string;
@@ -150,7 +150,7 @@ export type ReadPdfResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
   pageStart: number;
   numPages: number;
   totalPages: number;
@@ -167,7 +167,7 @@ export type ReadNotebookResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
   cellStart: number;
   numCells: number;
   totalCells: number;
@@ -184,7 +184,7 @@ export type ReadDocumentResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
   truncated: boolean;
   mimeType?: string;
   sizeBytes?: number;
@@ -331,7 +331,7 @@ export type WriteResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
   mode: "rewrite";
   existedBefore: boolean;
   bytesWritten: number;
@@ -348,7 +348,7 @@ export type EditResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
   replacements: number;
   replaceAll: boolean;
   expectedReplacements?: number;
@@ -366,7 +366,7 @@ export type DeleteResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
   targetKind: string;
 };
 
@@ -382,7 +382,8 @@ export type ListResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
+  targetKind?: FsEntryKind;
   depth: number;
   offset: number;
   maxResults: number;
@@ -398,7 +399,8 @@ export type GlobResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
+  targetKind?: FsEntryKind;
   pattern: string;
   sortBy: "path";
   offset: number;
@@ -429,7 +431,8 @@ export type GrepResultDetails = {
   absolutePath?: string;
   relativePath?: string;
   displayPath?: string;
-  pathRef?: string;
+  fileId?: string;
+  targetKind?: FsEntryKind;
   pattern: string;
   filePattern?: string;
   ignoreCase: boolean;

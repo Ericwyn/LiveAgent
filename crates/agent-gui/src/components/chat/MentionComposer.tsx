@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type ClipboardEvent,
@@ -29,6 +28,7 @@ import {
   formatMarkdownReferenceDestination,
 } from "../../lib/chat/messages/mentionReferences";
 import { cn } from "../../lib/shared/utils";
+import { invokeFs } from "../../lib/tools/fsBackend";
 import { ClipboardPaste, Copy, ScanText, Scissors } from "../icons";
 import { getFileTypeIcon, getFileTypeIconSvg } from "./fileTypeIcons";
 import { mentionChipClassName } from "./mentionChipStyles";
@@ -1800,7 +1800,7 @@ export const MentionComposer = memo(
           return;
         }
 
-        invoke<MentionListResponse>("fs_mention_list", {
+        invokeFs<MentionListResponse>("fs_mention_list", {
           workdir: normalizedWorkdir,
           max_results: MENTION_INDEX_MAX_RESULTS,
           query: ctx.query,

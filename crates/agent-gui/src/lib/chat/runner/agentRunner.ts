@@ -172,20 +172,18 @@ export function buildToolsSuffix(
     ].join("\n"),
   );
 
-  if (hasFileTool || has("Bash")) {
-    const subject =
-      hasFileTool && has("Bash") ? "File tools and Bash" : hasFileTool ? "File tools" : "Bash";
+  if (hasFileTool || hasAny("Bash", "ManagedProcess", "SSHManager", "McpManager", "Agent")) {
     sections.push(
       [
         "## Workspace & Paths",
         `- Workspace root (sandbox): \`${workdir}\``,
-        `- ${subject} ${subject === "Bash" ? "accepts" : "accept"} the path you see: workspace-relative, absolute, ~/..., file://, pathRef values, or skill://<enabled-skill>/... paths.`,
-        "- To target the workspace root for optional `path` / `cwd` values, omit the argument.",
-        "- Use `/` as the separator everywhere, including Glob and Grep patterns. Windows `\\` is auto-normalized.",
-        "- For enabled Skill files, prefer skill://<baseDir>/... or a pathRef returned by SkillsManager/List/Glob/Grep/Read.",
-      ]
-        .filter((line): line is string => Boolean(line))
-        .join("\n"),
+        "- Preferred form: workspace-relative paths exactly as tools return them, e.g. `src/App.tsx`. To target the root itself, omit the optional `path` / `cwd` argument.",
+        "- Files inside an enabled Skill: use `skill://<skill>/...` exactly as returned by SkillsManager or file tools.",
+        "- Absolute paths, `~/...`, and `file://` URLs are also accepted and auto-normalized; never construct one when a returned path is available.",
+        "- Write, Edit, and Delete operate only inside the workspace or enabled Skills. Bash `cwd` may point outside the workspace when the task requires it.",
+        "- Use `/` as the separator everywhere, including Glob and Grep patterns; Windows `\\` is auto-normalized.",
+        '- On a path error, follow its guidance: reuse a "Did you mean" candidate verbatim, or locate the file with Glob/Grep first, then retry with the returned path.',
+      ].join("\n"),
     );
   }
 
@@ -199,7 +197,7 @@ export function buildToolsSuffix(
     if (canWrite) {
       lines.push(
         "- Existing files: Read the full file before Write or Edit; stale writes are rejected, so re-Read if needed.",
-        "- New files: call Write with a file path that includes the filename and the full content; parent directories are created automatically.",
+        "- New files: call Write with a file path that includes the filename and the full content; parent directories are created automatically. There is no separate create-directory step — to create a directory, Write a file inside it.",
       );
     }
     if (has("Read")) {
@@ -225,7 +223,9 @@ export function buildToolsSuffix(
       );
     }
     if (has("Delete")) {
-      lines.push("- For workspace or Skill deletion, use Delete with the exact path or pathRef.");
+      lines.push(
+        "- For workspace or Skill deletion, use Delete with the exact path returned by List/Glob/Grep/Read.",
+      );
     }
     if (hasAny("Grep", "Glob", "List")) {
       lines.push(
@@ -234,7 +234,7 @@ export function buildToolsSuffix(
     }
     if (has("SkillsManager") && hasReadFamily) {
       lines.push(
-        "- For files inside a Skill, call file tools with a path like `skill://<baseDir>/references/guide.md` or a pathRef returned by a tool.",
+        "- For files inside a Skill, call file tools with a path like `skill://<baseDir>/references/guide.md`.",
       );
     }
     if (has("Bash")) {
@@ -273,7 +273,7 @@ export function buildToolsSuffix(
         "- Do not embed images with Markdown syntax like ![alt](path), HTML <img>, file:// URLs, or local relative image paths in your final text.",
         has("SkillsManager")
           ? [
-              "- Local image: pass `path` exactly as seen, including workspace-relative, absolute, pathRef, or skill:// paths. Remote image: pass `url` / `urls` or `source` / `sources` directly — do not download unless the user asked to save it locally.",
+              "- Local image: pass `path` exactly as seen, including workspace-relative, absolute, or skill:// paths. Remote image: pass `url` / `urls` or `source` / `sources` directly — do not download unless the user asked to save it locally.",
               "- Do not use Bash, open, xdg-open, Markdown, or HTML to display Skill images.",
             ].join("\n")
           : "- Local image: pass `path` exactly as seen. Remote image: pass `url` / `urls` or `source` / `sources` directly — do not download unless the user asked to save it locally.",

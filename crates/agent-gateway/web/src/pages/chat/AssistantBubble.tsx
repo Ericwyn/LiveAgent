@@ -43,7 +43,6 @@ import { FileChangeBadge } from "../../components/chat/FileChangeBadge";
 import { EditDiffView } from "./EditDiffView";
 import { FileToolArgsDisplay } from "./FileToolArgs";
 import {
-  fileRootTags,
   MetaTags,
   PathDisplay,
   ToolFactGrid,
@@ -1806,6 +1805,27 @@ function CodePreview(props: { text: string; maxChars?: number }) {
   );
 }
 
+// Render-layer tolerance for historical messages: current details carry
+// `scope` ("workspace" | "skill" | "external"), while old sessions may still
+// carry the legacy `root` ("workspace" | "skills") or unknown scope values
+// such as "temp"/"artifact". Degrade at the read site — unknown values are
+// displayed verbatim; "workspace" (the default) is hidden.
+function resolveFileToolScope(details: unknown): string | undefined {
+  if (!details || typeof details !== "object") return undefined;
+  const record = details as Record<string, unknown>;
+  const scope =
+    typeof record.scope === "string" && record.scope.trim() ? record.scope.trim() : undefined;
+  const legacyRoot =
+    typeof record.root === "string" && record.root.trim() ? record.root.trim() : undefined;
+  const resolved = scope ?? (legacyRoot === "skills" ? "skill" : legacyRoot);
+  return resolved && resolved !== "workspace" ? resolved : undefined;
+}
+
+function fileScopeTags(details: unknown): MetaTag[] {
+  const scope = resolveFileToolScope(details);
+  return scope ? [{ label: "scope", value: scope }] : [];
+}
+
 function ToolResultDisplay({
   item,
   result,
@@ -1850,7 +1870,7 @@ function ToolResultDisplay({
         <ToolSurface>
           <MetaTags
             tags={[
-              ...fileRootTags(details.root),
+              ...fileScopeTags(details),
               { label: "lines", value: details.numLines > 0 ? `${details.startLine}-${details.startLine + details.numLines - 1}/${details.totalLines}` : `empty/${details.totalLines}` },
               { label: "view", value: details.isPartialView ? "partial" : "full" },
               ...(details.truncated ? [{ label: "truncated", value: "true" }] : []),
@@ -1946,7 +1966,7 @@ function ToolResultDisplay({
         <ToolSurface>
           <MetaTags
             tags={[
-              ...fileRootTags(details.root),
+              ...fileScopeTags(details),
               { label: "mime", value: details.mimeType },
               { label: "size", value: `${details.sizeBytes} bytes` },
               ...(details.reusedExisting ? [{ label: "cache", value: "unchanged" }] : []),
@@ -1978,7 +1998,7 @@ function ToolResultDisplay({
         <ToolSurface>
           <MetaTags
             tags={[
-              ...fileRootTags(details.root),
+              ...fileScopeTags(details),
               {
                 label: "pages",
                 value:
@@ -2003,7 +2023,7 @@ function ToolResultDisplay({
         <ToolSurface>
           <MetaTags
             tags={[
-              ...fileRootTags(details.root),
+              ...fileScopeTags(details),
               {
                 label: "cells",
                 value:
@@ -2028,7 +2048,7 @@ function ToolResultDisplay({
         <ToolSurface>
           <MetaTags
             tags={[
-              ...fileRootTags(details.root),
+              ...fileScopeTags(details),
               ...(details.mimeType ? [{ label: "mime", value: details.mimeType }] : []),
               ...(typeof details.sizeBytes === "number"
                 ? [{ label: "size", value: `${details.sizeBytes} bytes` }]
@@ -2050,7 +2070,7 @@ function ToolResultDisplay({
         <ToolSurface>
           <MetaTags
             tags={[
-              ...fileRootTags(details.root),
+              ...fileScopeTags(details),
               { label: "target", value: details.existedBefore ? "existing" : "new" },
               { label: "bytes", value: String(details.bytesWritten) },
               { label: "lines", value: String(details.totalLines) },
@@ -2068,7 +2088,10 @@ function ToolResultDisplay({
       <EditDiffView
         beforeText={details.oldPreview}
         afterText={details.newPreview}
-        filePath={details.root === "skills" ? `skills:${details.path}` : details.path}
+        filePath={
+          details.displayPath ||
+          (resolveFileToolScope(details) === "skill" ? `skills:${details.path}` : details.path)
+        }
       />
     );
   }
@@ -2077,7 +2100,7 @@ function ToolResultDisplay({
     const details = result.details as DeleteResultDetails;
     return (
       <ToolSurface>
-        <MetaTags tags={[...fileRootTags(details.root), { label: "kind", value: details.targetKind }]} />
+        <MetaTags tags={[...fileScopeTags(details), { label: "kind", value: details.targetKind }]} />
       </ToolSurface>
     );
   }
@@ -2094,7 +2117,7 @@ function ToolResultDisplay({
               total: details.total,
               offset: details.offset,
               hasMore: details.hasMore,
-            }).concat(fileRootTags(details.root))}
+            }).concat(fileScopeTags(details))}
           />
         </ToolSurface>
         <ToolSurface className="max-h-56 overflow-auto">
@@ -2126,7 +2149,7 @@ function ToolResultDisplay({
               total: details.total,
               offset: details.offset,
               hasMore: details.hasMore,
-            }).concat(fileRootTags(details.root))}
+            }).concat(fileScopeTags(details))}
           />
         </ToolSurface>
         <ToolSurface className="max-h-56 overflow-auto">
@@ -2151,7 +2174,7 @@ function ToolResultDisplay({
         <ToolSurface>
           <MetaTags
             tags={[
-              ...fileRootTags(details.root),
+              ...fileScopeTags(details),
               { label: "mode", value: details.outputMode },
               { label: "matches", value: String(details.matchCount) },
               { label: "files", value: String(details.fileCount) },

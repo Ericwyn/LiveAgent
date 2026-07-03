@@ -1,8 +1,8 @@
-import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocale } from "../../i18n";
 import type { RightDockFileTreeState, RightDockFileTreeStatePatch } from "../../lib/settings";
 import { cn } from "../../lib/shared/utils";
+import { invokeFs } from "../../lib/tools/fsBackend";
 import { getFileTypeIcon } from "../chat/fileTypeIcons";
 import {
   Check,
@@ -257,7 +257,7 @@ export function ProjectFileTreePanel(props: {
       if (!shouldLoad) return;
 
       try {
-        const response = await invoke<FsListResponse>("fs_list", {
+        const response = await invokeFs<FsListResponse>("fs_list", {
           workdir: cwd,
           path: path || undefined,
           depth: 1,
@@ -425,7 +425,7 @@ export function ProjectFileTreePanel(props: {
     const timer = window.setTimeout(() => {
       setSearchLoading(true);
       setSearchError(null);
-      void invoke<MentionListResponse>("fs_mention_list", {
+      void invokeFs<MentionListResponse>("fs_mention_list", {
         workdir: cwd,
         query,
         max_results: SEARCH_MAX_RESULTS,
@@ -559,7 +559,7 @@ export function ProjectFileTreePanel(props: {
         targetNode?.kind === "dir" ? targetNode.path : dirname(targetNode?.path ?? targetPath);
       if (pendingAction === "file") {
         const nextPath = joinPath(targetDir, name);
-        await invoke("fs_write_text", {
+        await invokeFs("fs_write_text", {
           workdir: cwd,
           path: nextPath,
           content: "",
@@ -575,7 +575,7 @@ export function ProjectFileTreePanel(props: {
         });
       } else if (pendingAction === "folder") {
         const nextPath = joinPath(targetDir, name);
-        await invoke("fs_create_dir", {
+        await invokeFs("fs_create_dir", {
           workdir: cwd,
           path: nextPath,
         });
@@ -596,7 +596,7 @@ export function ProjectFileTreePanel(props: {
       } else if (pendingAction === "rename" && targetPath) {
         const parent = dirname(targetPath);
         const nextPath = joinPath(parent, name);
-        await invoke("fs_rename", {
+        await invokeFs("fs_rename", {
           workdir: cwd,
           from_path: targetPath,
           to_path: nextPath,
@@ -674,7 +674,7 @@ export function ProjectFileTreePanel(props: {
       setBusyAction(true);
       setActionError(null);
       try {
-        await invoke("fs_delete", { workdir: cwd, path: targetPath });
+        await invokeFs("fs_delete", { workdir: cwd, path: targetPath });
         const nextExpanded = state.expanded.filter(
           (item) => item !== targetPath && !item.startsWith(`${targetPath}/`),
         );
@@ -726,7 +726,7 @@ export function ProjectFileTreePanel(props: {
       if (!targetPath) return;
       setActionError(null);
       try {
-        await invoke("fs_open_workspace_path", {
+        await invokeFs("fs_open_workspace_path", {
           workdir: cwd,
           path: targetPath,
           mode: "reveal",
@@ -745,7 +745,7 @@ export function ProjectFileTreePanel(props: {
       if (!targetPath) return;
       setActionError(null);
       try {
-        await invoke("fs_open_workspace_path", {
+        await invokeFs("fs_open_workspace_path", {
           workdir: cwd,
           path: targetPath,
           mode: "open",

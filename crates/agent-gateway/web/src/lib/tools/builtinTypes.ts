@@ -38,12 +38,24 @@ export function createBuiltinMetadataMap(
 }
 
 export type FsEntryKind = "file" | "dir";
-export type FileToolRoot = "workspace" | "skills";
+export type PathScope = "workspace" | "skill" | "external";
+
+export type ResolvedPathResultDetails = {
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
+};
 
 export type ReadTextResultDetails = {
   kind: "read_text";
-  root?: FileToolRoot;
   path: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
   startLine: number;
   numLines: number;
   totalLines: number;
@@ -56,8 +68,12 @@ export type ReadTextResultDetails = {
 
 export type ReadImageResultDetails = {
   kind: "read_image";
-  root?: FileToolRoot;
   path: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
   mimeType: string;
   sizeBytes: number;
   mtimeMs: number;
@@ -67,6 +83,11 @@ export type ReadImageResultDetails = {
 
 export type DisplayImageItemDetails = {
   path: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
   sourceType?: "path" | "url" | "base64" | "auto";
   renderMode?: "inline" | "proxy";
   sourceUrl?: string;
@@ -89,8 +110,12 @@ export type DisplayImageResultDetails = {
 
 export type ReadPdfResultDetails = {
   kind: "read_pdf";
-  root?: FileToolRoot;
   path: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
   pageStart: number;
   numPages: number;
   totalPages: number;
@@ -102,8 +127,12 @@ export type ReadPdfResultDetails = {
 
 export type ReadNotebookResultDetails = {
   kind: "read_notebook";
-  root?: FileToolRoot;
   path: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
   cellStart: number;
   numCells: number;
   totalCells: number;
@@ -115,8 +144,12 @@ export type ReadNotebookResultDetails = {
 
 export type ReadDocumentResultDetails = {
   kind: "read_word" | "read_spreadsheet" | "read_archive";
-  root?: FileToolRoot;
   path: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
   truncated: boolean;
   mimeType?: string;
   sizeBytes?: number;
@@ -142,6 +175,7 @@ export type SkillsManagerActionResultDetails = {
   invalidCount?: number;
   installedCount?: number;
   createdName?: string;
+  deletedName?: string;
   validationOk?: boolean;
   packageArchive?: string;
   seededCount?: number;
@@ -258,8 +292,12 @@ export type SubagentMessageResultDetails = {
 
 export type WriteResultDetails = {
   kind: "write";
-  root?: FileToolRoot;
   path: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
   mode: "rewrite";
   existedBefore: boolean;
   bytesWritten: number;
@@ -271,8 +309,12 @@ export type WriteResultDetails = {
 
 export type EditResultDetails = {
   kind: "edit";
-  root?: FileToolRoot;
   path: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
   replacements: number;
   replaceAll: boolean;
   expectedReplacements?: number;
@@ -285,8 +327,12 @@ export type EditResultDetails = {
 
 export type DeleteResultDetails = {
   kind: "delete";
-  root?: FileToolRoot;
   path: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
   targetKind: string;
 };
 
@@ -297,8 +343,13 @@ export type ListResultEntry = {
 
 export type ListResultDetails = {
   kind: "list";
-  root?: FileToolRoot;
   path?: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
+  targetKind?: FsEntryKind;
   depth: number;
   offset: number;
   maxResults: number;
@@ -309,8 +360,13 @@ export type ListResultDetails = {
 
 export type GlobResultDetails = {
   kind: "glob";
-  root?: FileToolRoot;
   path?: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
+  targetKind?: FsEntryKind;
   pattern: string;
   sortBy: "path";
   offset: number;
@@ -336,8 +392,13 @@ export type GrepResultFileSummary = {
 
 export type GrepResultDetails = {
   kind: "grep";
-  root?: FileToolRoot;
   path?: string;
+  scope?: PathScope;
+  absolutePath?: string;
+  relativePath?: string;
+  displayPath?: string;
+  fileId?: string;
+  targetKind?: FsEntryKind;
   pattern: string;
   filePattern?: string;
   ignoreCase: boolean;

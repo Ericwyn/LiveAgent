@@ -16,7 +16,6 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
-import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useLocale } from "../../i18n";
 import {
@@ -29,6 +28,7 @@ import {
 } from "../../lib/chat/mentionReferences";
 import { extractClipboardFiles } from "../../lib/clipboardFiles";
 import { cn } from "../../lib/shared/utils";
+import { invokeFs } from "../../lib/tools/fsBackend";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -1356,7 +1356,7 @@ export const MentionComposer = memo(forwardRef<MentionComposerHandle, MentionCom
         return;
       }
 
-      invoke<MentionListResponse>("fs_mention_list", {
+      invokeFs<MentionListResponse>("fs_mention_list", {
         workdir: normalizedWorkdir,
         max_results: MENTION_INDEX_MAX_RESULTS,
         query: ctx.query,

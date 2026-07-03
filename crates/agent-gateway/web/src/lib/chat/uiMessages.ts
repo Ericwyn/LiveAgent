@@ -178,9 +178,8 @@ export function summarizeToolCall(
   const args = toolCall.arguments || {};
   const name = toolCall.name;
   const path = summarizeToolArg(args.path);
-  const root = typeof args.root === "string" && args.root.trim()
-    ? `root=${summarizeToolArg(args.root)}`
-    : null;
+  const displayScope = displayFileToolScope(args);
+  const scope = displayScope ? `scope=${summarizeToolArg(displayScope)}` : null;
   const imagePaths = Array.isArray(args.paths)
     ? args.paths
         .map((value) => summarizeToolArg(value))
@@ -199,12 +198,13 @@ export function summarizeToolCall(
   const imageBase64s = Array.isArray(args.base64s)
     ? args.base64s.filter((value) => typeof value === "string" && value.trim()).length
     : 0;
-  const rootPath = "path=<root>";
+  const defaultPath = "path=.";
+  const defaultCwd = "cwd=.";
 
   const parts =
     name === "Image"
       ? [
-          root,
+          scope,
           imageSources.length > 0
             ? `sources=${imageSources.length}${imageSources[0] ? ` first=${imageSources[0]}` : ""}`
             : imagePaths.length > 0
@@ -225,7 +225,7 @@ export function summarizeToolCall(
         ]
       : name === "Read"
       ? [
-          root,
+          scope,
           path ? `path=${path}` : null,
           typeof args.start_line === "number" ? `start=${args.start_line}` : null,
           typeof args.limit === "number" ? `limit=${args.limit}` : null,
@@ -328,10 +328,10 @@ export function summarizeToolCall(
               typeof args.message === "string" ? `messageChars=${args.message.length}` : null,
             ]
       : name === "Write"
-        ? [root, path ? `path=${path}` : null, "mode=rewrite"]
+        ? [scope, path ? `path=${path}` : null, "mode=rewrite"]
         : name === "Edit"
           ? [
-              root,
+              scope,
               path ? `path=${path}` : null,
               typeof args.expected_replacements === "number"
                 ? `expected=${args.expected_replacements}`
@@ -340,29 +340,29 @@ export function summarizeToolCall(
             ]
           : name === "List"
             ? [
-                root,
-                path ? `path=${path}` : rootPath,
+                scope,
+                path ? `path=${path}` : defaultPath,
                 typeof args.depth === "number" ? `depth=${args.depth}` : null,
                 typeof args.offset === "number" ? `offset=${args.offset}` : null,
                 typeof args.max_results === "number" ? `max=${args.max_results}` : null,
               ]
             : name === "Glob"
               ? [
-                  root,
+                  scope,
                   typeof args.pattern === "string"
                     ? `pattern=${summarizeToolArg(args.pattern)}`
                     : null,
-                  path ? `path=${path}` : rootPath,
+                  path ? `path=${path}` : defaultPath,
                   typeof args.offset === "number" ? `offset=${args.offset}` : null,
                   typeof args.max_results === "number" ? `max=${args.max_results}` : null,
                 ]
               : name === "Grep"
                 ? [
-                    root,
+                    scope,
                     typeof args.pattern === "string"
                       ? `pattern=${summarizeToolArg(args.pattern)}`
                       : null,
-                    path ? `path=${path}` : rootPath,
+                    path ? `path=${path}` : defaultPath,
                     typeof args.file_pattern === "string"
                       ? `filePattern=${summarizeToolArg(args.file_pattern)}`
                       : null,
@@ -378,13 +378,13 @@ export function summarizeToolCall(
                     typeof args.offset === "number" ? `offset=${args.offset}` : null,
                   ]
                 : name === "Delete"
-                  ? [root, path ? `path=${path}` : null]
+                  ? [scope, path ? `path=${path}` : null]
                   : name === "Bash"
                     ? [
-                        root,
+                        scope,
                         typeof args.cwd === "string"
                           ? `cwd=${summarizeToolArg(args.cwd)}`
-                          : rootPath,
+                          : defaultCwd,
                         summarizeBashTimeout(args.timeout_ms),
                         typeof args.command === "string"
                           ? `command=${summarizeToolArg(args.command)}`
@@ -427,15 +427,27 @@ function summarizeImageArgValue(key: string, value: unknown) {
   return value;
 }
 
-function displayFileToolRoot(root: unknown) {
-  return typeof root === "string" && root.trim() && root.trim() !== "workspace"
-    ? root.trim()
-    : undefined;
+// Render-layer tolerance for historical messages: current payloads carry
+// `scope` ("workspace" | "skill" | "external"), while old sessions may still
+// carry the legacy `root` ("workspace" | "skills") or unknown scope values
+// such as "temp"/"artifact". Degrade at the read site — unknown values are
+// displayed verbatim; "workspace" (the default) is hidden.
+function displayFileToolScope(source: unknown) {
+  const record =
+    source && typeof source === "object" && !Array.isArray(source)
+      ? (source as Record<string, unknown>)
+      : {};
+  const scope =
+    typeof record.scope === "string" && record.scope.trim() ? record.scope.trim() : undefined;
+  const legacyRoot =
+    typeof record.root === "string" && record.root.trim() ? record.root.trim() : undefined;
+  const resolved = scope ?? (legacyRoot === "skills" ? "skill" : legacyRoot);
+  return resolved && resolved !== "workspace" ? resolved : undefined;
 }
 
-function displayFileToolRootEntry(root: unknown) {
-  const displayRoot = displayFileToolRoot(root);
-  return displayRoot ? { root: displayRoot } : {};
+function displayFileToolScopeEntry(source: unknown) {
+  const displayScope = displayFileToolScope(source);
+  return displayScope ? { scope: displayScope } : {};
 }
 
 export function toolCallArgsForDisplay(toolCall: ToolCall) {
@@ -445,14 +457,14 @@ export function toolCallArgsForDisplay(toolCall: ToolCall) {
   switch (name) {
     case "Write":
       return {
-        ...displayFileToolRootEntry(args.root),
+        ...displayFileToolScopeEntry(args),
         path: args.path,
         mode: "rewrite",
         contentChars: fileToolFieldChars(args, "content"),
       };
     case "Edit":
       return {
-        ...displayFileToolRootEntry(args.root),
+        ...displayFileToolScopeEntry(args),
         path: args.path,
         expected_replacements: args.expected_replacements,
         replace_all: args.replace_all,

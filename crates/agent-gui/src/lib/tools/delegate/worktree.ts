@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { DelegateAgentItemResultDetails } from "../builtinTypes";
-import { normalizeRelativePath } from "./input";
 import type {
   DelegateAgentInput,
   DelegateWorktreeApplyResult,
@@ -11,6 +10,29 @@ import type {
   WorktreeApplyDecision,
 } from "./types";
 import { sanitizeLabelPart } from "./utils";
+
+// Cleans paths coming out of git status/porcelain output. Malformed entries
+// are dropped, not surfaced — git plumbing noise is not a tool-input error.
+function normalizeGitStatusPath(value: string) {
+  const normalized = value.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (
+    !normalized ||
+    /^[a-zA-Z]:\//.test(normalized) ||
+    normalized.startsWith("/") ||
+    normalized === "." ||
+    normalized === ".."
+  ) {
+    return "";
+  }
+
+  const segments: string[] = [];
+  for (const segment of normalized.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === ".." || segment.includes(":")) return "";
+    segments.push(segment);
+  }
+  return segments.join("/");
+}
 
 function pathMatchesAllowedOutput(path: string, allowedPath: string) {
   if (!allowedPath || allowedPath === ".") return true;
@@ -99,11 +121,11 @@ function parseWorktreeStatusPath(line: string) {
   const trimmed = line.trim();
   if (!trimmed) return "";
   if (trimmed.startsWith("?? ")) {
-    return normalizeRelativePath(decodeGitQuotedPath(trimmed.slice(3)));
+    return normalizeGitStatusPath(decodeGitQuotedPath(trimmed.slice(3)));
   }
   const body = line.length > 3 ? line.slice(3).trim() : trimmed.slice(2).trim();
   const renamedPath = body.includes(" -> ") ? (body.split(" -> ").pop() ?? body) : body;
-  return normalizeRelativePath(decodeGitQuotedPath(renamedPath));
+  return normalizeGitStatusPath(decodeGitQuotedPath(renamedPath));
 }
 
 function removeParentDirectoryPaths(paths: string[]) {
@@ -121,7 +143,7 @@ function shouldIgnoreChangedPath(path: string) {
 function collectWorktreeChangedPaths(status: DelegateWorktreeStatus) {
   const paths = new Set<string>();
   for (const file of status.untracked_files ?? []) {
-    const normalized = normalizeRelativePath(decodeGitQuotedPath(file));
+    const normalized = normalizeGitStatusPath(decodeGitQuotedPath(file));
     if (normalized && !shouldIgnoreChangedPath(normalized)) paths.add(normalized);
   }
   for (const line of (status.status || "").split(/\r?\n/g)) {
@@ -132,7 +154,7 @@ function collectWorktreeChangedPaths(status: DelegateWorktreeStatus) {
 }
 
 function isLikelyCommunicationArtifact(path: string) {
-  const normalized = normalizeRelativePath(path);
+  const normalized = normalizeGitStatusPath(path);
   if (!normalized) return false;
   const parts = normalized.split("/");
   const basename = (parts[parts.length - 1] ?? "").toLowerCase();

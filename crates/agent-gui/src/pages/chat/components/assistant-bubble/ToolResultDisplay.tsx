@@ -111,14 +111,12 @@ function buildPagedResultTags(params: {
 function filePathTags(details: {
   scope?: string;
   displayPath?: string;
-  pathRef?: string;
   absolutePath?: string;
 }): MetaTag[] {
   return [
     ...(details.scope && details.scope !== "workspace"
       ? [{ label: "scope", value: details.scope }]
       : []),
-    ...(details.pathRef ? [{ label: "pathRef", value: details.pathRef }] : []),
   ];
 }
 

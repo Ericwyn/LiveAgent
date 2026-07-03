@@ -61,10 +61,6 @@ export function ToolFactGrid({ tags }: { tags: MetaTag[] }) {
   );
 }
 
-export function fileRootTags(root?: string | null): MetaTag[] {
-  return root && root !== "workspace" ? [{ label: "root", value: root }] : [];
-}
-
 /** Render path with dir dimmed and filename highlighted */
 export function PathDisplay({ path, className }: { path: string; className?: string }) {
   const lastSlash = path.lastIndexOf("/");

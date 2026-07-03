@@ -118,8 +118,12 @@ import {
 async function resolveAgentAllowedOutputPaths(params: {
   agents: DelegateAgentInput[];
   workdir: string;
+  resolveHomeDir?: () => Promise<string>;
 }): Promise<DelegateAgentInput[]> {
-  const resolver = new ToolPathResolver({ workdir: params.workdir });
+  const resolver = new ToolPathResolver({
+    workdir: params.workdir,
+    resolveHomeDir: params.resolveHomeDir,
+  });
   const resolvedAgents: DelegateAgentInput[] = [];
   for (const agent of params.agents) {
     const allowedOutputPaths: string[] = [];
@@ -133,7 +137,7 @@ async function resolveAgentAllowedOutputPaths(params: {
       });
       if (resolved.scope !== "workspace") {
         throw new Error(
-          `Agent.allowed_output_paths must resolve inside the workspace. Received ${JSON.stringify(input)}.`,
+          `Agent.allowed_output_paths entries must be workspace-relative paths (worktree agents share the workspace layout). "${input}" does not resolve inside the workspace.`,
         );
       }
       const relativePath = resolved.relativePath ?? "";
@@ -152,6 +156,7 @@ export function createDelegateTools(params: {
   runtime: DelegateRuntime;
   runtimePlatform?: RuntimePlatform;
   workdir: string;
+  resolveHomeDir?: () => Promise<string>;
   parentConversationId?: string;
   sessionId?: string;
   agentTemplates?: DelegateAgentTemplate[];
@@ -288,6 +293,7 @@ export function createDelegateTools(params: {
     const rawAgents = await resolveAgentAllowedOutputPaths({
       agents: normalizeDelegateAgents(args),
       workdir: params.workdir,
+      resolveHomeDir: params.resolveHomeDir,
     });
     const agents: DelegateAgentInput[] = [];
     const canonicalizationNotes: string[] = [];

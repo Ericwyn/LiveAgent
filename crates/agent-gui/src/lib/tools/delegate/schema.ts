@@ -79,7 +79,7 @@ export const DELEGATE_AGENT_PARAMETERS = Type.Object(
     allowed_output_paths: Type.Optional(
       Type.Array(Type.String(), {
         description:
-          "Workspace files/directories allowed when apply_policy=explicit. Accepts workspace-relative paths, absolute paths inside the workspace, file://, or workspace:pathRef values.",
+          "Workspace files/directories allowed when apply_policy=explicit. Accepts workspace-relative paths exactly as returned by file tools, absolute paths inside the workspace, or file:// values.",
       }),
     ),
     resume: Type.Optional(

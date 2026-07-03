@@ -556,8 +556,8 @@ test("Bash tool can execute from the fixed Skills root with relative cwd", async
 
   assert.equal(result.isError, false);
   assert.match(result.content[0].text, /cwd: skill:\/\/metaphysics-steward\/scripts/);
-  assert.equal(calls[0].args.workdir, "/Users/me/.liveagent/skills");
-  assert.equal(calls[0].args.cwd, "metaphysics-steward/scripts");
+  assert.equal(calls[0].args.workdir, "/repo");
+  assert.equal(calls[0].args.cwd, "/Users/me/.liveagent/skills/metaphysics-steward/scripts");
 });
 
 test("Bash tool allows enabled Skill scripts by direct absolute path without cd", async () => {

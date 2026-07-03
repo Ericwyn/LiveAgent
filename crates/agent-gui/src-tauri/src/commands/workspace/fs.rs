@@ -60,6 +60,43 @@ enum FsError {
     #[error("Target path is outside the resolved directory: {0}")]
     OutOfBounds(String),
 
+    #[error("{path} does not exist")]
+    NotFound { path: String, did_you_mean: Vec<String> },
+
+    #[error("{path} is not a directory")]
+    NotADirectory { path: String, entry_kind: String },
+
+    #[error("{path} is not a regular file")]
+    NotAFile { path: String, entry_kind: String },
+
+    #[error("{message}")]
+    UnsupportedTarget { path: String, message: String },
+
+    #[error("{path} requires a full-file Read first")]
+    RequiresFullRead { path: String },
+
+    #[error("{message}")]
+    StaleFile { path: String, message: String },
+
+    #[error("old_string was not found in {path}")]
+    EditNoMatch { path: String },
+
+    #[error("old_string matched {matches} locations in {path}")]
+    EditAmbiguous { path: String, matches: usize },
+
+    #[error("expected {expected} replacements but found {actual} in {path}")]
+    EditCountMismatch {
+        path: String,
+        expected: usize,
+        actual: usize,
+    },
+
+    #[error("{message}")]
+    TooLarge { path: String, message: String },
+
+    #[error("{path} is not valid UTF-8 text")]
+    NotUtf8 { path: String },
+
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
@@ -71,6 +108,230 @@ enum FsError {
 
     #[error("{0}")]
     Other(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FsErrorCode {
+    InvalidWorkdir,
+    InvalidPath,
+    OutOfBounds,
+    NotFound,
+    NotADirectory,
+    NotAFile,
+    UnsupportedTarget,
+    RequiresFullRead,
+    StaleFile,
+    EditNoMatch,
+    EditAmbiguous,
+    EditCountMismatch,
+    TooLarge,
+    NotUtf8,
+    RegexInvalid,
+    GlobInvalid,
+    Io,
+    Other,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsCommandError {
+    pub code: FsErrorCode,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_kind: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub did_you_mean: Vec<String>,
+}
+
+impl FsCommandError {
+    fn other(message: impl Into<String>) -> Self {
+        Self {
+            code: FsErrorCode::Other,
+            message: message.into(),
+            path: None,
+            workdir: None,
+            entry_kind: None,
+            did_you_mean: Vec::new(),
+        }
+    }
+
+    fn with_workdir(mut self, workdir: &Path) -> Self {
+        self.workdir = Some(display_path(workdir));
+        self
+    }
+}
+
+impl From<FsError> for FsCommandError {
+    fn from(err: FsError) -> Self {
+        let message = err.to_string();
+        let (code, path, entry_kind, did_you_mean) = match err {
+            FsError::InvalidWorkdir(_) => (FsErrorCode::InvalidWorkdir, None, None, Vec::new()),
+            FsError::InvalidRelPath(path) => (FsErrorCode::InvalidPath, Some(path), None, Vec::new()),
+            FsError::OutOfBounds(path) => (FsErrorCode::OutOfBounds, Some(path), None, Vec::new()),
+            FsError::NotFound { path, did_you_mean } => {
+                (FsErrorCode::NotFound, Some(path), None, did_you_mean)
+            }
+            FsError::NotADirectory { path, entry_kind } => {
+                (FsErrorCode::NotADirectory, Some(path), Some(entry_kind), Vec::new())
+            }
+            FsError::NotAFile { path, entry_kind } => {
+                (FsErrorCode::NotAFile, Some(path), Some(entry_kind), Vec::new())
+            }
+            FsError::UnsupportedTarget { path, .. } => {
+                (FsErrorCode::UnsupportedTarget, Some(path), None, Vec::new())
+            }
+            FsError::RequiresFullRead { path } => {
+                (FsErrorCode::RequiresFullRead, Some(path), None, Vec::new())
+            }
+            FsError::StaleFile { path, .. } => (FsErrorCode::StaleFile, Some(path), None, Vec::new()),
+            FsError::EditNoMatch { path } => (FsErrorCode::EditNoMatch, Some(path), None, Vec::new()),
+            FsError::EditAmbiguous { path, .. } => {
+                (FsErrorCode::EditAmbiguous, Some(path), None, Vec::new())
+            }
+            FsError::EditCountMismatch { path, .. } => {
+                (FsErrorCode::EditCountMismatch, Some(path), None, Vec::new())
+            }
+            FsError::TooLarge { path, .. } => (FsErrorCode::TooLarge, Some(path), None, Vec::new()),
+            FsError::NotUtf8 { path } => (FsErrorCode::NotUtf8, Some(path), None, Vec::new()),
+            FsError::Io(err) if err.kind() == io::ErrorKind::NotFound => {
+                (FsErrorCode::NotFound, None, None, Vec::new())
+            }
+            FsError::Io(_) => (FsErrorCode::Io, None, None, Vec::new()),
+            FsError::Regex(_) => (FsErrorCode::RegexInvalid, None, None, Vec::new()),
+            FsError::Glob(_) => (FsErrorCode::GlobInvalid, None, None, Vec::new()),
+            FsError::Other(_) => (FsErrorCode::Other, None, None, Vec::new()),
+        };
+        Self {
+            code,
+            message,
+            path,
+            workdir: None,
+            entry_kind,
+            did_you_mean,
+        }
+    }
+}
+
+async fn run_blocking_fs<R: Send + 'static>(
+    label: &'static str,
+    f: impl FnOnce() -> Result<R, FsCommandError> + Send + 'static,
+) -> Result<R, FsCommandError> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| FsCommandError::other(format!("{label} join failed: {e}")))?
+}
+
+#[cfg(unix)]
+fn file_identity(meta: &fs::Metadata, _canon: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    format!("{}:{}", meta.dev(), meta.ino())
+}
+
+#[cfg(windows)]
+fn file_identity(_meta: &fs::Metadata, canon: &Path) -> String {
+    format!("path:{}", display_path(canon).to_lowercase())
+}
+
+fn levenshtein_at_most(a: &str, b: &str, max: usize) -> bool {
+    let a: Vec<char> = a.chars().take(64).collect();
+    let b: Vec<char> = b.chars().take(64).collect();
+    if a.len().abs_diff(b.len()) > max {
+        return false;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = Vec::with_capacity(b.len() + 1);
+        cur.push(i + 1);
+        let mut row_min = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            let value = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+            row_min = row_min.min(value);
+            cur.push(value);
+        }
+        if row_min > max {
+            return false;
+        }
+        prev = cur;
+    }
+    prev[b.len()] <= max
+}
+
+fn nearest_entries(parent: &Path, missing_name: &str, limit: usize) -> Vec<String> {
+    let needle = missing_name.to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut ranked: Vec<(u8, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let lower = name.to_lowercase();
+        let rank = if lower == needle {
+            0
+        } else if lower.starts_with(&needle) || needle.starts_with(&lower) || lower.contains(&needle)
+        {
+            1
+        } else if levenshtein_at_most(&lower, &needle, 2) {
+            2
+        } else {
+            continue;
+        };
+        ranked.push((rank, name));
+    }
+    ranked.sort();
+    ranked.into_iter().take(limit).map(|(_, name)| name).collect()
+}
+
+fn not_found_error(workdir: &Path, rel: &Path) -> FsError {
+    let mut existing = workdir.to_path_buf();
+    let mut existing_rel = PathBuf::new();
+    let mut missing: Option<String> = None;
+    for component in rel.components() {
+        let name = component.as_os_str().to_string_lossy().to_string();
+        let candidate = existing.join(&name);
+        if candidate.exists() {
+            existing = candidate;
+            existing_rel.push(&name);
+        } else {
+            missing = Some(name);
+            break;
+        }
+    }
+    let did_you_mean = missing
+        .as_deref()
+        .map(|name| {
+            nearest_entries(&existing, name, 5)
+                .into_iter()
+                .map(|candidate| logical_rel_path(&existing_rel.join(candidate)))
+                .collect()
+        })
+        .unwrap_or_default();
+    FsError::NotFound {
+        path: logical_rel_path(rel),
+        did_you_mean,
+    }
+}
+
+fn resolve_target(workdir: &Path, rel: &Path) -> Result<PathBuf, FsError> {
+    let target = workdir.join(rel);
+    match fs::canonicalize(&target) {
+        Ok(canon) => {
+            if !canon.starts_with(workdir) {
+                return Err(FsError::OutOfBounds(canon.display().to_string()));
+            }
+            Ok(canon)
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Err(not_found_error(workdir, rel)),
+        Err(err) => Err(FsError::Io(err)),
+    }
 }
 
 fn canonicalize_workdir(workdir: &str) -> Result<PathBuf, FsError> {
@@ -244,25 +505,25 @@ fn display_path(path: &Path) -> String {
     normalized
 }
 
-fn resolve_existing_file_target(
-    workdir: &Path,
-    target: &Path,
-    label: &str,
-) -> Result<PathBuf, String> {
-    let resolved = ensure_within_workdir_existing(workdir, target).map_err(|e| e.to_string())?;
-    let md = fs::metadata(&resolved).map_err(|e| e.to_string())?;
+fn resolve_existing_file_target(workdir: &Path, rel: &Path) -> Result<PathBuf, FsError> {
+    let resolved = resolve_target(workdir, rel)?;
+    let md = fs::metadata(&resolved)?;
     if !md.is_file() {
-        return Err(FsError::Other(format!("{label} must be a regular file")).to_string());
+        let entry_kind = if md.is_dir() { "dir" } else { "other" };
+        return Err(FsError::NotAFile {
+            path: logical_rel_path(rel),
+            entry_kind: entry_kind.to_string(),
+        });
     }
     Ok(resolved)
 }
 
-fn ensure_parent_dir(workdir: &Path, target: &Path) -> Result<(), String> {
+fn ensure_parent_dir(workdir: &Path, target: &Path) -> Result<(), FsError> {
     let parent = target
         .parent()
-        .ok_or_else(|| FsError::Other("Invalid target path".to_string()).to_string())?;
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    ensure_within_workdir_existing(workdir, parent).map_err(|e| e.to_string())?;
+        .ok_or_else(|| FsError::Other("Invalid target path".to_string()))?;
+    fs::create_dir_all(parent)?;
+    ensure_within_workdir_existing(workdir, parent)?;
     Ok(())
 }
 
@@ -402,11 +663,12 @@ fn infer_image_mime_from_bytes(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
-fn validate_image_size(label: &str, len: usize) -> Result<(), String> {
+fn validate_image_size(label: &str, len: usize) -> Result<(), FsError> {
     if len > READ_MAX_IMAGE_BYTES {
-        return Err(
-            FsError::Other(format!("Image is too large to read via tool ({label})")).to_string(),
-        );
+        return Err(FsError::TooLarge {
+            path: label.to_string(),
+            message: format!("Image is too large to read via tool ({label})"),
+        });
     }
     Ok(())
 }
@@ -416,7 +678,7 @@ fn resolve_supported_image_mime(
     provided_mime: Option<&str>,
     path_hint: Option<&Path>,
     bytes: &[u8],
-) -> Result<String, String> {
+) -> Result<String, FsError> {
     if let Some(mime) = provided_mime.and_then(normalize_supported_image_mime) {
         return Ok(mime);
     }
@@ -426,7 +688,10 @@ fn resolve_supported_image_mime(
     if let Some(mime) = infer_image_mime_from_bytes(bytes) {
         return Ok(mime.to_string());
     }
-    Err(FsError::Other(format!("{label} is not a supported image file")).to_string())
+    Err(FsError::UnsupportedTarget {
+        path: label.to_string(),
+        message: format!("{label} is not a supported image file"),
+    })
 }
 
 fn build_image_read_response(
@@ -434,6 +699,7 @@ fn build_image_read_response(
     bytes: Vec<u8>,
     mime_type: String,
     mtime_ms: u64,
+    file_id: Option<String>,
 ) -> ReadResponse {
     let size_bytes = bytes.len();
     let content_hash = hash_bytes(&bytes);
@@ -457,6 +723,7 @@ fn build_image_read_response(
         mime_type: Some(mime_type),
         data: Some(BASE64_STANDARD.encode(bytes)),
         size_bytes: Some(size_bytes),
+        file_id,
     }
 }
 
@@ -763,6 +1030,7 @@ fn build_workspace_preview_response(
     mtime_ms: u64,
     content_hash: String,
     size_bytes: usize,
+    file_id: Option<String>,
 ) -> ReadResponse {
     let kind = if mime_type.starts_with("image/") {
         "image"
@@ -790,31 +1058,37 @@ fn build_workspace_preview_response(
         mime_type: Some(mime_type.to_string()),
         data: Some(BASE64_STANDARD.encode(bytes)),
         size_bytes: Some(size_bytes),
+        file_id,
     }
 }
 
-fn read_local_preview_file(target: PathBuf, logical_path: String) -> Result<ReadResponse, String> {
-    let md = fs::metadata(&target).map_err(|e| e.to_string())?;
+fn read_local_preview_file(target: PathBuf, logical_path: String) -> Result<ReadResponse, FsError> {
+    let md = fs::metadata(&target)?;
     let size_bytes = usize::try_from(md.len()).unwrap_or(usize::MAX);
     if size_bytes > READ_MAX_PREVIEW_BYTES {
-        return Err(FsError::Other(format!(
-            "File is too large to preview ({size_bytes} bytes, max {READ_MAX_PREVIEW_BYTES} bytes)"
-        ))
-        .to_string());
+        return Err(FsError::TooLarge {
+            path: logical_path,
+            message: format!(
+                "File is too large to preview ({size_bytes} bytes, max {READ_MAX_PREVIEW_BYTES} bytes)"
+            ),
+        });
     }
 
-    let bytes = fs::read(&target).map_err(|e| e.to_string())?;
+    let bytes = fs::read(&target)?;
     if bytes.len() > READ_MAX_PREVIEW_BYTES {
-        return Err(FsError::Other(format!(
-            "File is too large to preview ({} bytes, max {READ_MAX_PREVIEW_BYTES} bytes)",
-            bytes.len()
-        ))
-        .to_string());
+        return Err(FsError::TooLarge {
+            path: logical_path,
+            message: format!(
+                "File is too large to preview ({} bytes, max {READ_MAX_PREVIEW_BYTES} bytes)",
+                bytes.len()
+            ),
+        });
     }
 
     let mtime_ms = metadata_mtime_ms(&md);
     let content_hash = hash_bytes(&bytes);
     let original_size_bytes = bytes.len();
+    let file_id = Some(file_identity(&md, &target));
 
     if is_convertible_document_preview_file(&target) {
         let html_bytes = convert_document_to_html_preview_cached(
@@ -822,7 +1096,8 @@ fn read_local_preview_file(target: PathBuf, logical_path: String) -> Result<Read
             mtime_ms,
             original_size_bytes,
             &content_hash,
-        )?;
+        )
+        .map_err(FsError::Other)?;
         return Ok(build_workspace_preview_response(
             logical_path,
             html_bytes,
@@ -830,12 +1105,15 @@ fn read_local_preview_file(target: PathBuf, logical_path: String) -> Result<Read
             mtime_ms,
             content_hash,
             original_size_bytes,
+            file_id,
         ));
     }
 
-    let mime_type = infer_workspace_preview_mime(&target, &bytes).ok_or_else(|| {
-        FsError::Other("File type is not supported for preview".to_string()).to_string()
-    })?;
+    let mime_type =
+        infer_workspace_preview_mime(&target, &bytes).ok_or_else(|| FsError::UnsupportedTarget {
+            path: logical_path.clone(),
+            message: "File type is not supported for preview".to_string(),
+        })?;
 
     Ok(build_workspace_preview_response(
         logical_path,
@@ -844,6 +1122,7 @@ fn read_local_preview_file(target: PathBuf, logical_path: String) -> Result<Read
         mtime_ms,
         content_hash,
         original_size_bytes,
+        file_id,
     ))
 }
 
@@ -1562,6 +1841,7 @@ fn build_document_read_response(
     content_hash: String,
     mime_type: Option<String>,
     size_bytes: usize,
+    file_id: Option<String>,
 ) -> ReadResponse {
     ReadResponse {
         kind: kind.to_string(),
@@ -1583,6 +1863,7 @@ fn build_document_read_response(
         mime_type,
         data: None,
         size_bytes: Some(size_bytes),
+        file_id,
     }
 }
 
@@ -1669,7 +1950,7 @@ struct ExpectedVersion {
 fn parse_expected_version(
     expected_mtime_ms: Option<u64>,
     expected_content_hash: Option<String>,
-) -> Result<Option<ExpectedVersion>, String> {
+) -> Result<Option<ExpectedVersion>, FsError> {
     match (expected_mtime_ms, expected_content_hash) {
         (None, None) => Ok(None),
         (Some(mtime_ms), Some(content_hash)) if !content_hash.trim().is_empty() => {
@@ -1678,25 +1959,28 @@ fn parse_expected_version(
                 content_hash,
             }))
         }
-        _ => {
-            Err("expected_mtime_ms and expected_content_hash must be provided together".to_string())
-        }
+        _ => Err(FsError::Other(
+            "expected_mtime_ms and expected_content_hash must be provided together".to_string(),
+        )),
     }
 }
 
 fn ensure_expected_version_matches(
     target: &Path,
+    logical_path: &str,
     expected: &ExpectedVersion,
-) -> Result<(), String> {
-    let md = fs::metadata(target).map_err(|e| e.to_string())?;
-    let bytes = fs::read(target).map_err(|e| e.to_string())?;
+) -> Result<(), FsError> {
+    let md = fs::metadata(target)?;
+    let bytes = fs::read(target)?;
     let actual_mtime_ms = metadata_mtime_ms(&md);
     let actual_content_hash = hash_bytes(&bytes);
     if actual_mtime_ms != expected.mtime_ms || actual_content_hash != expected.content_hash {
-        return Err(
-            "File changed since the last full Read. Read the file again before modifying it."
-                .to_string(),
-        );
+        return Err(FsError::StaleFile {
+            path: logical_path.to_string(),
+            message:
+                "File changed since the last full Read. Read the file again before modifying it."
+                    .to_string(),
+        });
     }
     Ok(())
 }
@@ -1723,17 +2007,18 @@ pub struct ReadResponse {
     pub mime_type: Option<String>,
     pub data: Option<String>,
     pub size_bytes: Option<usize>,
+    pub file_id: Option<String>,
 }
 
 fn compact_base64(input: &str) -> String {
     input.chars().filter(|c| !c.is_ascii_whitespace()).collect()
 }
 
-fn decode_base64_image_bytes(label: &str, input: &str) -> Result<Vec<u8>, String> {
+fn decode_base64_image_bytes(label: &str, input: &str) -> Result<Vec<u8>, FsError> {
     let compact = compact_base64(input);
     let bytes = BASE64_STANDARD
         .decode(compact.as_bytes())
-        .map_err(|e| FsError::Other(format!("{label} is not valid base64: {e}")).to_string())?;
+        .map_err(|e| FsError::Other(format!("{label} is not valid base64: {e}")))?;
     validate_image_size(label, bytes.len())?;
     Ok(bytes)
 }
@@ -1747,7 +2032,7 @@ fn hex_digit_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn percent_decode_data_url_payload(label: &str, payload: &str) -> Result<Vec<u8>, String> {
+fn percent_decode_data_url_payload(label: &str, payload: &str) -> Result<Vec<u8>, FsError> {
     let bytes = payload.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0usize;
@@ -1756,20 +2041,17 @@ fn percent_decode_data_url_payload(label: &str, payload: &str) -> Result<Vec<u8>
             if index + 2 >= bytes.len() {
                 return Err(FsError::Other(format!(
                     "{label} data URL contains an incomplete percent escape"
-                ))
-                .to_string());
+                )));
             }
             let hi = hex_digit_value(bytes[index + 1]).ok_or_else(|| {
                 FsError::Other(format!(
                     "{label} data URL contains an invalid percent escape"
                 ))
-                .to_string()
             })?;
             let lo = hex_digit_value(bytes[index + 2]).ok_or_else(|| {
                 FsError::Other(format!(
                     "{label} data URL contains an invalid percent escape"
                 ))
-                .to_string()
             })?;
             out.push((hi << 4) | lo);
             index += 3;
@@ -1786,7 +2068,7 @@ fn parse_data_image_url(
     label: &str,
     source: &str,
     fallback_mime_type: Option<&str>,
-) -> Result<Option<(Vec<u8>, String)>, String> {
+) -> Result<Option<(Vec<u8>, String)>, FsError> {
     if !source
         .get(..5)
         .map(|prefix| prefix.eq_ignore_ascii_case("data:"))
@@ -1795,9 +2077,9 @@ fn parse_data_image_url(
         return Ok(None);
     }
 
-    let (header, payload) = source.split_once(',').ok_or_else(|| {
-        FsError::Other(format!("{label} data URL is missing a comma")).to_string()
-    })?;
+    let (header, payload) = source
+        .split_once(',')
+        .ok_or_else(|| FsError::Other(format!("{label} data URL is missing a comma")))?;
     let is_base64 = header
         .split(';')
         .any(|part| part.trim().eq_ignore_ascii_case("base64"));
@@ -1816,13 +2098,11 @@ fn parse_data_image_url(
                 FsError::Other(format!(
                     "{label} non-base64 data URL must declare image/svg+xml"
                 ))
-                .to_string()
             })?;
         if normalized_mime != "image/svg+xml" || !looks_like_svg(&bytes) {
             return Err(FsError::Other(format!(
                 "{label} non-base64 data URL only supports SVG image data"
-            ))
-            .to_string());
+            )));
         }
     }
     let mime_type =
@@ -1833,7 +2113,7 @@ fn parse_data_image_url(
 fn read_base64_image_source(
     source: &str,
     mime_type: Option<String>,
-) -> Result<ReadResponse, String> {
+) -> Result<ReadResponse, FsError> {
     let label = "base64 image";
     let (bytes, mime_type) = match parse_data_image_url(label, source, mime_type.as_deref())? {
         Some(parsed) => parsed,
@@ -1850,15 +2130,16 @@ fn read_base64_image_source(
         bytes,
         mime_type,
         0,
+        None,
     ))
 }
 
-fn read_inline_svg_image_source(source: &str) -> Result<ReadResponse, String> {
+fn read_inline_svg_image_source(source: &str) -> Result<ReadResponse, FsError> {
     let label = "inline SVG";
     let bytes = source.as_bytes().to_vec();
     validate_image_size(label, bytes.len())?;
     if !looks_like_svg(&bytes) {
-        return Err(FsError::Other(format!("{label} is not valid SVG image data")).to_string());
+        return Err(FsError::Other(format!("{label} is not valid SVG image data")));
     }
     let mime_type = resolve_supported_image_mime(label, Some("image/svg+xml"), None, &bytes)?;
     let display_label = format!("inline-svg:{mime_type}:{} bytes", bytes.len());
@@ -1867,88 +2148,93 @@ fn read_inline_svg_image_source(source: &str) -> Result<ReadResponse, String> {
         bytes,
         mime_type,
         0,
+        None,
     ))
 }
 
-fn read_local_image_file(target: PathBuf, label: String) -> Result<ReadResponse, String> {
-    let md = fs::metadata(&target).map_err(|e| e.to_string())?;
+fn read_local_image_file(target: PathBuf, label: String) -> Result<ReadResponse, FsError> {
+    let md = fs::metadata(&target)?;
     if !md.is_file() {
-        return Err(FsError::Other(format!("{label} must be a regular file")).to_string());
+        let entry_kind = if md.is_dir() { "dir" } else { "other" };
+        return Err(FsError::NotAFile {
+            path: label,
+            entry_kind: entry_kind.to_string(),
+        });
     }
 
-    let bytes = fs::read(&target).map_err(|e| e.to_string())?;
+    let bytes = fs::read(&target)?;
     validate_image_size(&label, bytes.len())?;
     let mime_type = resolve_supported_image_mime(&label, None, Some(&target), &bytes)?;
     let mtime_ms = metadata_mtime_ms(&md);
-    Ok(build_image_read_response(label, bytes, mime_type, mtime_ms))
+    let file_id = Some(file_identity(&md, &target));
+    Ok(build_image_read_response(
+        label, bytes, mime_type, mtime_ms, file_id,
+    ))
 }
 
-fn read_path_image_source(workdir: &str, source: &str) -> Result<ReadResponse, String> {
+fn read_path_image_source(workdir: &str, source: &str) -> Result<ReadResponse, FsError> {
     let raw = source.trim();
     if raw.is_empty() {
-        return Err(FsError::InvalidRelPath(source.to_string()).to_string());
+        return Err(FsError::InvalidRelPath(source.to_string()));
     }
 
     if let Some(file_path) = parse_file_url_path(raw)? {
-        let target = fs::canonicalize(&file_path).map_err(|e| e.to_string())?;
+        let target = fs::canonicalize(&file_path)?;
         let label = display_path(&target);
         return read_local_image_file(target, label);
     }
 
     let expanded = expand_tilde_path(raw);
     if expanded.is_absolute() {
-        let target = fs::canonicalize(&expanded).map_err(|e| e.to_string())?;
+        let target = fs::canonicalize(&expanded)?;
         let label = display_path(&target);
         return read_local_image_file(target, label);
     }
 
-    let wd = canonicalize_workdir(workdir).map_err(|e| e.to_string())?;
-    let rel = sanitize_rel_path(raw).map_err(|e| e.to_string())?;
+    let wd = canonicalize_workdir(workdir)?;
+    let rel = sanitize_rel_path(raw)?;
     let logical_path = logical_rel_path(&rel);
-    let target = wd.join(&rel);
-    let target = resolve_existing_file_target(&wd, &target, "Image.path")?;
+    let target = resolve_existing_file_target(&wd, &rel)?;
     read_local_image_file(target, logical_path)
 }
 
-fn parse_file_url_path(source: &str) -> Result<Option<PathBuf>, String> {
+fn parse_file_url_path(source: &str) -> Result<Option<PathBuf>, FsError> {
     let Ok(url) = Url::parse(source) else {
         return Ok(None);
     };
     if url.scheme() != "file" {
         return Ok(None);
     }
-    url.to_file_path().map(Some).map_err(|_| {
-        FsError::Other("Image.file URL must resolve to a local file path".to_string()).to_string()
-    })
+    url.to_file_path()
+        .map(Some)
+        .map_err(|_| FsError::Other("Image.file URL must resolve to a local file path".to_string()))
 }
 
-fn read_url_image_source(source: &str) -> Result<ReadResponse, String> {
-    let url = Url::parse(source).map_err(|e| {
-        FsError::Other(format!("Image.url must be an absolute URL: {e}")).to_string()
-    })?;
+fn read_url_image_source(source: &str) -> Result<ReadResponse, FsError> {
+    let url = Url::parse(source)
+        .map_err(|e| FsError::Other(format!("Image.url must be an absolute URL: {e}")))?;
     match url.scheme() {
         "http" | "https" => {}
         scheme => {
             return Err(FsError::Other(format!(
                 "Image.url only supports http and https, got {scheme}"
-            ))
-            .to_string());
+            )));
         }
     }
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(IMAGE_SOURCE_HTTP_TIMEOUT_SECS))
         .build()
-        .map_err(|e| format!("Failed to create the HTTP client: {e}"))?;
+        .map_err(|e| FsError::Other(format!("Failed to create the HTTP client: {e}")))?;
     let response = client
         .get(url.clone())
         .send()
-        .map_err(|e| format!("Image.url request failed: {e}"))?;
+        .map_err(|e| FsError::Other(format!("Image.url request failed: {e}")))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!(
+        return Err(FsError::Other(format!(
             "Image.url request failed with HTTP status {status}"
-        ));
+        )));
     }
 
     if let Some(content_length) = response
@@ -1970,7 +2256,7 @@ fn read_url_image_source(source: &str) -> Result<ReadResponse, String> {
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
-        .map_err(|e| format!("Failed to read Image.url response: {e}"))?;
+        .map_err(|e| FsError::Other(format!("Failed to read Image.url response: {e}")))?;
     validate_image_size(url.as_str(), bytes.len())?;
     let mime_type = resolve_supported_image_mime(
         url.as_str(),
@@ -1983,6 +2269,7 @@ fn read_url_image_source(source: &str) -> Result<ReadResponse, String> {
         bytes,
         mime_type,
         0,
+        None,
     ))
 }
 
@@ -1997,10 +2284,20 @@ fn fs_read_image_source_sync(
     source: String,
     source_type: Option<String>,
     mime_type: Option<String>,
-) -> Result<ReadResponse, String> {
+) -> Result<ReadResponse, FsCommandError> {
+    fs_read_image_source_impl(workdir, source, source_type, mime_type)
+        .map_err(FsCommandError::from)
+}
+
+fn fs_read_image_source_impl(
+    workdir: String,
+    source: String,
+    source_type: Option<String>,
+    mime_type: Option<String>,
+) -> Result<ReadResponse, FsError> {
     let source = source.trim().to_string();
     if source.is_empty() {
-        return Err("Image source cannot be empty".to_string());
+        return Err(FsError::Other("Image source cannot be empty".to_string()));
     }
 
     let normalized_type = source_type
@@ -2028,9 +2325,9 @@ fn fs_read_image_source_sync(
                 read_path_image_source(&workdir, &source)
             }
         }
-        other => Err(format!(
+        other => Err(FsError::Other(format!(
             "Image sourceType must be one of path, url, base64, or auto, got {other}"
-        )),
+        ))),
     }
 }
 
@@ -2040,8 +2337,8 @@ pub async fn fs_read_image_source(
     source: String,
     source_type: Option<String>,
     mime_type: Option<String>,
-) -> Result<ReadResponse, String> {
-    run_blocking("fs_read_image_source", move || {
+) -> Result<ReadResponse, FsCommandError> {
+    run_blocking_fs("fs_read_image_source", move || {
         fs_read_image_source_sync(workdir, source, source_type, mime_type)
     })
     .await
@@ -2050,12 +2347,16 @@ pub async fn fs_read_image_source(
 pub(crate) fn fs_read_workspace_image_sync(
     workdir: String,
     path: String,
-) -> Result<ReadResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel = sanitize_rel_path(&path).map_err(|e| e.to_string())?;
+) -> Result<ReadResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_read_workspace_image_impl(&wd, &path)
+        .map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_read_workspace_image_impl(wd: &Path, path: &str) -> Result<ReadResponse, FsError> {
+    let rel = sanitize_rel_path(path)?;
     let logical_path = logical_rel_path(&rel);
-    let target = wd.join(&rel);
-    let target = resolve_existing_file_target(&wd, &target, "Preview.path")?;
+    let target = resolve_existing_file_target(wd, &rel)?;
     read_local_preview_file(target, logical_path)
 }
 
@@ -2063,8 +2364,8 @@ pub(crate) fn fs_read_workspace_image_sync(
 pub async fn fs_read_workspace_image(
     workdir: String,
     path: String,
-) -> Result<ReadResponse, String> {
-    run_blocking("fs_read_workspace_image", move || {
+) -> Result<ReadResponse, FsCommandError> {
+    run_blocking_fs("fs_read_workspace_image", move || {
         fs_read_workspace_image_sync(workdir, path)
     })
     .await
@@ -2079,25 +2380,40 @@ fn fs_read_text_sync(
     page_limit: Option<usize>,
     cell_start: Option<usize>,
     cell_limit: Option<usize>,
-) -> Result<ReadResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel = sanitize_rel_path(&path).map_err(|e| e.to_string())?;
-    let logical_path = logical_rel_path(&rel);
-    let target = wd.join(&rel);
-    let target = resolve_existing_file_target(&wd, &target, "Read.path")?;
+) -> Result<ReadResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_read_text_impl(
+        &wd, &path, start_line, limit, page_start, page_limit, cell_start, cell_limit,
+    )
+    .map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
 
-    let md = fs::metadata(&target).map_err(|e| e.to_string())?;
-    let bytes = fs::read(&target).map_err(|e| e.to_string())?;
+fn fs_read_text_impl(
+    wd: &Path,
+    path: &str,
+    start_line: Option<usize>,
+    limit: Option<usize>,
+    page_start: Option<usize>,
+    page_limit: Option<usize>,
+    cell_start: Option<usize>,
+    cell_limit: Option<usize>,
+) -> Result<ReadResponse, FsError> {
+    let rel = sanitize_rel_path(path)?;
+    let logical_path = logical_rel_path(&rel);
+    let target = resolve_existing_file_target(wd, &rel)?;
+
+    let md = fs::metadata(&target)?;
+    let bytes = fs::read(&target)?;
     let mtime_ms = metadata_mtime_ms(&md);
     let content_hash = hash_bytes(&bytes);
+    let file_id = Some(file_identity(&md, &target));
 
     if let Some(mime_type) = infer_image_mime(&target) {
         if bytes.len() > READ_MAX_IMAGE_BYTES {
-            return Err(FsError::Other(format!(
-                "Image is too large to read via tool ({})",
-                target.display()
-            ))
-            .to_string());
+            return Err(FsError::TooLarge {
+                path: logical_path,
+                message: format!("Image is too large to read via tool ({})", target.display()),
+            });
         }
 
         return Ok(ReadResponse {
@@ -2120,6 +2436,7 @@ fn fs_read_text_sync(
             mime_type: Some(mime_type.to_string()),
             data: Some(BASE64_STANDARD.encode(bytes)),
             size_bytes: Some(md.len() as usize),
+            file_id,
         });
     }
 
@@ -2128,7 +2445,8 @@ fn fs_read_text_sync(
             &bytes,
             page_start.unwrap_or(1),
             page_limit.unwrap_or(DEFAULT_READ_LIMIT_PDF_PAGES),
-        )?;
+        )
+        .map_err(FsError::Other)?;
         return Ok(ReadResponse {
             kind: "pdf".to_string(),
             path: logical_path,
@@ -2149,6 +2467,7 @@ fn fs_read_text_sync(
             mime_type: Some("application/pdf".to_string()),
             data: None,
             size_bytes: Some(md.len() as usize),
+            file_id,
         });
     }
 
@@ -2157,7 +2476,8 @@ fn fs_read_text_sync(
             &bytes,
             cell_start.unwrap_or(1),
             cell_limit.unwrap_or(DEFAULT_READ_LIMIT_NOTEBOOK_CELLS),
-        )?;
+        )
+        .map_err(FsError::Other)?;
         return Ok(ReadResponse {
             kind: "notebook".to_string(),
             path: logical_path,
@@ -2178,12 +2498,13 @@ fn fs_read_text_sync(
             mime_type: Some("application/x-ipynb+json".to_string()),
             data: None,
             size_bytes: Some(md.len() as usize),
+            file_id,
         });
     }
 
     if is_word_file(&target) {
         let (content, truncated) = if is_word_extractable_file(&target) {
-            build_docx_window(&bytes)?
+            build_docx_window(&bytes).map_err(FsError::Other)?
         } else {
             (
                 "Legacy Word .doc binary file recognized and uploaded.\nRead extracts text from .docx directly; use Bash or an external converter when you need to inspect legacy .doc contents.".to_string(),
@@ -2199,12 +2520,13 @@ fn fs_read_text_sync(
             content_hash,
             office_mime_type(&target).map(str::to_string),
             md.len() as usize,
+            file_id,
         ));
     }
 
     if is_spreadsheet_file(&target) {
         let (content, truncated) = if is_xlsx_extractable_file(&target) {
-            build_xlsx_window(&bytes)?
+            build_xlsx_window(&bytes).map_err(FsError::Other)?
         } else {
             (
                 "Legacy Excel .xls binary file recognized and uploaded.\nRead extracts workbook previews from .xlsx/.xlsm directly; use Bash or an external converter when you need to inspect legacy .xls contents.".to_string(),
@@ -2220,11 +2542,12 @@ fn fs_read_text_sync(
             content_hash,
             office_mime_type(&target).map(str::to_string),
             md.len() as usize,
+            file_id,
         ));
     }
 
     if is_archive_file(&target) {
-        let (content, truncated) = build_archive_window(&target, &bytes)?;
+        let (content, truncated) = build_archive_window(&target, &bytes).map_err(FsError::Other)?;
         return Ok(build_document_read_response(
             "archive",
             logical_path,
@@ -2234,6 +2557,7 @@ fn fs_read_text_sync(
             content_hash,
             office_mime_type(&target).map(str::to_string),
             md.len() as usize,
+            file_id,
         ));
     }
 
@@ -2265,6 +2589,7 @@ fn fs_read_text_sync(
         mime_type: None,
         data: None,
         size_bytes: Some(md.len() as usize),
+        file_id,
     })
 }
 
@@ -2278,8 +2603,8 @@ pub async fn fs_read_text(
     page_limit: Option<usize>,
     cell_start: Option<usize>,
     cell_limit: Option<usize>,
-) -> Result<ReadResponse, String> {
-    run_blocking("fs_read_text", move || {
+) -> Result<ReadResponse, FsCommandError> {
+    run_blocking_fs("fs_read_text", move || {
         fs_read_text_sync(
             workdir, path, start_line, limit, page_start, page_limit, cell_start, cell_limit,
         )
@@ -2296,43 +2621,56 @@ pub struct ReadEditableTextResponse {
     pub content_hash: String,
     pub size_bytes: usize,
     pub total_lines: usize,
+    pub file_id: Option<String>,
 }
 
 pub(crate) fn fs_read_editable_text_sync(
     workdir: String,
     path: String,
-) -> Result<ReadEditableTextResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel = sanitize_rel_path(&path).map_err(|e| e.to_string())?;
+) -> Result<ReadEditableTextResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_read_editable_text_impl(&wd, &path).map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_read_editable_text_impl(wd: &Path, path: &str) -> Result<ReadEditableTextResponse, FsError> {
+    let rel = sanitize_rel_path(path)?;
     let logical_path = logical_rel_path(&rel);
-    let target = wd.join(&rel);
-    let target = resolve_existing_file_target(&wd, &target, "Read.path")?;
+    let target = resolve_existing_file_target(wd, &rel)?;
     if let Some(reason) = editable_text_unsupported_reason(&target) {
-        return Err(FsError::Other(reason.to_string()).to_string());
+        return Err(FsError::UnsupportedTarget {
+            path: logical_path,
+            message: reason.to_string(),
+        });
     }
 
-    let md = fs::metadata(&target).map_err(|e| e.to_string())?;
+    let md = fs::metadata(&target)?;
     let size_bytes = usize::try_from(md.len()).unwrap_or(usize::MAX);
     if size_bytes > EDITABLE_TEXT_MAX_BYTES {
-        return Err(FsError::Other(format!(
-            "File is too large to edit ({size_bytes} bytes, max {EDITABLE_TEXT_MAX_BYTES} bytes)"
-        ))
-        .to_string());
+        return Err(FsError::TooLarge {
+            path: logical_path,
+            message: format!(
+                "File is too large to edit ({size_bytes} bytes, max {EDITABLE_TEXT_MAX_BYTES} bytes)"
+            ),
+        });
     }
 
-    let bytes = fs::read(&target).map_err(|e| e.to_string())?;
+    let bytes = fs::read(&target)?;
     if bytes.len() > EDITABLE_TEXT_MAX_BYTES {
-        return Err(FsError::Other(format!(
-            "File is too large to edit ({} bytes, max {EDITABLE_TEXT_MAX_BYTES} bytes)",
-            bytes.len()
-        ))
-        .to_string());
+        return Err(FsError::TooLarge {
+            path: logical_path,
+            message: format!(
+                "File is too large to edit ({} bytes, max {EDITABLE_TEXT_MAX_BYTES} bytes)",
+                bytes.len()
+            ),
+        });
     }
 
     let mtime_ms = metadata_mtime_ms(&md);
     let content_hash = hash_bytes(&bytes);
-    let content = String::from_utf8(bytes)
-        .map_err(|_| FsError::Other("File is not valid UTF-8 text".to_string()).to_string())?;
+    let file_id = Some(file_identity(&md, &target));
+    let content = String::from_utf8(bytes).map_err(|_| FsError::NotUtf8 {
+        path: logical_path.clone(),
+    })?;
     let total_lines = count_text_lines(&content);
 
     Ok(ReadEditableTextResponse {
@@ -2342,6 +2680,7 @@ pub(crate) fn fs_read_editable_text_sync(
         content_hash,
         size_bytes,
         total_lines,
+        file_id,
     })
 }
 
@@ -2349,8 +2688,8 @@ pub(crate) fn fs_read_editable_text_sync(
 pub async fn fs_read_editable_text(
     workdir: String,
     path: String,
-) -> Result<ReadEditableTextResponse, String> {
-    run_blocking("fs_read_editable_text", move || {
+) -> Result<ReadEditableTextResponse, FsCommandError> {
+    run_blocking_fs("fs_read_editable_text", move || {
         fs_read_editable_text_sync(workdir, path)
     })
     .await
@@ -2364,14 +2703,19 @@ pub struct PathStatusResponse {
     pub kind: Option<String>,
     pub size_bytes: Option<u64>,
     pub mtime_ms: Option<u64>,
+    pub file_id: Option<String>,
 }
 
 pub(crate) fn fs_path_status_sync(
     workdir: String,
     path: String,
-) -> Result<PathStatusResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel = sanitize_rel_path(&path).map_err(|e| e.to_string())?;
+) -> Result<PathStatusResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_path_status_impl(&wd, &path).map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_path_status_impl(wd: &Path, path: &str) -> Result<PathStatusResponse, FsError> {
+    let rel = sanitize_rel_path(path)?;
     let logical_path = logical_rel_path(&rel);
     let target = wd.join(&rel);
 
@@ -2387,12 +2731,16 @@ pub(crate) fn fs_path_status_sync(
             } else {
                 "other"
             };
+            let file_id = fs::canonicalize(&target)
+                .ok()
+                .map(|canon| file_identity(&meta, &canon));
             Ok(PathStatusResponse {
                 path: logical_path,
                 exists: true,
                 kind: Some(kind.to_string()),
                 size_bytes: Some(meta.len()),
                 mtime_ms: Some(metadata_mtime_ms(&meta)),
+                file_id,
             })
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(PathStatusResponse {
@@ -2401,14 +2749,18 @@ pub(crate) fn fs_path_status_sync(
             kind: None,
             size_bytes: None,
             mtime_ms: None,
+            file_id: None,
         }),
-        Err(err) => Err(FsError::Io(err).to_string()),
+        Err(err) => Err(FsError::Io(err)),
     }
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn fs_path_status(workdir: String, path: String) -> Result<PathStatusResponse, String> {
-    run_blocking("fs_path_status", move || fs_path_status_sync(workdir, path)).await
+pub async fn fs_path_status(
+    workdir: String,
+    path: String,
+) -> Result<PathStatusResponse, FsCommandError> {
+    run_blocking_fs("fs_path_status", move || fs_path_status_sync(workdir, path)).await
 }
 
 #[derive(Debug, Serialize)]
@@ -2421,6 +2773,7 @@ pub struct WriteTextResponse {
     pub mtime_ms: u64,
     pub content_hash: String,
     pub total_lines: usize,
+    pub file_id: Option<String>,
 }
 
 pub(crate) fn fs_write_text_sync(
@@ -2430,45 +2783,63 @@ pub(crate) fn fs_write_text_sync(
     mode: String,
     expected_mtime_ms: Option<u64>,
     expected_content_hash: Option<String>,
-) -> Result<WriteTextResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel = sanitize_rel_path(&path).map_err(|e| e.to_string())?;
+) -> Result<WriteTextResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_write_text_impl(
+        &wd,
+        &path,
+        content,
+        mode,
+        expected_mtime_ms,
+        expected_content_hash,
+    )
+    .map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_write_text_impl(
+    wd: &Path,
+    path: &str,
+    content: String,
+    mode: String,
+    expected_mtime_ms: Option<u64>,
+    expected_content_hash: Option<String>,
+) -> Result<WriteTextResponse, FsError> {
+    let rel = sanitize_rel_path(path)?;
     let logical_path = logical_rel_path(&rel);
     let raw_target = wd.join(&rel);
     let expected = parse_expected_version(expected_mtime_ms, expected_content_hash)?;
 
     if mode != "rewrite" {
-        return Err("Write.mode only supports rewrite".to_string());
+        return Err(FsError::Other("Write.mode only supports rewrite".to_string()));
     }
 
     let (target, existed_before) = match fs::symlink_metadata(&raw_target) {
         Ok(meta) => {
             if meta.is_dir() {
-                return Err(
-                    FsError::Other("Cannot write to a directory path".to_string()).to_string(),
-                );
+                return Err(FsError::NotAFile {
+                    path: logical_path,
+                    entry_kind: "dir".to_string(),
+                });
             }
-            (
-                resolve_existing_file_target(&wd, &raw_target, "Write.path")?,
-                true,
-            )
+            (resolve_existing_file_target(wd, &rel)?, true)
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            ensure_parent_dir(&wd, &raw_target)?;
+            ensure_parent_dir(wd, &raw_target)?;
             (raw_target.clone(), false)
         }
-        Err(err) => return Err(FsError::Io(err).to_string()),
+        Err(err) => return Err(FsError::Io(err)),
     };
 
     if existed_before {
-        let expected = expected.ok_or_else(|| {
-            "Write requires a full-file Read first for existing files".to_string()
+        let expected = expected.ok_or_else(|| FsError::RequiresFullRead {
+            path: logical_path.clone(),
         })?;
-        ensure_expected_version_matches(&target, &expected)?;
+        ensure_expected_version_matches(&target, &logical_path, &expected)?;
     }
 
-    fs::write(&target, content.as_bytes()).map_err(|e| e.to_string())?;
-    let md = fs::metadata(&target).map_err(|e| e.to_string())?;
+    fs::write(&target, content.as_bytes())?;
+    let canon = fs::canonicalize(&target)?;
+    let md = fs::metadata(&canon)?;
 
     Ok(WriteTextResponse {
         path: logical_path,
@@ -2478,6 +2849,7 @@ pub(crate) fn fs_write_text_sync(
         mtime_ms: metadata_mtime_ms(&md),
         content_hash: hash_bytes(content.as_bytes()),
         total_lines: count_text_lines(&content),
+        file_id: Some(file_identity(&md, &canon)),
     })
 }
 
@@ -2489,8 +2861,8 @@ pub async fn fs_write_text(
     mode: String,
     expected_mtime_ms: Option<u64>,
     expected_content_hash: Option<String>,
-) -> Result<WriteTextResponse, String> {
-    run_blocking("fs_write_text", move || {
+) -> Result<WriteTextResponse, FsCommandError> {
+    run_blocking_fs("fs_write_text", move || {
         fs_write_text_sync(
             workdir,
             path,
@@ -2512,6 +2884,7 @@ pub struct EditTextResponse {
     pub mtime_ms: u64,
     pub content_hash: String,
     pub total_lines: usize,
+    pub file_id: Option<String>,
 }
 
 pub(crate) fn fs_edit_text_sync(
@@ -2523,47 +2896,71 @@ pub(crate) fn fs_edit_text_sync(
     replace_all: Option<bool>,
     expected_mtime_ms: Option<u64>,
     expected_content_hash: Option<String>,
-) -> Result<EditTextResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel = sanitize_rel_path(&path).map_err(|e| e.to_string())?;
+) -> Result<EditTextResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_edit_text_impl(
+        &wd,
+        &path,
+        old_string,
+        new_string,
+        expected_replacements,
+        replace_all,
+        expected_mtime_ms,
+        expected_content_hash,
+    )
+    .map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_edit_text_impl(
+    wd: &Path,
+    path: &str,
+    old_string: String,
+    new_string: String,
+    expected_replacements: Option<usize>,
+    replace_all: Option<bool>,
+    expected_mtime_ms: Option<u64>,
+    expected_content_hash: Option<String>,
+) -> Result<EditTextResponse, FsError> {
+    let rel = sanitize_rel_path(path)?;
     let logical_path = logical_rel_path(&rel);
-    let target = wd.join(&rel);
-    let target = resolve_existing_file_target(&wd, &target, "Edit.path")?;
+    let target = resolve_existing_file_target(wd, &rel)?;
     let expected = parse_expected_version(expected_mtime_ms, expected_content_hash)?
-        .ok_or_else(|| "Edit requires a full-file Read first".to_string())?;
+        .ok_or_else(|| FsError::RequiresFullRead {
+            path: logical_path.clone(),
+        })?;
 
     if old_string.is_empty() {
-        return Err("Edit.old_string must be a non-empty string".to_string());
+        return Err(FsError::Other(
+            "Edit.old_string must be a non-empty string".to_string(),
+        ));
     }
 
-    ensure_expected_version_matches(&target, &expected)?;
+    ensure_expected_version_matches(&target, &logical_path, &expected)?;
 
-    let bytes = fs::read(&target).map_err(|e| e.to_string())?;
+    let bytes = fs::read(&target)?;
     let text = String::from_utf8_lossy(&bytes);
     let match_count = text.matches(&old_string).count();
 
     if match_count == 0 {
-        return Err(
-            FsError::Other("old_string was not found; no changes were made".to_string())
-                .to_string(),
-        );
+        return Err(FsError::EditNoMatch { path: logical_path });
     }
 
     let replace_all = replace_all.unwrap_or(false);
     if !replace_all && match_count > 1 {
-        return Err(FsError::Other(format!(
-            "Found {match_count} matches. Set replace_all=true or narrow old_string before editing."
-        ))
-        .to_string());
+        return Err(FsError::EditAmbiguous {
+            path: logical_path,
+            matches: match_count,
+        });
     }
 
     let actual_replacements = if replace_all { match_count } else { 1 };
     if let Some(expected_count) = expected_replacements {
         if actual_replacements != expected_count {
-            return Err(FsError::Other(format!(
-                "Replacement count mismatch: would replace {actual_replacements}, expected {expected_count}"
-            ))
-            .to_string());
+            return Err(FsError::EditCountMismatch {
+                path: logical_path,
+                expected: expected_count,
+                actual: actual_replacements,
+            });
         }
     }
 
@@ -2573,8 +2970,8 @@ pub(crate) fn fs_edit_text_sync(
         text.replacen(&old_string, &new_string, 1)
     };
 
-    fs::write(&target, next.as_bytes()).map_err(|e| e.to_string())?;
-    let md = fs::metadata(&target).map_err(|e| e.to_string())?;
+    fs::write(&target, next.as_bytes())?;
+    let md = fs::metadata(&target)?;
 
     Ok(EditTextResponse {
         path: logical_path,
@@ -2583,6 +2980,7 @@ pub(crate) fn fs_edit_text_sync(
         mtime_ms: metadata_mtime_ms(&md),
         content_hash: hash_bytes(next.as_bytes()),
         total_lines: count_text_lines(&next),
+        file_id: Some(file_identity(&md, &target)),
     })
 }
 
@@ -2596,8 +2994,8 @@ pub async fn fs_edit_text(
     replace_all: Option<bool>,
     expected_mtime_ms: Option<u64>,
     expected_content_hash: Option<String>,
-) -> Result<EditTextResponse, String> {
-    run_blocking("fs_edit_text", move || {
+) -> Result<EditTextResponse, FsCommandError> {
+    run_blocking_fs("fs_edit_text", move || {
         fs_edit_text_sync(
             workdir,
             path,
@@ -2629,32 +3027,38 @@ fn remove_symlink_path(target: &Path) -> Result<(), io::Error> {
     }
 }
 
-pub(crate) fn fs_delete_sync(workdir: String, path: String) -> Result<DeleteResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel = sanitize_rel_path(&path).map_err(|e| e.to_string())?;
+pub(crate) fn fs_delete_sync(
+    workdir: String,
+    path: String,
+) -> Result<DeleteResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_delete_impl(&wd, &path).map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_delete_impl(wd: &Path, path: &str) -> Result<DeleteResponse, FsError> {
+    let rel = sanitize_rel_path(path)?;
     let logical_path = logical_rel_path(&rel);
     let file_name = rel
         .file_name()
-        .ok_or_else(|| FsError::Other("Invalid target path".to_string()).to_string())?;
-    let parent = rel.parent().map_or(wd.clone(), |p| wd.join(p));
-    let parent = ensure_within_workdir_existing(&wd, &parent).map_err(|e| e.to_string())?;
+        .ok_or_else(|| FsError::Other("Invalid target path".to_string()))?;
+    let parent = rel.parent().map_or(wd.to_path_buf(), |p| wd.join(p));
+    let parent = ensure_within_workdir_existing(wd, &parent)?;
     let target = parent.join(file_name);
 
-    let meta = fs::symlink_metadata(&target).map_err(|e| e.to_string())?;
+    let meta = fs::symlink_metadata(&target)?;
     let kind = if meta.file_type().is_symlink() {
-        remove_symlink_path(&target).map_err(|e| e.to_string())?;
+        remove_symlink_path(&target)?;
         "symlink"
     } else if meta.is_file() {
-        fs::remove_file(&target).map_err(|e| e.to_string())?;
+        fs::remove_file(&target)?;
         "file"
     } else if meta.is_dir() {
-        fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+        fs::remove_dir_all(&target)?;
         "dir"
     } else {
         return Err(FsError::Other(
             "Only regular files, directories, or symlinks can be deleted".to_string(),
-        )
-        .to_string());
+        ));
     };
 
     Ok(DeleteResponse {
@@ -2664,8 +3068,8 @@ pub(crate) fn fs_delete_sync(workdir: String, path: String) -> Result<DeleteResp
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn fs_delete(workdir: String, path: String) -> Result<DeleteResponse, String> {
-    run_blocking("fs_delete", move || fs_delete_sync(workdir, path)).await
+pub async fn fs_delete(workdir: String, path: String) -> Result<DeleteResponse, FsCommandError> {
+    run_blocking_fs("fs_delete", move || fs_delete_sync(workdir, path)).await
 }
 
 #[derive(Debug, Serialize)]
@@ -2722,21 +3126,29 @@ pub(crate) fn fs_open_workspace_path_sync(
     workdir: String,
     path: String,
     mode: Option<String>,
-) -> Result<OpenWorkspacePathResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel = sanitize_rel_path(&path).map_err(|e| e.to_string())?;
+) -> Result<OpenWorkspacePathResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_open_workspace_path_impl(&wd, &path, mode)
+        .map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_open_workspace_path_impl(
+    wd: &Path,
+    path: &str,
+    mode: Option<String>,
+) -> Result<OpenWorkspacePathResponse, FsError> {
+    let rel = sanitize_rel_path(path)?;
     let logical_path = logical_rel_path(&rel);
-    let target = ensure_within_workdir_existing(&wd, &wd.join(&rel)).map_err(|e| e.to_string())?;
-    let meta = fs::metadata(&target).map_err(|e| e.to_string())?;
+    let target = resolve_target(wd, &rel)?;
+    let meta = fs::metadata(&target)?;
     let kind = if meta.is_file() {
         "file"
     } else if meta.is_dir() {
         "dir"
     } else {
-        return Err(
-            FsError::Other("Only regular files and directories can be opened".to_string())
-                .to_string(),
-        );
+        return Err(FsError::Other(
+            "Only regular files and directories can be opened".to_string(),
+        ));
     };
     let normalized_mode = mode
         .as_deref()
@@ -2747,14 +3159,13 @@ pub(crate) fn fs_open_workspace_path_sync(
         "" | "open" => "open",
         "reveal" | "containing_dir" | "containing-directory" => "reveal",
         other => {
-            return Err(
-                FsError::Other(format!("Open mode must be open or reveal, got {other}"))
-                    .to_string(),
-            )
+            return Err(FsError::Other(format!(
+                "Open mode must be open or reveal, got {other}"
+            )))
         }
     };
 
-    spawn_workspace_open_command(&target, kind, normalized_mode)?;
+    spawn_workspace_open_command(&target, kind, normalized_mode).map_err(FsError::Other)?;
 
     Ok(OpenWorkspacePathResponse {
         path: logical_path,
@@ -2769,8 +3180,8 @@ pub async fn fs_open_workspace_path(
     workdir: String,
     path: String,
     mode: Option<String>,
-) -> Result<OpenWorkspacePathResponse, String> {
-    run_blocking("fs_open_workspace_path", move || {
+) -> Result<OpenWorkspacePathResponse, FsCommandError> {
+    run_blocking_fs("fs_open_workspace_path", move || {
         fs_open_workspace_path_sync(workdir, path, mode)
     })
     .await
@@ -2786,26 +3197,30 @@ pub struct CreateDirResponse {
 pub(crate) fn fs_create_dir_sync(
     workdir: String,
     path: String,
-) -> Result<CreateDirResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel = sanitize_rel_path(&path).map_err(|e| e.to_string())?;
+) -> Result<CreateDirResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_create_dir_impl(&wd, &path).map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_create_dir_impl(wd: &Path, path: &str) -> Result<CreateDirResponse, FsError> {
+    let rel = sanitize_rel_path(path)?;
     let logical_path = logical_rel_path(&rel);
     let file_name = rel
         .file_name()
-        .ok_or_else(|| FsError::Other("Invalid target path".to_string()).to_string())?;
-    let parent = rel.parent().map_or(wd.clone(), |p| wd.join(p));
-    let parent = ensure_within_workdir_existing(&wd, &parent).map_err(|e| e.to_string())?;
+        .ok_or_else(|| FsError::Other("Invalid target path".to_string()))?;
+    let parent = rel.parent().map_or(wd.to_path_buf(), |p| wd.join(p));
+    let parent = ensure_within_workdir_existing(wd, &parent)?;
     let target = parent.join(file_name);
 
     match fs::symlink_metadata(&target) {
         Ok(_) => {
-            return Err(FsError::Other("Target path already exists".to_string()).to_string());
+            return Err(FsError::Other("Target path already exists".to_string()));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(FsError::Io(error).to_string()),
+        Err(error) => return Err(FsError::Io(error)),
     }
 
-    fs::create_dir(&target).map_err(|e| e.to_string())?;
+    fs::create_dir(&target)?;
     Ok(CreateDirResponse {
         path: logical_path,
         kind: "dir".to_string(),
@@ -2813,8 +3228,11 @@ pub(crate) fn fs_create_dir_sync(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn fs_create_dir(workdir: String, path: String) -> Result<CreateDirResponse, String> {
-    run_blocking("fs_create_dir", move || fs_create_dir_sync(workdir, path)).await
+pub async fn fs_create_dir(
+    workdir: String,
+    path: String,
+) -> Result<CreateDirResponse, FsCommandError> {
+    run_blocking_fs("fs_create_dir", move || fs_create_dir_sync(workdir, path)).await
 }
 
 #[derive(Debug, Serialize)]
@@ -2829,33 +3247,37 @@ pub(crate) fn fs_rename_sync(
     workdir: String,
     from_path: String,
     to_path: String,
-) -> Result<RenameResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let from_rel = sanitize_rel_path(&from_path).map_err(|e| e.to_string())?;
-    let to_rel = sanitize_rel_path(&to_path).map_err(|e| e.to_string())?;
+) -> Result<RenameResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_rename_impl(&wd, &from_path, &to_path)
+        .map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_rename_impl(wd: &Path, from_path: &str, to_path: &str) -> Result<RenameResponse, FsError> {
+    let from_rel = sanitize_rel_path(from_path)?;
+    let to_rel = sanitize_rel_path(to_path)?;
     let from_logical_path = logical_rel_path(&from_rel);
     let to_logical_path = logical_rel_path(&to_rel);
 
     if from_rel.parent() != to_rel.parent() {
         return Err(FsError::Other(
             "Rename only supports targets in the same directory".to_string(),
-        )
-        .to_string());
+        ));
     }
 
     let from_name = from_rel
         .file_name()
-        .ok_or_else(|| FsError::Other("Invalid source path".to_string()).to_string())?;
+        .ok_or_else(|| FsError::Other("Invalid source path".to_string()))?;
     let to_name = to_rel
         .file_name()
-        .ok_or_else(|| FsError::Other("Invalid target path".to_string()).to_string())?;
+        .ok_or_else(|| FsError::Other("Invalid target path".to_string()))?;
     let parent_rel = from_rel.parent();
-    let parent = parent_rel.map_or(wd.clone(), |p| wd.join(p));
-    let parent = ensure_within_workdir_existing(&wd, &parent).map_err(|e| e.to_string())?;
+    let parent = parent_rel.map_or(wd.to_path_buf(), |p| wd.join(p));
+    let parent = ensure_within_workdir_existing(wd, &parent)?;
     let source = parent.join(from_name);
     let target = parent.join(to_name);
 
-    let meta = fs::symlink_metadata(&source).map_err(|e| e.to_string())?;
+    let meta = fs::symlink_metadata(&source)?;
     let kind = if meta.file_type().is_symlink() {
         "symlink"
     } else if meta.is_file() {
@@ -2865,19 +3287,18 @@ pub(crate) fn fs_rename_sync(
     } else {
         return Err(FsError::Other(
             "Only regular files, directories, or symlinks can be renamed".to_string(),
-        )
-        .to_string());
+        ));
     };
 
     match fs::symlink_metadata(&target) {
         Ok(_) => {
-            return Err(FsError::Other("Target path already exists".to_string()).to_string());
+            return Err(FsError::Other("Target path already exists".to_string()));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(FsError::Io(error).to_string()),
+        Err(error) => return Err(FsError::Io(error)),
     }
 
-    fs::rename(&source, &target).map_err(|e| e.to_string())?;
+    fs::rename(&source, &target)?;
     Ok(RenameResponse {
         from_path: from_logical_path,
         path: to_logical_path,
@@ -2890,8 +3311,8 @@ pub async fn fs_rename(
     workdir: String,
     from_path: String,
     to_path: String,
-) -> Result<RenameResponse, String> {
-    run_blocking("fs_rename", move || {
+) -> Result<RenameResponse, FsCommandError> {
+    run_blocking_fs("fs_rename", move || {
         fs_rename_sync(workdir, from_path, to_path)
     })
     .await
@@ -2914,6 +3335,7 @@ pub struct ListResponse {
     pub total: usize,
     pub has_more: bool,
     pub entries: Vec<ListEntry>,
+    pub target_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -3100,46 +3522,70 @@ pub(crate) fn fs_list_sync(
     depth: Option<usize>,
     offset: Option<usize>,
     max_results: Option<usize>,
-) -> Result<ListResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel_opt = sanitize_optional_rel_path(path).map_err(|e| e.to_string())?;
+) -> Result<ListResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_list_impl(&wd, path, depth, offset, max_results)
+        .map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_list_impl(
+    wd: &Path,
+    path: Option<String>,
+    depth: Option<usize>,
+    offset: Option<usize>,
+    max_results: Option<usize>,
+) -> Result<ListResponse, FsError> {
+    let rel_opt = sanitize_optional_rel_path(path)?;
     let path_display = rel_opt.as_ref().map(|rel| logical_rel_path(rel));
     let base = match rel_opt.as_ref() {
-        None => wd.clone(),
-        Some(rel) => wd.join(rel),
+        None => wd.to_path_buf(),
+        Some(rel) => resolve_target(wd, rel)?,
     };
 
-    let base = ensure_within_workdir_existing(&wd, &base).map_err(|e| e.to_string())?;
-    let md = fs::metadata(&base).map_err(|e| e.to_string())?;
-    if !md.is_dir() {
-        return Err(FsError::Other("List.path must be a directory".to_string()).to_string());
-    }
+    let md = fs::metadata(&base)?;
+    let target_kind = if md.is_dir() {
+        "dir"
+    } else if md.is_file() {
+        "file"
+    } else {
+        return Err(FsError::NotADirectory {
+            path: path_display.unwrap_or_default(),
+            entry_kind: "other".to_string(),
+        });
+    };
 
     let depth = depth.unwrap_or(DEFAULT_LIST_DEPTH).max(1);
     let offset = offset.unwrap_or(0);
     let max_results = max_results.unwrap_or(DEFAULT_PAGE_LIMIT).max(1);
 
     let mut entries: Vec<ListEntry> = Vec::new();
-    for result in build_ignore_walker(&base, Some(depth)) {
-        let entry = match result {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        if entry.path() == base.as_path() {
-            continue;
-        }
-
-        let file_type = match entry.file_type() {
-            Some(file_type) => file_type,
-            None => continue,
-        };
-
-        let kind = if file_type.is_dir() { "dir" } else { "file" };
+    if target_kind == "file" {
         entries.push(ListEntry {
-            path: rel_to_workdir_str(&wd, entry.path()),
-            kind: kind.to_string(),
+            path: rel_to_workdir_str(wd, &base),
+            kind: "file".to_string(),
         });
+    } else {
+        for result in build_ignore_walker(&base, Some(depth)) {
+            let entry = match result {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if entry.path() == base.as_path() {
+                continue;
+            }
+
+            let file_type = match entry.file_type() {
+                Some(file_type) => file_type,
+                None => continue,
+            };
+
+            let kind = if file_type.is_dir() { "dir" } else { "file" };
+            entries.push(ListEntry {
+                path: rel_to_workdir_str(wd, entry.path()),
+                kind: kind.to_string(),
+            });
+        }
     }
 
     entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -3159,6 +3605,7 @@ pub(crate) fn fs_list_sync(
         total,
         has_more,
         entries,
+        target_kind: Some(target_kind.to_string()),
     })
 }
 
@@ -3169,8 +3616,8 @@ pub async fn fs_list(
     depth: Option<usize>,
     offset: Option<usize>,
     max_results: Option<usize>,
-) -> Result<ListResponse, String> {
-    run_blocking("fs_list", move || {
+) -> Result<ListResponse, FsCommandError> {
+    run_blocking_fs("fs_list", move || {
         fs_list_sync(workdir, path, depth, offset, max_results)
     })
     .await
@@ -3187,6 +3634,7 @@ pub struct GlobResponse {
     pub total: usize,
     pub has_more: bool,
     pub paths: Vec<String>,
+    pub target_kind: Option<String>,
 }
 
 fn fs_glob_sync(
@@ -3196,35 +3644,56 @@ fn fs_glob_sync(
     offset: Option<usize>,
     max_results: Option<usize>,
     sort_by: Option<String>,
-) -> Result<GlobResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel_opt = sanitize_optional_rel_path(path).map_err(|e| e.to_string())?;
+) -> Result<GlobResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_glob_impl(&wd, path, pattern, offset, max_results, sort_by)
+        .map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_glob_impl(
+    wd: &Path,
+    path: Option<String>,
+    pattern: String,
+    offset: Option<usize>,
+    max_results: Option<usize>,
+    sort_by: Option<String>,
+) -> Result<GlobResponse, FsError> {
+    let rel_opt = sanitize_optional_rel_path(path)?;
     let path_display = rel_opt.as_ref().map(|rel| logical_rel_path(rel));
-    let base = match rel_opt.as_ref() {
-        None => wd.clone(),
-        Some(rel) => wd.join(rel),
+    let target = match rel_opt.as_ref() {
+        None => wd.to_path_buf(),
+        Some(rel) => resolve_target(wd, rel)?,
     };
-    let base = ensure_within_workdir_existing(&wd, &base).map_err(|e| e.to_string())?;
-    let md = fs::metadata(&base).map_err(|e| e.to_string())?;
-    if !md.is_dir() {
-        return Err(FsError::Other("Glob.path must be a directory".to_string()).to_string());
-    }
+    let md = fs::metadata(&target)?;
+    let target_kind = if md.is_dir() {
+        "dir"
+    } else if md.is_file() {
+        "file"
+    } else {
+        return Err(FsError::NotADirectory {
+            path: path_display.unwrap_or_default(),
+            entry_kind: "other".to_string(),
+        });
+    };
+    let base = if target_kind == "file" {
+        target.parent().map(Path::to_path_buf).unwrap_or_else(|| wd.to_path_buf())
+    } else {
+        target
+    };
 
     let pat = normalize_glob_pattern_input(&pattern);
     if pat.is_empty() {
-        return Err(FsError::Glob("pattern cannot be empty".to_string()).to_string());
+        return Err(FsError::Glob("pattern cannot be empty".to_string()));
     }
 
     let sort_by = sort_by.unwrap_or_else(|| "path".to_string());
     if sort_by != "path" {
-        return Err("Glob.sort_by only supports path".to_string());
+        return Err(FsError::Other("Glob.sort_by only supports path".to_string()));
     }
 
     let mut builder = GlobSetBuilder::new();
-    builder.add(Glob::new(&pat).map_err(|e| FsError::Glob(e.to_string()).to_string())?);
-    let globset = builder
-        .build()
-        .map_err(|e| FsError::Glob(e.to_string()).to_string())?;
+    builder.add(Glob::new(&pat).map_err(|e| FsError::Glob(e.to_string()))?);
+    let globset = builder.build().map_err(|e| FsError::Glob(e.to_string()))?;
 
     let offset = offset.unwrap_or(0);
     let max_results = max_results.unwrap_or(DEFAULT_PAGE_LIMIT).max(1);
@@ -3248,7 +3717,7 @@ fn fs_glob_sync(
             Err(_) => continue,
         };
         if globset.is_match(rel_to_base) {
-            paths.push(rel_to_workdir_str(&wd, entry.path()));
+            paths.push(rel_to_workdir_str(wd, entry.path()));
         }
     }
 
@@ -3270,6 +3739,7 @@ fn fs_glob_sync(
         total,
         has_more,
         paths,
+        target_kind: Some(target_kind.to_string()),
     })
 }
 
@@ -3281,8 +3751,8 @@ pub async fn fs_glob(
     offset: Option<usize>,
     max_results: Option<usize>,
     sort_by: Option<String>,
-) -> Result<GlobResponse, String> {
-    run_blocking("fs_glob", move || {
+) -> Result<GlobResponse, FsCommandError> {
+    run_blocking_fs("fs_glob", move || {
         fs_glob_sync(workdir, path, pattern, offset, max_results, sort_by)
     })
     .await
@@ -3323,6 +3793,77 @@ pub struct GrepResponse {
     pub has_more: bool,
     pub matches: Vec<GrepMatch>,
     pub files: Vec<GrepFileSummary>,
+    pub target_kind: Option<String>,
+}
+
+fn scan_grep_file(
+    wd: &Path,
+    file: &Path,
+    re: &regex::Regex,
+    multiline: bool,
+    context: usize,
+    matches: &mut Vec<GrepMatch>,
+    file_summaries: &mut BTreeMap<String, GrepFileSummary>,
+) {
+    let bytes = match fs::read(file) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let lines = split_lines_for_grep(&text);
+    let file_path = rel_to_workdir_str(wd, file);
+    let mut file_match_count = 0usize;
+    let mut first_line: Option<usize> = None;
+
+    if multiline {
+        let line_starts = build_line_starts(&text);
+        for mat in re.find_iter(&text) {
+            let line_no = byte_index_to_line(&line_starts, mat.start());
+            let (before, after) = build_context_for_line(&lines, line_no, context);
+            let text = line_text_for_grep(&lines, line_no);
+            matches.push(GrepMatch {
+                path: file_path.clone(),
+                line: line_no,
+                text,
+                before,
+                after,
+            });
+            file_match_count += 1;
+            if first_line.is_none() {
+                first_line = Some(line_no);
+            }
+        }
+    } else {
+        for (idx, line) in lines.iter().enumerate() {
+            if !re.is_match(line) {
+                continue;
+            }
+            let line_no = idx + 1;
+            let (before, after) = build_context_for_line(&lines, line_no, context);
+            matches.push(GrepMatch {
+                path: file_path.clone(),
+                line: line_no,
+                text: trim_line_for_preview(line),
+                before,
+                after,
+            });
+            file_match_count += 1;
+            if first_line.is_none() {
+                first_line = Some(line_no);
+            }
+        }
+    }
+
+    if file_match_count > 0 {
+        file_summaries.insert(
+            file_path.clone(),
+            GrepFileSummary {
+                path: file_path,
+                count: file_match_count,
+                first_line,
+            },
+        );
+    }
 }
 
 fn fs_grep_sync(
@@ -3336,29 +3877,64 @@ fn fs_grep_sync(
     offset: Option<usize>,
     context: Option<usize>,
     multiline: Option<bool>,
-) -> Result<GrepResponse, String> {
-    let wd = canonicalize_workdir(&workdir).map_err(|e| e.to_string())?;
-    let rel_opt = sanitize_optional_rel_path(path).map_err(|e| e.to_string())?;
+) -> Result<GrepResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_grep_impl(
+        &wd,
+        path,
+        pattern,
+        file_pattern,
+        ignore_case,
+        output_mode,
+        head_limit,
+        offset,
+        context,
+        multiline,
+    )
+    .map_err(|e| FsCommandError::from(e).with_workdir(&wd))
+}
+
+fn fs_grep_impl(
+    wd: &Path,
+    path: Option<String>,
+    pattern: String,
+    file_pattern: Option<String>,
+    ignore_case: Option<bool>,
+    output_mode: Option<String>,
+    head_limit: Option<usize>,
+    offset: Option<usize>,
+    context: Option<usize>,
+    multiline: Option<bool>,
+) -> Result<GrepResponse, FsError> {
+    let rel_opt = sanitize_optional_rel_path(path)?;
     let path_display = rel_opt.as_ref().map(|rel| logical_rel_path(rel));
     let base = match rel_opt.as_ref() {
-        None => wd.clone(),
-        Some(rel) => wd.join(rel),
+        None => wd.to_path_buf(),
+        Some(rel) => resolve_target(wd, rel)?,
     };
-    let base = ensure_within_workdir_existing(&wd, &base).map_err(|e| e.to_string())?;
-    let md = fs::metadata(&base).map_err(|e| e.to_string())?;
-    if !md.is_dir() {
-        return Err(FsError::Other("Grep.path must be a directory".to_string()).to_string());
-    }
+    let md = fs::metadata(&base)?;
+    let target_kind = if md.is_dir() {
+        "dir"
+    } else if md.is_file() {
+        "file"
+    } else {
+        return Err(FsError::NotADirectory {
+            path: path_display.unwrap_or_default(),
+            entry_kind: "other".to_string(),
+        });
+    };
 
     let pat = pattern.trim();
     if pat.is_empty() {
-        return Err(FsError::Regex("pattern cannot be empty".to_string()).to_string());
+        return Err(FsError::Regex("pattern cannot be empty".to_string()));
     }
 
     let ignore_case = ignore_case.unwrap_or(true);
     let output_mode = output_mode.unwrap_or_else(|| "content".to_string());
     if output_mode != "content" && output_mode != "files" && output_mode != "count" {
-        return Err("Grep.output_mode must be content, files, or count".to_string());
+        return Err(FsError::Other(
+            "Grep.output_mode must be content, files, or count".to_string(),
+        ));
     }
     let head_limit = head_limit.unwrap_or(DEFAULT_GREP_HEAD_LIMIT).max(1);
     let offset = offset.unwrap_or(0);
@@ -3369,108 +3945,68 @@ fn fs_grep_sync(
     rb.case_insensitive(ignore_case);
     rb.multi_line(multiline);
     rb.dot_matches_new_line(multiline);
-    let re = rb
-        .build()
-        .map_err(|e| FsError::Regex(e.to_string()).to_string())?;
+    let re = rb.build().map_err(|e| FsError::Regex(e.to_string()))?;
 
     let file_globset = match file_pattern.as_ref() {
         None => None,
         Some(value) if value.trim().is_empty() => None,
-        Some(value) => Some(build_globset_from_pipe_patterns(value).map_err(|e| e.to_string())?),
+        Some(value) => Some(build_globset_from_pipe_patterns(value)?),
     };
 
     let mut matches: Vec<GrepMatch> = Vec::new();
     let mut file_summaries = BTreeMap::<String, GrepFileSummary>::new();
 
-    for result in build_ignore_walker(&base, None) {
-        let entry = match result {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    if target_kind == "file" {
+        scan_grep_file(
+            wd,
+            &base,
+            &re,
+            multiline,
+            context,
+            &mut matches,
+            &mut file_summaries,
+        );
+    } else {
+        for result in build_ignore_walker(&base, None) {
+            let entry = match result {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
 
-        let file_type = match entry.file_type() {
-            Some(file_type) => file_type,
-            None => continue,
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let rel_to_base = match entry.path().strip_prefix(&base) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if let Some(globset) = file_globset.as_ref() {
-            if !globset.is_match(rel_to_base) {
+            let file_type = match entry.file_type() {
+                Some(file_type) => file_type,
+                None => continue,
+            };
+            if !file_type.is_file() {
                 continue;
             }
-        }
 
-        let canonical = match fs::canonicalize(entry.path()) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if !canonical.starts_with(&wd) {
-            continue;
-        }
-
-        let bytes = match fs::read(entry.path()) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let text = String::from_utf8_lossy(&bytes);
-        let lines = split_lines_for_grep(&text);
-        let file_path = rel_to_workdir_str(&wd, entry.path());
-        let mut file_match_count = 0usize;
-        let mut first_line: Option<usize> = None;
-
-        if multiline {
-            let line_starts = build_line_starts(&text);
-            for mat in re.find_iter(&text) {
-                let line_no = byte_index_to_line(&line_starts, mat.start());
-                let (before, after) = build_context_for_line(&lines, line_no, context);
-                let text = line_text_for_grep(&lines, line_no);
-                matches.push(GrepMatch {
-                    path: file_path.clone(),
-                    line: line_no,
-                    text,
-                    before,
-                    after,
-                });
-                file_match_count += 1;
-                if first_line.is_none() {
-                    first_line = Some(line_no);
-                }
-            }
-        } else {
-            for (idx, line) in lines.iter().enumerate() {
-                if !re.is_match(line) {
+            let rel_to_base = match entry.path().strip_prefix(&base) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if let Some(globset) = file_globset.as_ref() {
+                if !globset.is_match(rel_to_base) {
                     continue;
                 }
-                let line_no = idx + 1;
-                let (before, after) = build_context_for_line(&lines, line_no, context);
-                matches.push(GrepMatch {
-                    path: file_path.clone(),
-                    line: line_no,
-                    text: trim_line_for_preview(line),
-                    before,
-                    after,
-                });
-                file_match_count += 1;
-                if first_line.is_none() {
-                    first_line = Some(line_no);
-                }
             }
-        }
 
-        if file_match_count > 0 {
-            file_summaries.insert(
-                file_path.clone(),
-                GrepFileSummary {
-                    path: file_path,
-                    count: file_match_count,
-                    first_line: first_line,
-                },
+            let canonical = match fs::canonicalize(entry.path()) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if !canonical.starts_with(wd) {
+                continue;
+            }
+
+            scan_grep_file(
+                wd,
+                entry.path(),
+                &re,
+                multiline,
+                context,
+                &mut matches,
+                &mut file_summaries,
             );
         }
     }
@@ -3523,6 +4059,7 @@ fn fs_grep_sync(
         has_more,
         matches,
         files,
+        target_kind: Some(target_kind.to_string()),
     })
 }
 
@@ -3538,8 +4075,8 @@ pub async fn fs_grep(
     offset: Option<usize>,
     context: Option<usize>,
     multiline: Option<bool>,
-) -> Result<GrepResponse, String> {
-    run_blocking("fs_grep", move || {
+) -> Result<GrepResponse, FsCommandError> {
+    run_blocking_fs("fs_grep", move || {
         fs_grep_sync(
             workdir,
             path,
@@ -3979,8 +4516,9 @@ mod tests {
         )
         .expect_err("non-base64 non-SVG data URL should be rejected");
         assert!(
-            invalid_plain_data_url.contains("only supports SVG"),
-            "unexpected error: {invalid_plain_data_url}"
+            invalid_plain_data_url.message.contains("only supports SVG"),
+            "unexpected error: {}",
+            invalid_plain_data_url.message
         );
 
         let inline_response = fs_read_image_source_sync(
@@ -4030,7 +4568,12 @@ mod tests {
             let error =
                 fs_read_workspace_image_sync(workdir.display().to_string(), path.to_string())
                     .expect_err("out-of-bounds workspace image path should fail");
-            assert!(!error.trim().is_empty(), "expected error for {path:?}");
+            assert!(
+                matches!(error.code, FsErrorCode::InvalidPath),
+                "expected invalid path error for {path:?}, got {:?}",
+                error.code
+            );
+            assert!(!error.message.trim().is_empty(), "expected error for {path:?}");
         }
 
         let _ = fs::remove_dir_all(workdir);
@@ -4331,17 +4874,21 @@ mod tests {
             fs_read_editable_text_sync(workdir.display().to_string(), "src".to_string())
                 .expect_err("directory should fail");
         assert!(
-            dir_error.contains("regular file"),
-            "unexpected error: {dir_error}"
+            matches!(dir_error.code, FsErrorCode::NotAFile),
+            "unexpected error: {:?}",
+            dir_error.code
         );
+        assert_eq!(dir_error.entry_kind.as_deref(), Some("dir"));
 
         let utf8_error =
             fs_read_editable_text_sync(workdir.display().to_string(), "src/binary.bin".to_string())
                 .expect_err("invalid UTF-8 should fail");
         assert!(
-            utf8_error.contains("UTF-8"),
-            "unexpected error: {utf8_error}"
+            matches!(utf8_error.code, FsErrorCode::NotUtf8),
+            "unexpected error: {:?}",
+            utf8_error.code
         );
+        assert_eq!(utf8_error.path.as_deref(), Some("src/binary.bin"));
 
         for (path, expected) in [
             ("src/notebook.ipynb", "Notebook"),
@@ -4350,8 +4897,14 @@ mod tests {
             let error = fs_read_editable_text_sync(workdir.display().to_string(), path.to_string())
                 .expect_err("unsupported preview file should fail");
             assert!(
-                error.contains(expected),
-                "unexpected error for {path}: {error}"
+                matches!(error.code, FsErrorCode::UnsupportedTarget),
+                "unexpected error for {path}: {:?}",
+                error.code
+            );
+            assert!(
+                error.message.contains(expected),
+                "unexpected error for {path}: {}",
+                error.message
             );
         }
 
@@ -4361,14 +4914,24 @@ mod tests {
         )
         .expect_err("large file should fail");
         assert!(
-            large_error.contains("too large"),
-            "unexpected error: {large_error}"
+            matches!(large_error.code, FsErrorCode::TooLarge),
+            "unexpected error: {:?}",
+            large_error.code
+        );
+        assert!(
+            large_error.message.contains("too large"),
+            "unexpected error: {}",
+            large_error.message
         );
 
         for path in ["", "/tmp/liveagent-outside", "../outside"] {
             let error = fs_read_editable_text_sync(workdir.display().to_string(), path.to_string())
                 .expect_err("invalid path should fail");
-            assert!(!error.trim().is_empty(), "expected error for {path:?}");
+            assert!(
+                matches!(error.code, FsErrorCode::InvalidPath),
+                "expected invalid path error for {path:?}, got {:?}",
+                error.code
+            );
         }
 
         let _ = fs::remove_dir_all(workdir);
@@ -4388,7 +4951,7 @@ mod tests {
         for path in ["", "/tmp/liveagent-outside", "../outside", "src"] {
             let error = fs_create_dir_sync(workdir.display().to_string(), path.to_string())
                 .expect_err("invalid or existing target should fail");
-            assert!(!error.trim().is_empty(), "expected error for {path:?}");
+            assert!(!error.message.trim().is_empty(), "expected error for {path:?}");
         }
 
         let _ = fs::remove_dir_all(workdir);
@@ -4431,8 +4994,9 @@ mod tests {
         )
         .expect_err("rename should reject overwrite");
         assert!(
-            overwrite_error.contains("already exists"),
-            "unexpected error: {overwrite_error}"
+            overwrite_error.message.contains("already exists"),
+            "unexpected error: {}",
+            overwrite_error.message
         );
 
         fs::create_dir_all(workdir.join("other")).expect("create other");
@@ -4443,8 +5007,9 @@ mod tests {
         )
         .expect_err("rename should reject cross-directory move");
         assert!(
-            move_error.contains("same directory"),
-            "unexpected error: {move_error}"
+            move_error.message.contains("same directory"),
+            "unexpected error: {}",
+            move_error.message
         );
 
         let _ = fs::remove_dir_all(workdir);
@@ -4544,7 +5109,11 @@ mod tests {
             Some(10),
         )
         .expect_err("outside path should fail");
-        assert!(!outside_error.trim().is_empty());
+        assert!(
+            matches!(outside_error.code, FsErrorCode::InvalidPath),
+            "unexpected error: {:?}",
+            outside_error.code
+        );
 
         let _ = fs::remove_dir_all(workdir);
     }
@@ -4563,7 +5132,11 @@ mod tests {
             "outside_link/new-dir".to_string(),
         )
         .expect_err("create dir should reject symlink parent outside workdir");
-        assert!(!create_error.trim().is_empty());
+        assert!(
+            matches!(create_error.code, FsErrorCode::OutOfBounds),
+            "unexpected error: {:?}",
+            create_error.code
+        );
 
         fs::write(outside.join("old.txt"), "outside").expect("write outside");
         let rename_error = fs_rename_sync(
@@ -4572,7 +5145,11 @@ mod tests {
             "outside_link/new.txt".to_string(),
         )
         .expect_err("rename should reject symlink parent outside workdir");
-        assert!(!rename_error.trim().is_empty());
+        assert!(
+            matches!(rename_error.code, FsErrorCode::OutOfBounds),
+            "unexpected error: {:?}",
+            rename_error.code
+        );
 
         let _ = fs::remove_dir_all(workdir);
         let _ = fs::remove_dir_all(outside);
@@ -4662,6 +5239,144 @@ mod tests {
         assert_eq!(paths.first(), Some(&"src/needle.ts"));
         assert!(paths.contains(&"src/deep/other-needle.ts"));
         assert!(!paths.contains(&"src/unrelated.ts"));
+
+        let _ = fs::remove_dir_all(workdir);
+    }
+
+    #[test]
+    fn read_missing_file_reports_not_found_with_did_you_mean() {
+        let workdir = unique_test_workdir("not-found-suggestion");
+        fs::create_dir_all(&workdir).expect("create workdir");
+        fs::write(workdir.join("App.tsx"), "export {}").expect("write file");
+
+        let error = fs_read_text_sync(
+            workdir.display().to_string(),
+            "App.tx".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("missing file should fail");
+
+        assert!(
+            matches!(error.code, FsErrorCode::NotFound),
+            "unexpected error: {:?}",
+            error.code
+        );
+        assert_eq!(error.path.as_deref(), Some("App.tx"));
+        assert!(
+            error.did_you_mean.iter().any(|value| value == "App.tsx"),
+            "expected App.tsx suggestion, got {:?}",
+            error.did_you_mean
+        );
+
+        let _ = fs::remove_dir_all(workdir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_status_reports_same_file_id_for_case_variant_queries() {
+        let workdir = unique_test_workdir("case-identity");
+        fs::create_dir_all(&workdir).expect("create workdir");
+        fs::write(workdir.join("App.tsx"), "export {}").expect("write file");
+
+        let exact = fs_path_status_sync(workdir.display().to_string(), "App.tsx".to_string())
+            .expect("exact case status should succeed");
+        assert!(exact.exists);
+        assert!(exact.file_id.is_some());
+
+        let lower = fs_path_status_sync(workdir.display().to_string(), "app.tsx".to_string())
+            .expect("lowercase status should succeed");
+        if !lower.exists {
+            return;
+        }
+        assert!(lower.file_id.is_some());
+        assert_eq!(exact.file_id, lower.file_id);
+
+        let _ = fs::remove_dir_all(workdir);
+    }
+
+    #[test]
+    fn list_glob_grep_accept_file_targets() {
+        let workdir = unique_test_workdir("file-targets");
+        fs::create_dir_all(workdir.join("src")).expect("create workdir");
+        fs::write(workdir.join("src/app.ts"), "export const needle = 1;\n").expect("write file");
+        fs::write(workdir.join("src/other.ts"), "export {}\n").expect("write other");
+
+        let list = fs_list_sync(
+            workdir.display().to_string(),
+            Some("src/app.ts".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("list should accept a file target");
+        assert_eq!(list.target_kind.as_deref(), Some("file"));
+        assert_eq!(list.total, 1);
+        assert_eq!(list.entries.len(), 1);
+        assert_eq!(list.entries[0].path, "src/app.ts");
+        assert_eq!(list.entries[0].kind, "file");
+
+        let glob = fs_glob_sync(
+            workdir.display().to_string(),
+            Some("src/app.ts".to_string()),
+            "*.ts".to_string(),
+            None,
+            None,
+            None,
+        )
+        .expect("glob should accept a file target");
+        assert_eq!(glob.target_kind.as_deref(), Some("file"));
+        assert!(
+            glob.paths.contains(&"src/app.ts".to_string()),
+            "unexpected glob paths: {:?}",
+            glob.paths
+        );
+
+        let grep = fs_grep_sync(
+            workdir.display().to_string(),
+            Some("src/app.ts".to_string()),
+            "needle".to_string(),
+            Some("*.md".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("grep should accept a file target");
+        assert_eq!(grep.target_kind.as_deref(), Some("file"));
+        assert_eq!(grep.match_count, 1);
+        assert_eq!(grep.matches.len(), 1);
+        assert_eq!(grep.matches[0].path, "src/app.ts");
+
+        let _ = fs::remove_dir_all(workdir);
+    }
+
+    #[test]
+    fn write_response_file_id_matches_path_status() {
+        let workdir = unique_test_workdir("write-file-id");
+        fs::create_dir_all(&workdir).expect("create workdir");
+
+        let write = fs_write_text_sync(
+            workdir.display().to_string(),
+            "notes.txt".to_string(),
+            "hello\n".to_string(),
+            "rewrite".to_string(),
+            None,
+            None,
+        )
+        .expect("write should succeed");
+        assert!(write.file_id.is_some());
+
+        let status = fs_path_status_sync(workdir.display().to_string(), "notes.txt".to_string())
+            .expect("status should succeed");
+        assert!(status.exists);
+        assert_eq!(write.file_id, status.file_id);
 
         let _ = fs::remove_dir_all(workdir);
     }

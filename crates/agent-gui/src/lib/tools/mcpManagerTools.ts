@@ -110,7 +110,7 @@ const MCP_SERVER_PARAMETERS = Type.Object(
     cwd: Type.Optional(
       Type.String({
         description:
-          "Optional local working directory for stdio servers. Accepts workspace-relative paths, absolute paths, ~/..., file://, or workspace:pathRef values.",
+          "Optional local working directory for stdio servers. Accepts workspace-relative paths exactly as returned by file tools, absolute paths, ~/..., or file:// values.",
       }),
     ),
     env: Type.Optional(MCP_STRING_MAP_SCHEMA),
@@ -133,7 +133,7 @@ const MCP_SERVER_PATCH_PARAMETERS = Type.Object(
     cwd: Type.Optional(
       Type.String({
         description:
-          "Optional local working directory for stdio servers. Accepts workspace-relative paths, absolute paths, ~/..., file://, or workspace:pathRef values.",
+          "Optional local working directory for stdio servers. Accepts workspace-relative paths exactly as returned by file tools, absolute paths, ~/..., or file:// values.",
       }),
     ),
     env: Type.Optional(MCP_STRING_MAP_SCHEMA),
@@ -620,12 +620,17 @@ export function createMcpManagerTools(params: {
   getMcpSettings: () => McpSettings;
   setMcpSettings?: (next: McpSettings) => void;
   runtimeScope: SystemToolRuntimeScope;
+  resolveHomeDir?: () => Promise<string>;
 }): BuiltinToolBundle {
+  const pathResolver = new ToolPathResolver({
+    workdir: params.workdir,
+    resolveHomeDir: params.resolveHomeDir,
+  });
+
   async function resolveMcpCwd(cwd: string | undefined, label: string) {
     const input = typeof cwd === "string" ? cwd.trim() : "";
     if (!input) return undefined;
-    const resolver = new ToolPathResolver({ workdir: params.workdir });
-    const resolved = await resolver.resolvePath(input, {
+    const resolved = await pathResolver.resolvePath(input, {
       label,
       intent: "cwd",
       required: true,

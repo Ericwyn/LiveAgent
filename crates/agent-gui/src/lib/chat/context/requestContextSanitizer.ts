@@ -15,7 +15,6 @@ function normalizeDisplayImageItem(value: unknown): DisplayImageItemDetails | nu
     absolutePath,
     relativePath,
     displayPath,
-    pathRef,
     sourceType,
     renderMode,
     sourceUrl,
@@ -33,7 +32,6 @@ function normalizeDisplayImageItem(value: unknown): DisplayImageItemDetails | nu
     ...(typeof absolutePath === "string" ? { absolutePath } : {}),
     ...(typeof relativePath === "string" ? { relativePath } : {}),
     ...(typeof displayPath === "string" ? { displayPath } : {}),
-    ...(typeof pathRef === "string" ? { pathRef } : {}),
     ...(typeof sourceType === "string"
       ? { sourceType: sourceType as DisplayImageItemDetails["sourceType"] }
       : {}),

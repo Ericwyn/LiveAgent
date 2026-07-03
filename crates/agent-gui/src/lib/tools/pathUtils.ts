@@ -6,26 +6,23 @@ import {
   type SkillAccessPolicy,
 } from "./skillAccessPolicy";
 
-export type PathScope = "workspace" | "skill" | "external" | "temp" | "artifact";
+// Encoding contract: `file://` inputs are URLs and are always percent-decoded.
+// `workspace:` / `skill:` / `skill://` references are literal tool-produced
+// strings and are never encoded or decoded.
 
-export type PathIntent =
-  | "read"
-  | "write"
-  | "edit"
-  | "delete"
-  | "list"
-  | "search"
-  | "cwd"
-  | "image";
+export type PathScope = "workspace" | "skill" | "external";
+
+export type PathIntent = "read" | "write" | "edit" | "delete" | "list" | "search" | "cwd" | "image";
 
 export type ResolvedPath = {
   scope: PathScope;
   input: string;
+  // Backend base directory: workdir for workspace, skills root for skill,
+  // the absolute path itself for external.
+  root: string;
   absolutePath: string;
   relativePath?: string;
   displayPath: string;
-  pathRef: string;
-  workdir: string;
   intent: PathIntent;
   skillBaseDir?: string;
 };
@@ -40,6 +37,8 @@ type ResolveOptions = {
 
 type ResolverOptions = {
   workdir: string;
+  homeDir?: string;
+  resolveHomeDir?: () => Promise<string>;
   skillsRootEnabled?: boolean;
   skillsRootDir?: string;
   skillAccessPolicy?: SkillAccessPolicy;
@@ -69,7 +68,11 @@ function collapseDuplicateSeparators(value: string) {
 
 export function normalizeComparablePath(path: string) {
   const normalized = collapseDuplicateSeparators(
-    normalizeWindowsExtendedPrefix(normalizeUnicode(String(path || "")).trim().replace(/\\/g, "/")),
+    normalizeWindowsExtendedPrefix(
+      normalizeUnicode(String(path || ""))
+        .trim()
+        .replace(/\\/g, "/"),
+    ),
   );
   if (/^[a-zA-Z]:\/?$/.test(normalized)) return normalized.replace(/\/?$/, "/");
   if (normalized === "/") return "/";
@@ -80,7 +83,7 @@ function isWindowsDrivePath(value: string) {
   return /^[a-zA-Z]:\//.test(value);
 }
 
-function isAbsolutePath(value: string) {
+export function isAbsolutePath(value: string) {
   return value.startsWith("/") || isWindowsDrivePath(value);
 }
 
@@ -106,15 +109,6 @@ export function relativePathFromAbsolute(rawPath: string, rootDir: string) {
 
   if (comparablePath === comparableRoot) return "";
   return comparablePath.startsWith(`${comparableRoot}/`) ? path.slice(root.length + 1) : null;
-}
-
-function inferHomeDirFromKnownRoot(rootDir: string | undefined) {
-  const value = normalizeComparablePath(rootDir || "");
-  if (!value) return null;
-  const unixHome = value.match(/^(\/Users\/[^/]+|\/home\/[^/]+)/);
-  if (unixHome) return unixHome[1];
-  const windowsHome = value.match(/^([a-zA-Z]:\/Users\/[^/]+)/);
-  return windowsHome ? windowsHome[1] : null;
 }
 
 function parseFileUrl(value: string) {
@@ -148,24 +142,7 @@ function normalizeRawPathInput(input: unknown, label: string) {
   return value;
 }
 
-function isWindowsReservedPathComponent(input: string) {
-  const stem = input
-    .split(".")
-    .at(0)
-    ?.trim()
-    .replace(/[ .]+$/g, "")
-    .toUpperCase();
-  if (!stem) return false;
-  return (
-    stem === "CON" ||
-    stem === "PRN" ||
-    stem === "AUX" ||
-    stem === "NUL" ||
-    (/^(COM|LPT)[1-9]$/.test(stem))
-  );
-}
-
-function sanitizeRelativePath(input: string, label: string, required: boolean) {
+export function sanitizeRelativePath(input: string, label: string, required: boolean) {
   const normalized = normalizeUnicode(input.trim()).replace(/\\/g, "/");
   if (!normalized) {
     if (required) throw new Error(`${label} is required`);
@@ -183,9 +160,6 @@ function sanitizeRelativePath(input: string, label: string, required: boolean) {
     if (segment === "..") throw new Error(`${label} cannot contain .. segments`);
     if (segment.includes(":")) throw new Error(`${label} cannot contain ':' path segments`);
     if (segment.includes("\0")) throw new Error(`${label} contains a NUL byte`);
-    if (isWindowsReservedPathComponent(segment)) {
-      throw new Error(`${label} contains a Windows reserved path component: ${segment}`);
-    }
     segments.push(segment);
   }
 
@@ -196,7 +170,7 @@ function sanitizeRelativePath(input: string, label: string, required: boolean) {
   return segments.join("/");
 }
 
-function joinNormalizedPath(rootDir: string, relativePath?: string) {
+export function joinNormalizedPath(rootDir: string, relativePath?: string) {
   const root = normalizeRootPath(rootDir);
   if (!relativePath) return root;
   if (root === "/") return `/${relativePath}`;
@@ -205,22 +179,6 @@ function joinNormalizedPath(rootDir: string, relativePath?: string) {
 
 function firstPathSegment(path: string | undefined) {
   return path?.split("/").find(Boolean) ?? "";
-}
-
-function pathRefFor(scope: PathScope, relativePath: string | undefined, absolutePath: string) {
-  if (scope === "workspace") return `workspace:${relativePath ?? ""}`;
-  if (scope === "skill") return `skill:${relativePath ?? ""}`;
-  return fileUrlForAbsolutePath(absolutePath);
-}
-
-function fileUrlForAbsolutePath(absolutePath: string) {
-  const normalized = normalizeComparablePath(absolutePath);
-  const parts = normalized.split("/").map((segment, index) => {
-    if (index === 0 && /^[a-zA-Z]:$/.test(segment)) return segment;
-    return encodeURIComponent(segment);
-  });
-  const encodedPath = parts.join("/");
-  return isWindowsDrivePath(normalized) ? `file:///${encodedPath}` : `file://${encodedPath}`;
 }
 
 function displayPathFor(scope: PathScope, relativePath: string | undefined, absolutePath: string) {
@@ -240,8 +198,7 @@ function parseScopedPathRef(value: string) {
 
 function parseSkillUrl(value: string) {
   if (!/^skill:\/\//i.test(value)) return null;
-  const rest = value.replace(/^skill:\/\//i, "").replace(/^\/+/, "");
-  return rest;
+  return value.replace(/^skill:\/\//i, "").replace(/^\/+/, "");
 }
 
 function fixedSkillsRelativePathFromAbsolute(value: string) {
@@ -268,7 +225,6 @@ function operationForIntent(intent: PathIntent, label: string) {
       return `Bash(${label})`;
     case "image":
       return `Image(${label})`;
-    case "read":
     default:
       return `Read(${label})`;
   }
@@ -280,16 +236,25 @@ export function formatResolvedTarget(path: Pick<ResolvedPath, "displayPath"> | u
 
 export class ToolPathResolver {
   private readonly workdir: string;
+  private readonly resolveHomeDirFn?: () => Promise<string>;
   private readonly skillsRootEnabled: boolean;
   private readonly skillAccessPolicy?: SkillAccessPolicy;
   private readonly resolveSkillsRootDir?: () => Promise<string>;
+  private homeDir: string;
+  private homeDirResolved: boolean;
   private skillsRootDir: string;
 
   constructor(options: ResolverOptions) {
     this.workdir = normalizeRootPath(options.workdir);
+    this.homeDir =
+      typeof options.homeDir === "string" ? normalizeComparablePath(options.homeDir) : "";
+    this.homeDirResolved = this.homeDir.length > 0;
+    this.resolveHomeDirFn = options.resolveHomeDir;
     this.skillsRootEnabled = options.skillsRootEnabled === true;
     this.skillsRootDir =
-      typeof options.skillsRootDir === "string" ? normalizeComparablePath(options.skillsRootDir) : "";
+      typeof options.skillsRootDir === "string"
+        ? normalizeComparablePath(options.skillsRootDir)
+        : "";
     this.skillAccessPolicy = options.skillAccessPolicy;
     this.resolveSkillsRootDir = options.resolveSkillsRootDir;
   }
@@ -306,17 +271,27 @@ export class ToolPathResolver {
     return this.skillsRootDir;
   }
 
-  private inferHomeDir() {
-    return inferHomeDirFromKnownRoot(this.skillsRootDir) ?? inferHomeDirFromKnownRoot(this.workdir);
+  private async getHomeDir() {
+    if (this.homeDirResolved) return this.homeDir;
+    this.homeDirResolved = true;
+    try {
+      const resolved = await this.resolveHomeDirFn?.();
+      this.homeDir = typeof resolved === "string" ? normalizeComparablePath(resolved) : "";
+    } catch {
+      this.homeDir = "";
+    }
+    return this.homeDir;
   }
 
-  private expandTilde(value: string) {
+  private async expandTilde(value: string) {
     if (value !== "~" && !value.startsWith("~/")) return value;
-    const home = this.inferHomeDir();
-    if (!home) {
-      throw new Error("Cannot resolve ~/ because the user home directory is unknown");
+    const homeDir = await this.getHomeDir();
+    if (!homeDir) {
+      throw new Error(
+        "Cannot resolve ~/ paths in this session; use a workspace-relative or absolute path instead",
+      );
     }
-    return normalizeComparablePath(`${home}${value === "~" ? "" : value.slice(1)}`);
+    return normalizeComparablePath(`${homeDir}${value === "~" ? "" : value.slice(1)}`);
   }
 
   private async resolveSkillRelativePath(
@@ -327,7 +302,11 @@ export class ToolPathResolver {
     if (!skillsRootDir) {
       throw new Error(`${options.label} points to a Skill path, but Skills are not enabled`);
     }
-    const sanitized = sanitizeRelativePath(relativePath ?? "", options.label, options.required === true);
+    const sanitized = sanitizeRelativePath(
+      relativePath ?? "",
+      options.label,
+      options.required === true,
+    );
     if (!sanitized && isSkillAccessPolicyRestrictive(this.skillAccessPolicy)) {
       throw new Error(
         buildSkillAccessDeniedMessage({
@@ -347,11 +326,10 @@ export class ToolPathResolver {
     return {
       scope: "skill",
       input: relativePath ?? "",
+      root: skillsRootDir,
       absolutePath,
       relativePath: sanitized,
       displayPath: displayPathFor("skill", sanitized, absolutePath),
-      pathRef: pathRefFor("skill", sanitized, absolutePath),
-      workdir: skillsRootDir,
       intent: options.intent,
       skillBaseDir: firstPathSegment(sanitized),
     };
@@ -361,34 +339,36 @@ export class ToolPathResolver {
     relativePath: string | undefined,
     options: ResolveOptions,
   ): ResolvedPath {
-    const sanitized = sanitizeRelativePath(relativePath ?? "", options.label, options.required === true);
+    const sanitized = sanitizeRelativePath(
+      relativePath ?? "",
+      options.label,
+      options.required === true,
+    );
     const absolutePath = joinNormalizedPath(this.workdir, sanitized);
     return {
       scope: "workspace",
       input: relativePath ?? "",
+      root: this.workdir,
       absolutePath,
       relativePath: sanitized,
       displayPath: displayPathFor("workspace", sanitized, absolutePath),
-      pathRef: pathRefFor("workspace", sanitized, absolutePath),
-      workdir: this.workdir,
       intent: options.intent,
     };
   }
 
   private resolveExternalAbsolutePath(value: string, options: ResolveOptions): ResolvedPath {
+    const absolutePath = normalizeComparablePath(value);
     if (!options.allowExternal) {
       throw new Error(
-        `${options.label} resolves outside the workspace and enabled Skills. Use a workspace path, an enabled skill:// path, or a pathRef returned by a previous tool.`,
+        `${options.label} resolves outside the workspace and enabled Skills: ${absolutePath}. Pass a workspace-relative path instead — for example path="notes.md" targets <workspace root>/notes.md — or an enabled skill:// path, exactly as returned by List/Glob/Grep/Read.`,
       );
     }
-    const absolutePath = normalizeComparablePath(value);
     return {
       scope: "external",
       input: value,
+      root: absolutePath,
       absolutePath,
       displayPath: displayPathFor("external", undefined, absolutePath),
-      pathRef: pathRefFor("external", undefined, absolutePath),
-      workdir: absolutePath,
       intent: options.intent,
     };
   }
@@ -396,23 +376,28 @@ export class ToolPathResolver {
   private async resolveAbsolutePath(value: string, options: ResolveOptions): Promise<ResolvedPath> {
     const absolutePath = normalizeComparablePath(value);
     const workspaceRel = relativePathFromAbsolute(absolutePath, this.workdir);
+    const skillsRootDir = await this.getSkillsRootDir();
+    const skillRel = skillsRootDir ? relativePathFromAbsolute(absolutePath, skillsRootDir) : null;
+
+    // When both roots contain the path (nested roots), the longer root is the
+    // more specific owner and its scope policy must win.
+    if (workspaceRel !== null && skillRel !== null) {
+      return skillsRootDir.length >= this.workdir.length
+        ? this.resolveSkillRelativePath(skillRel, options)
+        : this.resolveWorkspaceRelativePath(workspaceRel, options);
+    }
+    if (skillRel !== null) {
+      return this.resolveSkillRelativePath(skillRel, options);
+    }
     if (workspaceRel !== null) {
       return this.resolveWorkspaceRelativePath(workspaceRel, options);
-    }
-
-    const skillsRootDir = await this.getSkillsRootDir();
-    if (skillsRootDir) {
-      const skillRel = relativePathFromAbsolute(absolutePath, skillsRootDir);
-      if (skillRel !== null) {
-        return this.resolveSkillRelativePath(skillRel, options);
-      }
     }
 
     const fixedSkillRel = fixedSkillsRelativePathFromAbsolute(absolutePath);
     if (fixedSkillRel !== null) {
       if (!this.skillsRootEnabled) {
         throw new Error(
-          `${options.label} points to installed Skill files, but Skills are not enabled for this conversation. Enable the Skill, then use skill://${fixedSkillRel} or a pathRef returned by a file tool.`,
+          `${options.label} points to installed Skill files, but Skills are not enabled for this conversation. Enable the Skill, then retry with skill://${fixedSkillRel}`,
         );
       }
       return this.resolveSkillRelativePath(fixedSkillRel, options);
@@ -448,7 +433,21 @@ export class ToolPathResolver {
       return this.resolveAbsolutePath(fileUrlPath, options);
     }
 
-    const expanded = raw.startsWith("~") ? this.expandTilde(raw) : raw;
+    if (raw.startsWith("~")) {
+      // "~/.liveagent/skills/..." is recognizable without knowing the home
+      // directory; resolve it as a Skill path before attempting ~ expansion.
+      const fixedSkillRel = fixedSkillsRelativePathFromAbsolute(raw);
+      if (fixedSkillRel !== null) {
+        if (!this.skillsRootEnabled) {
+          throw new Error(
+            `${options.label} points to installed Skill files, but Skills are not enabled for this conversation. Enable the Skill, then retry with skill://${fixedSkillRel}`,
+          );
+        }
+        return this.resolveSkillRelativePath(fixedSkillRel, options);
+      }
+    }
+
+    const expanded = raw.startsWith("~") ? await this.expandTilde(raw) : raw;
     if (isUncPath(expanded)) throw new Error(`${options.label} cannot be a UNC path`);
     if (isAbsolutePath(expanded)) {
       return this.resolveAbsolutePath(expanded, options);

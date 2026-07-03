@@ -1,7 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocale } from "../../i18n";
 import { cn } from "../../lib/shared/utils";
+import { invokeFs } from "../../lib/tools/fsBackend";
 import { AlertTriangle, ImageIcon, ImageOff, Loader2, RefreshCw, X } from "../icons";
 import { MacOsTitleBarSpacer } from "../MacOsTitleBarSpacer";
 
@@ -91,7 +91,7 @@ export function WorkspaceImagePreviewOverlay(props: WorkspaceImagePreviewOverlay
       setError(null);
       setImage(null);
       try {
-        const response = await invoke<ReadWorkspaceImageResponse>("fs_read_workspace_image", {
+        const response = await invokeFs<ReadWorkspaceImageResponse>("fs_read_workspace_image", {
           workdir: request.workdir,
           path: request.path,
         });

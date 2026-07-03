@@ -371,6 +371,7 @@ export function createShellTools(params: {
   skillsRootDir?: string;
   skillAccessPolicy?: SkillAccessPolicy;
   managedProcessEnabled?: boolean;
+  resolveHomeDir?: () => Promise<string>;
 }): BuiltinToolBundle {
   const timeoutPolicy = resolveBashTimeoutPolicy(params.providerId);
   const runtimePlatform =
@@ -409,6 +410,7 @@ export function createShellTools(params: {
 
   const pathResolver = new ToolPathResolver({
     workdir,
+    resolveHomeDir: params.resolveHomeDir,
     skillsRootEnabled: allowSkillsRoot,
     skillsRootDir: cachedSkillsRootDir,
     skillAccessPolicy,
@@ -416,7 +418,9 @@ export function createShellTools(params: {
   });
 
   function backendCwd(resolved: ResolvedPath) {
-    return resolved.scope === "external" ? undefined : resolved.relativePath || undefined;
+    return resolved.scope === "workspace"
+      ? resolved.relativePath || undefined
+      : resolved.absolutePath;
   }
 
   function normalizeCommandForPolicy(command: string) {
@@ -635,7 +639,7 @@ export function createShellTools(params: {
       cwd: Type.Optional(
         Type.String({
           description:
-            "Optional working directory. Omit to use the workspace root. Accepts workspace-relative paths, absolute paths, ~/..., file://, pathRef values, and skill://<enabled-skill>/... paths.",
+            "Optional working directory. Omit to use the workspace root. Prefer the workspace-relative or skill:// form returned by other tools; may also be an absolute path outside the workspace.",
         }),
       ),
       timeout_ms: Type.Optional(
@@ -672,7 +676,7 @@ export function createShellTools(params: {
       cwd: Type.Optional(
         Type.String({
           description:
-            'Optional working directory for action="start". Omit to use the workspace root. Accepts workspace-relative paths, absolute paths, ~/..., file://, pathRef values, and skill://<enabled-skill>/... paths.',
+            'Optional working directory for action="start". Omit to use the workspace root. Prefer the workspace-relative or skill:// form returned by other tools; may also be an absolute path outside the workspace.',
         }),
       ),
       label: Type.Optional(
@@ -779,7 +783,7 @@ export function createShellTools(params: {
             ? toolCall.arguments.label.trim()
             : undefined;
         const response = await invoke<ManagedProcessStartResponse>("managed_process_start", {
-          workdir: cwdResolved.workdir,
+          workdir,
           command,
           cwd: cwd || undefined,
           label: label || undefined,
@@ -1014,7 +1018,7 @@ export function createShellTools(params: {
         }
       }
       const res = await invoke<ShellRunResponse>("shell_run", {
-        workdir: cwdResolved.workdir,
+        workdir,
         command,
         cwd: cwd || undefined,
         timeout_ms,

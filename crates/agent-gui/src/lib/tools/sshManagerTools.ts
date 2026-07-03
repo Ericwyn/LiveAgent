@@ -195,7 +195,7 @@ const SSH_MANAGER_TOOL: Tool = {
     local_path: Type.Optional(
       Type.String({
         description:
-          "Local workspace path for upload/download. Accepts workspace-relative paths, absolute paths inside the workspace, ~/..., file://, or workspace:pathRef values.",
+          "Local workspace path for upload/download. Accepts workspace-relative paths exactly as returned by file tools, absolute paths inside the workspace, ~/..., or file:// values.",
       }),
     ),
     remote_path: Type.Optional(Type.String({ description: "Remote path for upload/download." })),
@@ -530,6 +530,7 @@ async function executeSSHManager(
     projectPathKey: string;
     hosts: SshHostConfig[];
     associatedHostIds: string[];
+    pathResolver: ToolPathResolver;
     onSshSessionsChanged?: (change: SshManagerSessionChange) => void | Promise<void>;
   },
   signal?: AbortSignal,
@@ -542,14 +543,15 @@ async function executeSSHManager(
       intent: "read" | "write",
       label: string,
     ) => {
-      const pathResolver = new ToolPathResolver({ workdir: params.workdir });
-      const resolved = await pathResolver.resolvePath(input, {
+      const resolved = await params.pathResolver.resolvePath(input, {
         label,
         intent,
         required: true,
       });
       if (resolved.scope !== "workspace") {
-        throw new Error(`${label} must resolve inside the current workspace.`);
+        throw new Error(
+          `${label} must resolve inside the workspace (workspace root: ${params.workdir}). Got: ${String(input)}. Use a workspace-relative path.`,
+        );
       }
       return resolved.relativePath ?? "";
     };
@@ -987,11 +989,16 @@ export function createSSHManagerTools(params: {
   projectPathKey?: string;
   hosts?: SshHostConfig[];
   associatedHostIds?: string[];
+  resolveHomeDir?: () => Promise<string>;
   onSshSessionsChanged?: (change: SshManagerSessionChange) => void | Promise<void>;
 }): BuiltinToolBundle {
   const projectPathKey = params.projectPathKey?.trim() || params.workdir.trim();
   const hosts = params.hosts ?? [];
   const associatedHostIds = params.associatedHostIds ?? [];
+  const pathResolver = new ToolPathResolver({
+    workdir: params.workdir,
+    resolveHomeDir: params.resolveHomeDir,
+  });
   const tools =
     params.enabled &&
     params.runtimeScope === "chat" &&
@@ -1011,6 +1018,7 @@ export function createSSHManagerTools(params: {
           projectPathKey,
           hosts,
           associatedHostIds,
+          pathResolver,
           onSshSessionsChanged: params.onSshSessionsChanged,
         },
         signal,

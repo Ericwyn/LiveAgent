@@ -7,8 +7,8 @@ import type {
 
 type SnapshotPathKey = {
   path: string;
+  fileId?: string;
   absolutePath?: string;
-  pathRef?: string;
 };
 
 type FileReadSnapshot =
@@ -51,14 +51,14 @@ type FileSnapshotBucket = {
 
 function buildBucketKey(path: SnapshotPathKey | string) {
   if (typeof path === "string") return path;
-  return path.absolutePath || path.pathRef || path.path;
+  return path.fileId || path.absolutePath || path.path;
 }
 
 function snapshotPathKey(details: SnapshotPathKey): SnapshotPathKey {
   return {
     path: details.path,
+    fileId: details.fileId,
     absolutePath: details.absolutePath,
-    pathRef: details.pathRef,
   };
 }
 
@@ -159,11 +159,13 @@ export function createFileToolState() {
     bucket.byRangeKey.set(buildNotebookRangeKey(snapshot), snapshot);
   }
 
-  function recordTextMutation(params: SnapshotPathKey & {
-    mtimeMs: number;
-    contentHash: string;
-    totalLines: number;
-  }) {
+  function recordTextMutation(
+    params: SnapshotPathKey & {
+      mtimeMs: number;
+      contentHash: string;
+      totalLines: number;
+    },
+  ) {
     const snapshot: Extract<FileReadSnapshot, { kind: "text" }> = {
       ...snapshotPathKey(params),
       kind: "text",

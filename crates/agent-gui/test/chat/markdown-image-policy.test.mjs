@@ -165,7 +165,7 @@ test("agent tool rules require Image for chat-visible images", () => {
   );
   assert.match(
     suffix,
-    /Local image: pass `path` exactly as seen, including workspace-relative, absolute, pathRef, or skill:\/\/ paths\./,
+    /Local image: pass `path` exactly as seen, including workspace-relative, absolute, or skill:\/\/ paths\./,
   );
   assert.match(
     suffix,
@@ -217,7 +217,7 @@ test("agent tool rules keep local file discovery on file tools instead of Bash",
     "Bash",
     "SkillsManager",
   ]);
-  assert.match(suffix, /File tools and Bash accept the path you see/);
+  assert.match(suffix, /Preferred form: workspace-relative paths exactly as tools return them/);
   assert.match(suffix, /For files inside a Skill, call file tools with a path like `skill:\/\/<baseDir>\/references\/guide\.md`/);
   assert.match(suffix, /Do not run Bash cat\/ls\/find\/grep/);
 });
@@ -242,7 +242,10 @@ test("agent tool rules keep workspace and Skills deletion on Delete", () => {
     "Bash",
     "SkillsManager",
   ]);
-  assert.match(suffix, /For workspace or Skill deletion, use Delete with the exact path or pathRef/);
+  assert.match(
+    suffix,
+    /For workspace or Skill deletion, use Delete with the exact path returned by List\/Glob\/Grep\/Read/,
+  );
   assert.match(suffix, /Do not run Bash rm, rmdir, unlink, or find -delete/);
 });
 

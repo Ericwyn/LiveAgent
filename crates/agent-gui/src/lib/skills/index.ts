@@ -697,7 +697,7 @@ export function buildSkillsSystemPrompt(params: {
   });
 
   return [
-    "The following Skills are enabled by the user. Skill files are exposed to file tools through skill://<baseDir>/... paths and pathRef values returned by tools.",
+    "The following Skills are enabled by the user. Skill files are exposed to file tools through skill://<baseDir>/... paths.",
     "",
     "Usage Rules (aligned with Claude Code behavior):",
     "- Skills with metadata use progressive disclosure; their full contents are not automatically injected into context.",
@@ -707,7 +707,7 @@ export function buildSkillsSystemPrompt(params: {
     "- SkillsManager.path uses the skillFile below and may point to SKILL.md, skill.md, skill.json, or README.md.",
     '- For files referenced inside an enabled Skill, use file tools with skill://<baseDir>/... paths, for example Read(path="skill://<baseDir>/references/guide.md"), List, Glob, Grep, Write, Edit, or Delete.',
     "- You may update files inside enabled Skills when the user asks you to optimize or maintain them. Create, install, search/install from ClawHub, validate, package, or delete user Skills through SkillsManager actions.",
-    "- You may pass absolute local paths, ~/..., file://, skill://, or pathRef values to file tools; prefer skill://<baseDir>/... for enabled Skill files.",
+    "- Absolute local paths, ~/..., and file:// forms are auto-normalized by file tools; prefer skill://<baseDir>/... for enabled Skill files.",
     "- If Skill content contains shell snippets that read Skill files with cat/ls/find/grep, route those reads through Read/List/Glob/Grep instead of Bash.",
     "- Do not guess a Skill's exact instructions or script paths before reading the Skill file.",
     "- Relative paths inside a Skill (scripts/, references/, assets/, and so on) are resolved relative to baseDir.",

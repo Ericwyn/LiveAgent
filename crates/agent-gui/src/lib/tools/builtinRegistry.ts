@@ -1,4 +1,5 @@
 import type { ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
+import { homeDir } from "@tauri-apps/api/path";
 import {
   listSubagentIdentities,
   listSubagentRuns,
@@ -232,6 +233,8 @@ type BuildBuiltinBaseToolRegistryParams = {
   onTunnelsChanged?: (change: TunnelManagerChange) => void | Promise<void>;
 };
 
+const resolveHomeDir = () => homeDir();
+
 async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryParams) {
   let currentMcpSettings = params.mcpSettings;
   const baseBundles: BuiltinToolBundle[] = [
@@ -241,6 +244,7 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
       skillsRootEnabled: params.skillsEnabled,
       skillsRootDir: params.skillsRootDir,
       skillAccessPolicy: params.skillAccessPolicy,
+      resolveHomeDir,
     }),
     createShellTools({
       workdir: params.workdir,
@@ -250,6 +254,7 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
       skillsRootDir: params.skillsRootDir,
       skillAccessPolicy: params.skillAccessPolicy,
       managedProcessEnabled: params.runtimeScope === "chat",
+      resolveHomeDir,
     }),
     ...(params.skillsEnabled
       ? [
@@ -273,6 +278,7 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
           }
         : undefined,
       runtimeScope: params.runtimeScope,
+      resolveHomeDir,
     }),
     createCustomSystemTools({
       selectedToolIds: params.selectedSystemToolIds,
@@ -300,6 +306,7 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
       projectPathKey: params.tunnelProjectPathKey,
       hosts: params.sshHosts,
       associatedHostIds: params.associatedSshHostIds,
+      resolveHomeDir,
       onSshSessionsChanged: params.onSshSessionsChanged,
     }),
     ...(params.runtimeScope === "chat"
@@ -372,6 +379,7 @@ export async function buildBuiltinToolRegistry(
       runtime: params.delegateRuntime.runtime,
       runtimePlatform: params.runtimePlatform,
       workdir: params.workdir,
+      resolveHomeDir,
       parentConversationId: params.delegateRuntime.conversationId,
       sessionId: params.delegateRuntime.sessionId,
       agentTemplates: params.delegateRuntime.agentTemplates,

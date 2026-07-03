@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import {
   useCallback,
   useEffect,
@@ -16,6 +15,7 @@ import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import TsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
 import { useLocale } from "@/i18n";
 import { cn } from "@/lib/shared/utils";
+import { invokeFs, isFsBackendError } from "@/lib/tools/fsBackend";
 import {
   AlertTriangle,
   ClipboardPaste,
@@ -230,6 +230,7 @@ function languageForPath(path: string) {
 }
 
 function isVersionConflict(error: unknown) {
+  if (isFsBackendError(error) && error.code === "stale_file") return true;
   const message = error instanceof Error ? error.message : String(error ?? "");
   return message.includes("File changed since the last full Read");
 }
@@ -390,7 +391,7 @@ export function WorkspaceCodeEditorOverlay(props: WorkspaceCodeEditorOverlayProp
       const contentToSave = tab.content;
       updateTab(tabKey, (current) => ({ ...current, status: "saving", error: null }));
       try {
-        const response = await invoke<WriteTextResponse>("fs_write_text", {
+        const response = await invokeFs<WriteTextResponse>("fs_write_text", {
           workdir: tab.workdir,
           path: tab.path,
           content: contentToSave,
@@ -443,7 +444,7 @@ export function WorkspaceCodeEditorOverlay(props: WorkspaceCodeEditorOverlayProp
       ]);
       setGlobalError(null);
       try {
-        const response = await invoke<ReadEditableTextResponse>("fs_read_editable_text", {
+        const response = await invokeFs<ReadEditableTextResponse>("fs_read_editable_text", {
           workdir: request.workdir,
           path: request.path,
         });
@@ -483,7 +484,7 @@ export function WorkspaceCodeEditorOverlay(props: WorkspaceCodeEditorOverlayProp
       setOpeningPaths((current) => [...current.filter((item) => item !== tab.path), tab.path]);
       setGlobalError(null);
       try {
-        const response = await invoke<ReadEditableTextResponse>("fs_read_editable_text", {
+        const response = await invokeFs<ReadEditableTextResponse>("fs_read_editable_text", {
           workdir: tab.workdir,
           path: tab.path,
         });

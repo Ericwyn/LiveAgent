@@ -417,6 +417,7 @@ pub async fn handle_fs_list(
     })
     .await
     .map_err(|e| format!("gateway fs list join failed: {e}"))?
+    .map_err(|e| e.message)
     .map(|response| {
         let has_path = response.path.is_some();
         proto::FsListResponse {
@@ -447,6 +448,7 @@ pub async fn handle_fs_read_editable_text(
     })
     .await
     .map_err(|e| format!("gateway fs read editable text join failed: {e}"))?
+    .map_err(|e| e.message)
     .map(|response| proto::FsReadEditableTextResponse {
         path: response.path,
         content: response.content,
@@ -465,6 +467,7 @@ pub async fn handle_fs_read_workspace_image(
     })
     .await
     .map_err(|e| format!("gateway fs read workspace preview join failed: {e}"))?
+    .map_err(|e| e.message)
     .and_then(|response| {
         Ok(proto::FsReadWorkspaceImageResponse {
             path: response.path,
@@ -507,6 +510,7 @@ pub async fn handle_fs_write_text(
     })
     .await
     .map_err(|e| format!("gateway fs write text join failed: {e}"))?
+    .map_err(|e| e.message)
     .map(|response| proto::FsWriteTextResponse {
         path: response.path,
         mode: response.mode,
@@ -524,6 +528,7 @@ pub async fn handle_fs_create_dir(
     tauri::async_runtime::spawn_blocking(move || fs_create_dir_sync(request.workdir, request.path))
         .await
         .map_err(|e| format!("gateway fs create dir join failed: {e}"))?
+        .map_err(|e| e.message)
         .map(|response| proto::FsCreateDirResponse {
             path: response.path,
             kind: response.kind,
@@ -538,6 +543,7 @@ pub async fn handle_fs_rename(
     })
     .await
     .map_err(|e| format!("gateway fs rename join failed: {e}"))?
+    .map_err(|e| e.message)
     .map(|response| proto::FsRenameResponse {
         from_path: response.from_path,
         path: response.path,
@@ -551,6 +557,7 @@ pub async fn handle_fs_delete(
     tauri::async_runtime::spawn_blocking(move || fs_delete_sync(request.workdir, request.path))
         .await
         .map_err(|e| format!("gateway fs delete join failed: {e}"))?
+        .map_err(|e| e.message)
         .map(|response| proto::FsDeleteResponse {
             path: response.path,
             kind: response.kind,

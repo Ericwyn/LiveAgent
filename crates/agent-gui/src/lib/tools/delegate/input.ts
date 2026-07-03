@@ -29,28 +29,6 @@ function normalizeBoolean(value: unknown, fallback: boolean) {
   return typeof value === "boolean" ? value : fallback;
 }
 
-export function normalizeRelativePath(value: string) {
-  const normalized = value.trim().replace(/\\/g, "/").replace(/^\.\//, "");
-  if (
-    !normalized ||
-    /^[a-zA-Z]:\//.test(normalized) ||
-    normalized.startsWith("/") ||
-    normalized.startsWith("//") ||
-    normalized === "." ||
-    normalized === ".."
-  ) {
-    return "";
-  }
-
-  const segments: string[] = [];
-  for (const segment of normalized.split("/")) {
-    if (!segment || segment === ".") continue;
-    if (segment === ".." || segment.includes(":")) return "";
-    segments.push(segment);
-  }
-  return segments.join("/");
-}
-
 function normalizePathList(value: unknown): string[] {
   const rawItems = Array.isArray(value)
     ? value

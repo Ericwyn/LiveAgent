@@ -10,6 +10,12 @@ import {
   type SkillsManagerResultDetails,
 } from "./builtinTypes";
 import {
+  isAbsolutePath,
+  joinNormalizedPath,
+  normalizeComparablePath,
+  relativePathFromAbsolute,
+} from "./pathUtils";
+import {
   assertSkillInventoryAllowed,
   assertSkillManagementAllowed,
   assertSkillNameAllowedByPolicy,
@@ -29,10 +35,16 @@ function normalizeSkillPath(input: unknown) {
   const raw = typeof input === "string" ? input.trim() : "";
   if (!raw) return "";
   if (/^skill:\/\//i.test(raw)) {
-    return raw.replace(/^skill:\/\//i, "").replace(/^\/+/, "").replace(/\\/g, "/");
+    return raw
+      .replace(/^skill:\/\//i, "")
+      .replace(/^\/+/, "")
+      .replace(/\\/g, "/");
   }
   if (/^skill:/i.test(raw)) {
-    return raw.replace(/^skill:/i, "").replace(/^\/+/, "").replace(/\\/g, "/");
+    return raw
+      .replace(/^skill:/i, "")
+      .replace(/^\/+/, "")
+      .replace(/\\/g, "/");
   }
   if (/^[a-zA-Z]:[\\/]/.test(raw)) return "";
   if (raw.startsWith("/") || raw.startsWith("\\\\")) return "";
@@ -202,21 +214,8 @@ function optionalBoundedInteger(
   return Math.max(min, Math.min(max, Math.trunc(value)));
 }
 
-function normalizeDisplayPath(path: string) {
-  return path.trim().replace(/\\/g, "/").replace(/\/+$/g, "");
-}
-
 function isUrlLike(value: string) {
   return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value);
-}
-
-function isAbsoluteLocalPath(value: string) {
-  return value.startsWith("/") || value.startsWith("\\\\") || /^[a-zA-Z]:[\\/]/.test(value);
-}
-
-function joinLocalPath(base: string, rel: string) {
-  const separator = base.includes("\\") && !base.includes("/") ? "\\" : "/";
-  return `${base.replace(/[\\/]+$/g, "")}${separator}${rel.replace(/^[\\/]+/g, "")}`;
 }
 
 function resolveInstallSourceForWorkspace(source: string, workdir?: string) {
@@ -227,21 +226,23 @@ function resolveInstallSourceForWorkspace(source: string, workdir?: string) {
     !normalizedWorkdir ||
     normalizedSource.startsWith("~") ||
     isUrlLike(normalizedSource) ||
-    isAbsoluteLocalPath(normalizedSource)
+    isAbsolutePath(normalizedSource.replace(/\\/g, "/"))
   ) {
     return normalizedSource;
   }
-  return joinLocalPath(normalizedWorkdir, normalizedSource.replace(/^[.][\\/]/, ""));
+  const relative = normalizedSource
+    .replace(/^[.][\\/]/, "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "");
+  return joinNormalizedPath(normalizedWorkdir, relative);
 }
 
 function displaySkillRootPath(rootDir: string, path: string | null | undefined) {
-  const value = typeof path === "string" ? normalizeDisplayPath(path) : "";
+  const value = typeof path === "string" ? normalizeComparablePath(path) : "";
   if (!value) return "";
-  const root = normalizeDisplayPath(rootDir);
-  if (root && value === root) return "skill://<root>";
-  if (root && value.startsWith(`${root}/`)) {
-    return `skill://${value.slice(root.length + 1)}`;
-  }
+  const relative = relativePathFromAbsolute(value, rootDir);
+  if (relative === "") return "skill://<root>";
+  if (relative) return `skill://${relative}`;
   return value;
 }
 
@@ -276,7 +277,7 @@ function collectManagedSkillAccess(result: Awaited<ReturnType<typeof manageSkill
 }
 
 function skillBaseDirFromPath(path: string) {
-  const normalized = normalizeDisplayPath(path);
+  const normalized = normalizeComparablePath(path);
   return normalized.split("/").find(Boolean) ?? "<baseDir>";
 }
 
@@ -293,7 +294,7 @@ function buildSkillReadPathRules(path: string) {
 }
 
 function isSkillEntryPath(path: string) {
-  const normalized = normalizeDisplayPath(path).toLowerCase();
+  const normalized = normalizeComparablePath(path).toLowerCase();
   return /(^|\/)(skill\.md|skill\.json|readme\.md)$/.test(normalized);
 }
 
@@ -463,7 +464,7 @@ function formatManageSkillResultText(
   const lines = [
     `SkillsManager action=${result.action}`,
     "pathScheme=skill://<baseDir>/...",
-    'Use Read/List/Glob/Grep/Write/Edit/Delete with skill://<baseDir>/... paths for files inside enabled Skills. Use SkillsManager actions for Skill creation, local/GitHub/ClawHub installation, validation, packaging, and deletion.',
+    "Use Read/List/Glob/Grep/Write/Edit/Delete with skill://<baseDir>/... paths for files inside enabled Skills. Use SkillsManager actions for Skill creation, local/GitHub/ClawHub installation, validation, packaging, and deletion.",
   ];
 
   if (result.action === "list") {

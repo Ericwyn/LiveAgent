@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
 import type { SshHostConfig } from "../settings";
+import { invokeFs } from "../tools/fsBackend";
 
 type FsRoot = {
   id: string;
@@ -211,7 +211,7 @@ function toHomeRelativePath(homePath: string, path: string) {
 }
 
 async function readHomeFile(homePath: string, relativePath: string) {
-  const response = await invoke<FsReadEditableTextResponse>("fs_read_editable_text", {
+  const response = await invokeFs<FsReadEditableTextResponse>("fs_read_editable_text", {
     workdir: homePath,
     path: relativePath,
   });
@@ -227,7 +227,7 @@ async function readOptionalHomeFile(homePath: string, relativePath: string) {
 }
 
 async function findHomePath() {
-  const response = await invoke<FsRootsResponse>("fs_roots");
+  const response = await invokeFs<FsRootsResponse>("fs_roots", {});
   const home =
     response.roots.find((root) => root.kind === "home") ??
     response.roots.find((root) => root.id === "home");
@@ -236,7 +236,7 @@ async function findHomePath() {
 
 async function listSshDirectory(homePath: string) {
   try {
-    const response = await invoke<FsListResponse>("fs_list", {
+    const response = await invokeFs<FsListResponse>("fs_list", {
       workdir: homePath,
       path: SSH_DIR_PATH,
       depth: 1,

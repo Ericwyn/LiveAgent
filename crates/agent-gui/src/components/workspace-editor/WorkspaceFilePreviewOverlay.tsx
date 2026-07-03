@@ -1,9 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
 import { renderAsync } from "docx-preview";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { read, utils } from "xlsx";
 import { useLocale } from "../../i18n";
 import { cn } from "../../lib/shared/utils";
+import { invokeFs } from "../../lib/tools/fsBackend";
 import { type FileTypeIconComponent, getFileTypeIcon } from "../chat/fileTypeIcons";
 import {
   AlertTriangle,
@@ -407,7 +407,7 @@ export function WorkspaceFilePreviewOverlay(props: WorkspaceFilePreviewOverlayPr
         replacePreview(null);
       }
       try {
-        const response = await invoke<ReadWorkspacePreviewResponse>("fs_read_workspace_image", {
+        const response = await invokeFs<ReadWorkspacePreviewResponse>("fs_read_workspace_image", {
           workdir: request.workdir,
           path: request.path,
         });
@@ -486,7 +486,7 @@ export function WorkspaceFilePreviewOverlay(props: WorkspaceFilePreviewOverlayPr
     const path = activePath || activePreviewRequest.path;
     try {
       setError(null);
-      await invoke("fs_open_workspace_path", {
+      await invokeFs("fs_open_workspace_path", {
         workdir: activePreviewRequest.workdir,
         path,
         mode: "open",
