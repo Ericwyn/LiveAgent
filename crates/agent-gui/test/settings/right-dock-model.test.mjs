@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { describe } from "node:test";
 import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
@@ -94,7 +94,6 @@ test("normalizeRightDockProjectState migrates the full legacy tabs shape", () =>
         selectedPath: "src/x.ts",
         expandedPaths: ["", "src"],
         revision: 2,
-        stateVersion: 3,
       },
     },
   });
@@ -408,6 +407,181 @@ test("right dock merge accepts legacy-shaped incoming project state", () => {
     selectedPath: "web.ts",
     expandedPaths: ["", "src"],
     revision: 1,
-    stateVersion: 2,
+  });
+});
+
+
+describe("file tree model", () => {
+  const fileTreeModel = loader.loadModule("src/components/project-tools/file-tree/model.ts");
+
+  const dirNode = (path, children, extra = {}) => ({
+    path,
+    name: path.split("/").pop() || "root",
+    kind: "dir",
+    children,
+    loaded: true,
+    loading: false,
+    ...extra,
+  });
+  const fileNode = (path, extra = {}) => ({
+    path,
+    name: path.split("/").pop(),
+    kind: "file",
+    children: [],
+    loaded: false,
+    loading: false,
+    ...extra,
+  });
+
+  test("remapExpandedPathsForRename swaps only the leading path prefix", () => {
+    const remapped = fileTreeModel.remapExpandedPathsForRename(
+      ["", "src", "src/components", "src2", "lib/src", "app"],
+      "src",
+      "app",
+    );
+    // "src" -> "app" collides with the existing "app" entry and deduplicates;
+    // "src2" and "lib/src" only contain "src" as a substring and are kept.
+    assert.deepEqual(remapped, ["", "app", "app/components", "src2", "lib/src"]);
+  });
+
+  test("remapExpandedPathsForRename remaps the exact target and deep descendants", () => {
+    const remapped = fileTreeModel.remapExpandedPathsForRename(
+      ["", "a/b", "a/b/c/d"],
+      "a/b",
+      "a/renamed",
+    );
+    assert.deepEqual(remapped, ["", "a/renamed", "a/renamed/c/d"]);
+  });
+
+  test("flattenFileTreeRows renders only expanded subtrees and inline error rows", () => {
+    const nodes = {
+      "": dirNode("", ["src", "readme.md"], { name: "proj" }),
+      src: dirNode("src", ["src/deep", "src/main.ts"], { error: "boom" }),
+      "src/deep": dirNode("src/deep", ["src/deep/x.ts"]),
+      "src/deep/x.ts": fileNode("src/deep/x.ts"),
+      "src/main.ts": fileNode("src/main.ts"),
+      "readme.md": fileNode("readme.md"),
+    };
+    const rows = fileTreeModel.flattenFileTreeRows(nodes, new Set(["", "src"]));
+    assert.deepEqual(
+      rows.map((row) => `${row.type}:${row.path}@${row.depth}`),
+      [
+        "node:@0",
+        "node:src@1",
+        "error:src@1",
+        // "src/deep" is not expanded: its child stays hidden.
+        "node:src/deep@2",
+        "node:src/main.ts@2",
+        "node:readme.md@1",
+      ],
+    );
+    const collapsed = fileTreeModel.flattenFileTreeRows(nodes, new Set([""]));
+    assert.deepEqual(
+      collapsed.map((row) => `${row.type}:${row.path}`),
+      ["node:", "node:src", "error:src", "node:readme.md"],
+    );
+  });
+
+  test("applyFileTreeListResponse keeps the previous reference when nothing changed", () => {
+    const base = { "": dirNode("", [], { loaded: false }) };
+    const entries = [
+      { path: "src", kind: "dir" },
+      { path: "a.ts", kind: "file" },
+    ];
+    const first = fileTreeModel.applyFileTreeListResponse(base, "", "/w", entries, undefined);
+    assert.notEqual(first, base);
+    assert.deepEqual(first[""].children, ["src", "a.ts"]);
+    // Same listing again: zero-change refresh returns the same map reference
+    // (and therefore causes zero re-renders).
+    const second = fileTreeModel.applyFileTreeListResponse(first, "", "/w", entries, undefined);
+    assert.equal(second, first);
+    // A shrunk listing prunes the stale subtree.
+    const third = fileTreeModel.applyFileTreeListResponse(
+      first,
+      "",
+      "/w",
+      [{ path: "a.ts", kind: "file" }],
+      undefined,
+    );
+    assert.deepEqual(third[""].children, ["a.ts"]);
+    assert.equal(third.src, undefined);
+  });
+
+  test("invalidation reducer accumulates changed paths and escalates correctly", () => {
+    const { initialFileTreeInvalidationState, reduceFileTreeInvalidation, takeFileTreeInvalidation } =
+      fileTreeModel;
+    const event = (revision, changedPaths, extra = {}) => ({
+      workdir: "/w",
+      revision,
+      fs: true,
+      git: false,
+      changedPaths,
+      truncated: false,
+      ...extra,
+    });
+    let state = reduceFileTreeInvalidation(initialFileTreeInvalidationState, event(1, ["src/a.ts"]));
+    // Duplicate revisions are ignored.
+    state = reduceFileTreeInvalidation(state, event(1, ["src/a.ts"]));
+    state = reduceFileTreeInvalidation(state, event(2, ["/lib/b.ts/"]));
+    assert.deepEqual(state.changedPaths, ["src/a.ts", "lib/b.ts"]);
+    assert.equal(state.refreshAll, false);
+    // Truncated events force a refresh-all batch.
+    state = reduceFileTreeInvalidation(state, event(3, [], { truncated: true }));
+    assert.equal(state.refreshAll, true);
+    assert.deepEqual(state.changedPaths, []);
+    const { state: cleared, batch } = takeFileTreeInvalidation(state);
+    assert.deepEqual(batch, { refreshAll: true, changedPaths: [] });
+    assert.equal(cleared.dirty, false);
+    assert.equal(takeFileTreeInvalidation(cleared).batch, null);
+    // Reset payloads mark everything dirty again.
+    const reset = reduceFileTreeInvalidation(cleared, { kind: "reset" });
+    assert.deepEqual(reset, { revision: null, dirty: true, refreshAll: true, changedPaths: [] });
+  });
+
+  test("planFileTreeInvalidationRefresh maps changed paths to visible listings", () => {
+    const nodes = {
+      "": dirNode("", ["src", "docs"], { name: "proj" }),
+      src: dirNode("src", ["src/a.ts"]),
+      "src/a.ts": fileNode("src/a.ts"),
+      docs: dirNode("docs", [], { loaded: false }),
+    };
+    const expanded = new Set(["", "src"]);
+    // A changed file refreshes its (expanded + loaded) parent listing only.
+    assert.deepEqual(
+      fileTreeModel.planFileTreeInvalidationRefresh(
+        { refreshAll: false, changedPaths: ["src/a.ts"] },
+        nodes,
+        expanded,
+      ),
+      ["src"],
+    );
+    // Changes under a known-but-unloaded directory touch nothing visible.
+    assert.deepEqual(
+      fileTreeModel.planFileTreeInvalidationRefresh(
+        { refreshAll: false, changedPaths: ["docs/readme.md"] },
+        nodes,
+        expanded,
+      ),
+      [],
+    );
+    // Unknown parents mean our hierarchy picture is stale: refresh everything
+    // expanded and loaded.
+    assert.deepEqual(
+      fileTreeModel
+        .planFileTreeInvalidationRefresh(
+          { refreshAll: false, changedPaths: ["ghost/x.ts"] },
+          nodes,
+          expanded,
+        )
+        .sort(),
+      ["", "src"],
+    );
+    // refreshAll batches skip path mapping entirely.
+    assert.deepEqual(
+      fileTreeModel
+        .planFileTreeInvalidationRefresh({ refreshAll: true, changedPaths: [] }, nodes, expanded)
+        .sort(),
+      ["", "src"],
+    );
   });
 });

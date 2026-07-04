@@ -51,6 +51,7 @@ import {
   type ReasoningLevel,
 } from "../../../lib/settings";
 import { cn } from "../../../lib/shared/utils";
+import type { WorkspaceActivityClient } from "../../../lib/workspace-activity/types";
 
 const REASONING_I18N_KEYS: Record<ReasoningLevel, string> = {
   off: "settings.reasoning.off",
@@ -192,7 +193,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: {
   gitClient?: GitClient | null;
   gitWriteEnabled?: boolean;
   gitDisabledMessage?: string;
-  onGitChanged?: (workdir: string) => void;
+  workspaceActivityClient?: WorkspaceActivityClient | null;
   onSend: () => void;
   onStop: () => void;
   onComposerBusyChange: (isBusy: boolean) => void;
@@ -222,7 +223,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: {
     gitClient,
     gitWriteEnabled = true,
     gitDisabledMessage,
-    onGitChanged,
+    workspaceActivityClient,
     onSend,
     onStop,
     onComposerBusyChange,
@@ -813,10 +814,10 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: {
               <GitBranchSelector
                 workdir={workdir}
                 gitClient={gitClient}
+                workspaceActivityClient={workspaceActivityClient}
                 disabled={controlsDisabled}
                 canWrite={gitWriteEnabled}
                 disabledMessage={gitDisabledMessage}
-                onChanged={() => onGitChanged?.(workdir)}
               />
             </div>
 

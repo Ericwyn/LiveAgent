@@ -20,7 +20,7 @@ type XTermViewportProps = {
   isActive: boolean;
   initialSnapshot?: TerminalSnapshot;
   className?: string;
-  onError: (message: string | null) => void;
+  onError: (sessionId: string, message: string | null) => void;
   onInitialSnapshotConsumed?: (sessionId: string) => void;
 };
 
@@ -105,13 +105,11 @@ export function XTermViewport({
 }: XTermViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const resizeTimerRef = useRef<number | null>(null);
-  const clientRef = useRef(client);
   const sessionRef = useRef(session);
   const themeRef = useRef(theme);
   const onErrorRef = useRef(onError);
   const initialSnapshotRef = useRef(initialSnapshot);
   const onInitialSnapshotConsumedRef = useRef(onInitialSnapshotConsumed);
-  clientRef.current = client;
   sessionRef.current = session;
   themeRef.current = theme;
   onErrorRef.current = onError;
@@ -146,6 +144,7 @@ export function XTermViewport({
     let disposed = false;
     let snapshotLoaded = false;
     let loadingSnapshot = false;
+    let renderedOutput = false;
     let lastOutputOffset = 0;
     let streamHandle: TerminalStreamHandle | null = null;
     let inputPausedByStream = false;
@@ -181,6 +180,10 @@ export function XTermViewport({
     let lastTouchX = 0;
     let lastTouchY = 0;
     let touchScrollRemainder = 0;
+
+    const reportError = (message: string | null) => {
+      onErrorRef.current(sessionRef.current.id, message);
+    };
 
     const focusTerminal = () => {
       if (disposed || !sessionRef.current.running) return;
@@ -222,10 +225,10 @@ export function XTermViewport({
       applyStdinState();
       if (state.paused) {
         inputBackpressureMessageActive = true;
-        onErrorRef.current(terminalInputPausedMessage(state));
+        reportError(terminalInputPausedMessage(state));
       } else if (inputBackpressureMessageActive) {
         inputBackpressureMessageActive = false;
-        onErrorRef.current(null);
+        reportError(null);
       }
     };
 
@@ -320,12 +323,47 @@ export function XTermViewport({
       return encoder.encode(snapshot.output);
     };
 
+    const writeChunk = (chunk: TerminalStreamChunk) => {
+      const result = writeTerminalChunk(
+        term,
+        chunk,
+        (nextOffset) => {
+          lastOutputOffset = nextOffset;
+        },
+        lastOutputOffset,
+      );
+      if (result !== "skipped") {
+        renderedOutput = true;
+      }
+    };
+
     const applySnapshot = (snapshot: TerminalSnapshot) => {
       const bytes = snapshotBytes(snapshot);
-      if (bytes.byteLength > 0) {
-        term.write(bytes);
+      const startOffset = terminalSnapshotStartOffset(snapshot);
+      const endOffset = terminalSnapshotEndOffset(snapshot);
+      if (!renderedOutput) {
+        if (bytes.byteLength > 0) {
+          term.write(bytes);
+          renderedOutput = true;
+        }
+        lastOutputOffset = endOffset;
+      } else if (startOffset > lastOutputOffset || snapshot.truncated) {
+        // The snapshot no longer lines up with what is already on screen
+        // (output was dropped while detached, or the agent ring truncated):
+        // replay from scratch instead of appending duplicated/garbled bytes.
+        term.reset();
+        if (bytes.byteLength > 0) {
+          term.write(bytes);
+        }
+        lastOutputOffset = endOffset;
+      } else if (endOffset > lastOutputOffset) {
+        const alreadyWritten = lastOutputOffset - startOffset;
+        const pending = alreadyWritten > 0 ? bytes.subarray(alreadyWritten) : bytes;
+        if (pending.byteLength > 0) {
+          term.write(pending);
+        }
+        lastOutputOffset = endOffset;
       }
-      lastOutputOffset = terminalSnapshotEndOffset(snapshot);
       snapshotLoaded = true;
       loadingSnapshot = false;
       applyStdinState();
@@ -336,14 +374,7 @@ export function XTermViewport({
     const replayBufferedChunks = () => {
       const chunks = bufferedChunks.splice(0);
       for (const chunk of chunks) {
-        writeTerminalChunk(
-          term,
-          chunk,
-          (nextOffset) => {
-            lastOutputOffset = nextOffset;
-          },
-          lastOutputOffset,
-        );
+        writeChunk(chunk);
       }
     };
 
@@ -368,7 +399,7 @@ export function XTermViewport({
       if (disposed || loadingSnapshot) return;
       loadingSnapshot = true;
       const s = sessionRef.current;
-      void clientRef.current.stream
+      void client.stream
         .attach(s)
         .then((handle) => {
           if (disposed) {
@@ -378,23 +409,15 @@ export function XTermViewport({
           streamHandle = handle;
           clearSnapshotRetryTimer();
           snapshotRetryDelayMs = SNAPSHOT_ATTACH_RETRY_MIN_MS;
-          onErrorRef.current(null);
-          const unsubscribeOutput = handle.subscribeOutput((chunk) => {
+          reportError(null);
+          streamOutputUnsubscribe = handle.subscribeOutput((chunk) => {
             if (disposed || chunk.sessionId !== sessionRef.current.id) return;
             if (snapshotLoaded && !loadingSnapshot) {
-              writeTerminalChunk(
-                term,
-                chunk,
-                (nextOffset) => {
-                  lastOutputOffset = nextOffset;
-                },
-                lastOutputOffset,
-              );
+              writeChunk(chunk);
             } else {
               bufferedChunks.push(chunk);
             }
           });
-          streamOutputUnsubscribe = unsubscribeOutput;
           streamInputUnsubscribe = handle.subscribeInputState((state) => {
             if (disposed) return;
             applyInputState(state);
@@ -417,7 +440,7 @@ export function XTermViewport({
         .catch((error) => {
           loadingSnapshot = false;
           if (!disposed) {
-            onErrorRef.current(error instanceof Error ? error.message : String(error));
+            reportError(error instanceof Error ? error.message : String(error));
             snapshotLoaded = false;
             applyStdinState();
             scheduleSnapshotRetry();
@@ -427,7 +450,7 @@ export function XTermViewport({
 
     let streamOutputUnsubscribe: (() => void) | null = null;
     let streamInputUnsubscribe: (() => void) | null = null;
-    const unsubscribe = clientRef.current.subscribe((event) => {
+    const unsubscribe = client.subscribe((event) => {
       if (disposed || event.sessionId !== session.id) return;
       if (event.kind === "exit" || event.kind === "closed" || event.kind === "reconnecting") {
         term.options.disableStdin = true;
@@ -437,6 +460,15 @@ export function XTermViewport({
         window.setTimeout(fitAndResize, 0);
       }
     });
+
+    // Offline-first: paint the cached snapshot immediately so the terminal has
+    // content while attach is pending or retrying; a successful attach then
+    // trims by offset (or resets on gap/truncation). The snapshot is only
+    // consumed — and its owner notified — once attach succeeds.
+    const initial = initialSnapshotRef.current;
+    if (initial && initial.session.id === sessionRef.current.id) {
+      applySnapshot(initial);
+    }
 
     loadSnapshot();
 
@@ -462,8 +494,7 @@ export function XTermViewport({
       streamHandle?.dispose();
       term.dispose();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.id, session.projectPathKey]);
+  }, [client, session.id, session.projectPathKey]);
 
   return (
     <div
@@ -484,6 +515,17 @@ function terminalInputPausedMessage(state: TerminalStreamInputState) {
   return "终端连接较慢，已暂停输入以避免输入队列过大。";
 }
 
+function terminalSnapshotStartOffset(snapshot: TerminalSnapshot) {
+  if (
+    typeof snapshot.outputStartOffset === "number" &&
+    Number.isFinite(snapshot.outputStartOffset) &&
+    snapshot.outputStartOffset >= 0
+  ) {
+    return snapshot.outputStartOffset;
+  }
+  return 0;
+}
+
 function terminalSnapshotEndOffset(snapshot: TerminalSnapshot) {
   if (
     typeof snapshot.outputEndOffset === "number" &&
@@ -492,24 +534,20 @@ function terminalSnapshotEndOffset(snapshot: TerminalSnapshot) {
   ) {
     return snapshot.outputEndOffset;
   }
-  const startOffset =
-    typeof snapshot.outputStartOffset === "number" &&
-    Number.isFinite(snapshot.outputStartOffset) &&
-    snapshot.outputStartOffset >= 0
-      ? snapshot.outputStartOffset
-      : 0;
   return (
-    startOffset +
+    terminalSnapshotStartOffset(snapshot) +
     (snapshot.outputBytes?.byteLength ?? new TextEncoder().encode(snapshot.output).byteLength)
   );
 }
 
-function writeTerminalChunk(
-  term: XTerm,
+// Exported for tests: offset bookkeeping for live terminal chunks, including
+// the reconnect-gap reset path.
+export function writeTerminalChunk(
+  term: Pick<XTerm, "write" | "reset">,
   chunk: TerminalStreamChunk,
   setLastOutputOffset: (offset: number) => void,
   lastOutputOffset: number,
-): "written" | "skipped" {
+): "written" | "skipped" | "reset" {
   const data = chunk.bytes;
   if (data.byteLength === 0) return "skipped";
   const startOffset = chunk.startOffset;
@@ -522,7 +560,17 @@ function writeTerminalChunk(
     endOffset >= startOffset
   ) {
     if (endOffset <= lastOutputOffset) return "skipped";
-    const alreadyWritten = Math.max(0, lastOutputOffset - startOffset);
+    if (startOffset > lastOutputOffset) {
+      // A hole in the byte stream: the transport replayed a snapshot after a
+      // reconnect (the stream client injects the full buffered content as one
+      // chunk) or the agent ring dropped bytes. Appending would duplicate or
+      // garble the screen, so redraw from the authoritative chunk instead.
+      term.reset();
+      term.write(data);
+      setLastOutputOffset(endOffset);
+      return "reset";
+    }
+    const alreadyWritten = lastOutputOffset - startOffset;
     term.write(alreadyWritten > 0 ? data.subarray(alreadyWritten) : data);
     setLastOutputOffset(endOffset);
     return "written";

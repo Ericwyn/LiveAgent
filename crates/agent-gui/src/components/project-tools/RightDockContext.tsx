@@ -11,7 +11,7 @@ import type {
 } from "../../lib/settings";
 import type { TerminalClient, TerminalSession, TerminalSnapshot } from "../../lib/terminal/types";
 import type { WorkspaceActivityClient } from "../../lib/workspace-activity/types";
-import type { GitCommitContextPayload, GitFileContextPayload } from "./GitReviewPanel";
+import type { GitCommitContextPayload, GitFileContextPayload } from "./git-review";
 import type { LocalTunnelClient } from "./LocalTunnelPanel";
 
 export type RightDockToolClients = {

@@ -390,7 +390,7 @@ export function WorkspaceSshTerminalOverlay(props: WorkspaceSshTerminalOverlayPr
                     session={session}
                     theme={theme}
                     isActive={isActiveTerminal}
-                    onError={setError}
+                    onError={(_sessionId, message) => setError(message)}
                   />
                 )}
               </div>

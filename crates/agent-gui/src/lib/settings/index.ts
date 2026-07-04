@@ -161,13 +161,15 @@ export type RightDockFileTreeState = {
   query: string;
   selectedPath: string;
   expandedPaths: string[];
+  // Reveal nonce: bumped (via bumpRevision) when another surface asks the
+  // file tree to reveal selectedPath (expand ancestors + scroll into view).
+  // Content refreshes are driven by workspace-activity invalidation, and
+  // merge ordering is covered by the project-level stateVersion.
   revision: number;
-  stateVersion: number;
 };
 
 export type RightDockFileTreeStatePatch = Partial<RightDockFileTreeState> & {
   bumpRevision?: boolean;
-  bumpStateVersion?: boolean;
 };
 
 export type CustomSettings = {
@@ -1740,7 +1742,6 @@ export const DEFAULT_RIGHT_DOCK_FILE_TREE_STATE: RightDockFileTreeState = {
   selectedPath: "",
   expandedPaths: [""],
   revision: 0,
-  stateVersion: 0,
 };
 
 function normalizeRightDockFileTreeSearchQuery(query: unknown): string {
@@ -1766,7 +1767,6 @@ export function normalizeRightDockFileTreeState(input: unknown): RightDockFileTr
     selectedPath: normalizeRightDockFileTreePath(obj.selectedPath),
     expandedPaths: normalizeRightDockFileTreeExpandedPaths(obj.expandedPaths),
     revision: normalizeIntegerInRange(obj.revision, 0, Number.MAX_SAFE_INTEGER, 0),
-    stateVersion: normalizeIntegerInRange(obj.stateVersion, 0, Number.MAX_SAFE_INTEGER, 0),
   };
 }
 
@@ -2229,7 +2229,6 @@ function rightDockFileTreeStateEqual(
     left.query === right.query &&
     left.selectedPath === right.selectedPath &&
     left.revision === right.revision &&
-    left.stateVersion === right.stateVersion &&
     left.expandedPaths.length === right.expandedPaths.length &&
     left.expandedPaths.every((path, index) => path === right.expandedPaths[index])
   );
@@ -2417,11 +2416,6 @@ export function updateRightDockFileTreeState(
       : patch.revision !== undefined
         ? normalizeIntegerInRange(patch.revision, 0, Number.MAX_SAFE_INTEGER, 0)
         : current.revision,
-    stateVersion: patch.bumpStateVersion
-      ? current.stateVersion + 1
-      : patch.stateVersion !== undefined
-        ? normalizeIntegerInRange(patch.stateVersion, 0, Number.MAX_SAFE_INTEGER, 0)
-        : current.stateVersion,
   };
   if (rightDockFileTreeStateEqual(current, next)) return prev;
   return updateRightDockProjectState(prev, normalizedPathKey, (projectState) => {

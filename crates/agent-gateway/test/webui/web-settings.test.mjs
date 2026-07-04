@@ -109,7 +109,6 @@ test("web settings normalization canonicalizes project keyed maps with Windows p
           selectedPath: "src/main.ts",
           expandedPaths: ["", "src", "src/components"],
           revision: 2,
-          stateVersion: 0,
         },
       },
       gitReview: {
@@ -1088,7 +1087,6 @@ test("gateway settings sync keeps right dock width local and syncs project state
       selectedPath: "desktop.ts",
       expandedPaths: ["", "src"],
       revision: 1,
-      stateVersion: 3,
     },
   );
   assert.equal(synced.customSettings.rightDock.projects["/shared/project"].openVersion, 5);

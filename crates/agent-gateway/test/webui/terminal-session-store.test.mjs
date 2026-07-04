@@ -92,3 +92,112 @@ test("terminal project matching normalizes Windows-shaped project keys", () => {
     false,
   );
 });
+
+// --- XTermViewport chunk bookkeeping (gap / reset handling) ---
+// These cases exercise the viewport's writeTerminalChunk rather than the
+// session store above: the reconnect-gap "reset & replay" contract lives in
+// the viewport, and this is the terminal-focused suite that loads web modules.
+
+const viewportLoader = createWebModuleLoader({
+  mocks: {
+    "@xterm/xterm/css/xterm.css": {},
+    "@xterm/xterm": { Terminal: class Terminal {} },
+    "@xterm/addon-fit": { FitAddon: class FitAddon {} },
+  },
+});
+const { writeTerminalChunk } = viewportLoader.loadModule(
+  "@/components/project-tools/XTermViewport.tsx",
+);
+
+function fakeTerm() {
+  const calls = [];
+  return {
+    calls,
+    write(data) {
+      calls.push(["write", Uint8Array.from(data)]);
+    },
+    reset() {
+      calls.push(["reset"]);
+    },
+  };
+}
+
+function chunk(bytes, startOffset, endOffset) {
+  return {
+    sessionId: "terminal-1",
+    projectPathKey: "/workspace/project",
+    bytes: Uint8Array.from(bytes),
+    startOffset,
+    endOffset,
+  };
+}
+
+test("terminal chunk overlapping the rendered offset is trimmed before writing", () => {
+  const term = fakeTerm();
+  let offset = 10;
+  const result = writeTerminalChunk(
+    term,
+    chunk([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 5, 15),
+    (next) => {
+      offset = next;
+    },
+    offset,
+  );
+  assert.equal(result, "written");
+  assert.equal(offset, 15);
+  assert.deepEqual(term.calls, [["write", Uint8Array.from([6, 7, 8, 9, 10])]]);
+});
+
+test("terminal chunk entirely behind the rendered offset is skipped", () => {
+  const term = fakeTerm();
+  let offset = 20;
+  const result = writeTerminalChunk(
+    term,
+    chunk([1, 2, 3], 10, 13),
+    (next) => {
+      offset = next;
+    },
+    offset,
+  );
+  assert.equal(result, "skipped");
+  assert.equal(offset, 20);
+  assert.deepEqual(term.calls, []);
+});
+
+test("terminal chunk after a gap resets the terminal and replays the chunk", () => {
+  const term = fakeTerm();
+  let offset = 10;
+  const result = writeTerminalChunk(
+    term,
+    chunk([7, 8, 9], 20, 23),
+    (next) => {
+      offset = next;
+    },
+    offset,
+  );
+  assert.equal(result, "reset");
+  assert.equal(offset, 23);
+  assert.deepEqual(term.calls, [["reset"], ["write", Uint8Array.from([7, 8, 9])]]);
+});
+
+test("terminal chunk without offsets appends and advances by byte length", () => {
+  const term = fakeTerm();
+  let offset = 4;
+  const result = writeTerminalChunk(
+    term,
+    {
+      sessionId: "terminal-1",
+      projectPathKey: "/workspace/project",
+      bytes: Uint8Array.from([1, 2]),
+      startOffset: undefined,
+      endOffset: undefined,
+    },
+    (next) => {
+      offset = next;
+    },
+    offset,
+  );
+  assert.equal(result, "written");
+  assert.equal(offset, 6);
+  assert.deepEqual(term.calls, [["write", Uint8Array.from([1, 2])]]);
+});

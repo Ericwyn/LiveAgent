@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { FolderTree, GitBranch, Globe, Key } from "../icons";
-import { GitReviewPanel } from "./GitReviewPanel";
+import { FileTreePanel } from "./file-tree";
+import { GitReviewPanel } from "./git-review";
 import { LocalTunnelPanel } from "./LocalTunnelPanel";
-import { ProjectFileTreePanel } from "./ProjectFileTreePanel";
 import { type RightDockToolContextValue, useRightDockToolContext } from "./RightDockContext";
 import type { RightDockSingletonTabKind } from "./rightDockModel";
 import { SshTunnelPanel } from "./SshTunnelPanel";
@@ -31,41 +31,18 @@ export type RightDockToolDefinition = {
 // Each tool body is a component of its own so it can read the dock context via
 // useRightDockToolContext; definition.render only instantiates it.
 function FileTreeTool(props: RightDockToolRenderInput) {
-  const { active } = props;
-  const context = useRightDockToolContext();
-  const { fileTree } = context;
-  return (
-    <ProjectFileTreePanel
-      key={context.projectPathKey}
-      active={active}
-      projectPathKey={context.projectPathKey}
-      cwd={context.cwd}
-      initialized={fileTree.initialized}
-      syncState={fileTree.state}
-      onInitializedChange={fileTree.onInitializedChange}
-      onSyncStateChange={fileTree.onStateChange}
-      onInsertFileMention={fileTree.onInsertFileMention}
-      onOpenFile={fileTree.onOpenFile}
-    />
-  );
+  // FileTreePanel reads the dock context itself and keeps per-project state
+  // in an LRU bucket, so it deliberately has no projectPathKey remount key:
+  // staying mounted across project switches is what makes the bucket useful.
+  return <FileTreePanel active={props.active} />;
 }
 
 function GitReviewTool(props: RightDockToolRenderInput) {
   const { active } = props;
   const context = useRightDockToolContext();
-  return (
-    <GitReviewPanel
-      key={`${context.projectPathKey}:git-review`}
-      active={active}
-      cwd={context.cwd}
-      gitClient={context.clients.git}
-      canWrite={context.capabilities.gitWriteEnabled}
-      disabledMessage={context.capabilities.gitDisabledMessage}
-      onRevealInFileTree={context.fileTree.onRevealInFileTree}
-      onInsertCommitMention={context.git.onInsertCommitMention}
-      onInsertGitFileMention={context.git.onInsertGitFileMention}
-    />
-  );
+  // The panel reads everything else (clients, capabilities, git callbacks)
+  // from the right-dock tool context itself.
+  return <GitReviewPanel key={`${context.projectPathKey}:git-review`} active={active} />;
 }
 
 function TunnelTool(props: RightDockToolRenderInput) {

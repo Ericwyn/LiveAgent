@@ -4,6 +4,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -22,7 +23,7 @@ import type { TerminalClient, TerminalSession } from "../../lib/terminal/types";
 import type { WorkspaceActivityClient } from "../../lib/workspace-activity/types";
 import { X } from "../icons";
 import { Button } from "../ui/button";
-import type { GitCommitContextPayload, GitFileContextPayload } from "./GitReviewPanel";
+import type { GitCommitContextPayload, GitFileContextPayload } from "./git-review";
 import type { LocalTunnelClient } from "./LocalTunnelPanel";
 import { RightDockContent } from "./RightDockContent";
 import { RightDockToolContext, type RightDockToolContextValue } from "./RightDockContext";
@@ -390,7 +391,6 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
     reconcileSshSessions,
     rememberTerminalSnapshot,
     sessionsLoaded,
-    setError,
     shellOptions,
     sshSessions,
   } = useRightDockSessions({
@@ -405,6 +405,47 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
     projectState,
     terminalReady,
   });
+  // Terminal stream errors are bucketed per session so one session's attach
+  // failure or input backpressure never masks (or clears) another's; the
+  // hook-level `error` stays reserved for list/create failures.
+  const [terminalErrors, setTerminalErrors] = useState<ReadonlyMap<string, string>>(new Map());
+
+  const handleTerminalError = useCallback((sessionId: string, message: string | null) => {
+    setTerminalErrors((current) => {
+      const existing = current.get(sessionId);
+      if (message === null) {
+        if (existing === undefined) return current;
+        const next = new Map(current);
+        next.delete(sessionId);
+        return next;
+      }
+      if (existing === message) return current;
+      const next = new Map(current);
+      next.set(sessionId, message);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    // Closed/forgotten sessions leave the live list; drop their error buckets.
+    setTerminalErrors((current) => {
+      if (current.size === 0) return current;
+      const liveIds = new Set(localSessions.map((session) => session.id));
+      let changed = false;
+      const next = new Map<string, string>();
+      for (const [sessionId, message] of current) {
+        if (liveIds.has(sessionId)) {
+          next.set(sessionId, message);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [localSessions]);
+
+  const activeTerminalError = activeSession ? (terminalErrors.get(activeSession.id) ?? null) : null;
+
   const tunnelAvailable = Boolean(tunnelClient);
   const {
     activateTab,
@@ -494,7 +535,6 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
         selectedPath,
         expandedPaths,
         bumpRevision: true,
-        bumpStateVersion: true,
       });
     },
     [fileTreeState.expandedPaths, onFileTreeStateChange, projectReady, startToolTab],
@@ -751,10 +791,10 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
                   localSessions={localSessions}
                   activeSession={activeSession}
                   initialTerminalSnapshotsRef={initialTerminalSnapshotsRef}
-                  error={error}
+                  error={activeTerminalError ?? error}
                   creating={creating}
                   loading={loading}
-                  onTerminalError={setError}
+                  onTerminalError={handleTerminalError}
                   onInitialTerminalSnapshotConsumed={handleInitialTerminalSnapshotConsumed}
                   onCreateTerminal={handleCreate}
                 />

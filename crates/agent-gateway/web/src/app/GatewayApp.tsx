@@ -19,7 +19,7 @@ import { ChevronDown, PanelRightClose, PanelRightOpen, Terminal } from "@/compon
 import type {
   GitCommitContextPayload,
   GitFileContextPayload,
-} from "@/components/project-tools/GitReviewPanel";
+} from "@/components/project-tools/git-review";
 import { RightDockPanel } from "@/components/project-tools/RightDockPanel";
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -4501,13 +4501,7 @@ export default function GatewayApp() {
                     gitClient={gitClient}
                     gitWriteEnabled={settings.remote.enableWebGit}
                     gitDisabledMessage={gitDisabledMessage}
-                    onGitChanged={(gitWorkdir) =>
-                      window.dispatchEvent(
-                        new CustomEvent("liveagent:git-changed", {
-                          detail: { workdir: gitWorkdir },
-                        }),
-                      )
-                    }
+                    workspaceActivityClient={workspaceActivityClient}
                     onSend={() => {
                       if (
                         submitInFlightRef.current ||

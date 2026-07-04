@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useLocale } from "../../i18n";
 import { workspaceProjectPathKey } from "../../lib/settings";
 import { cn } from "../../lib/shared/utils";
@@ -38,8 +38,8 @@ import { Label } from "../ui/label";
 export type { LocalTunnelClient } from "../../lib/tunnels/constants";
 
 type LocalTunnelPanelProps = {
-  // Visibility contract from the right-dock registry (consumed in a later
-  // phase; declared now so the wiring is stable).
+  // Visibility contract from the right-dock registry: gates per-row TTL
+  // countdown ticks while the panel is kept alive behind another tab.
   active?: boolean;
   client: LocalTunnelClient | null;
   enabled: boolean;
@@ -219,7 +219,417 @@ function projectNameFromPathKey(pathKey: string) {
   return segments[segments.length - 1] ?? "";
 }
 
+function pruneByIds<T>(
+  current: Record<string, T>,
+  liveIds: ReadonlySet<string>,
+): Record<string, T> {
+  const next = Object.fromEntries(
+    Object.entries(current).filter(([id]) => liveIds.has(id)),
+  ) as Record<string, T>;
+  return Object.keys(next).length === Object.keys(current).length ? current : next;
+}
+
+// Leaf that owns the 1s countdown tick so only the remaining-time text
+// re-renders while the clock runs; it is only mounted for finite-TTL rows and
+// pauses whenever the panel is not the active tab.
+const TunnelRemainingTime = memo(function TunnelRemainingTime({
+  active,
+  expiresAt,
+}: {
+  active: boolean;
+  expiresAt: number;
+}) {
+  const { t } = useLocale();
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    if (!active) return;
+    setNowSeconds(Math.floor(Date.now() / 1000));
+    const timer = window.setInterval(() => {
+      setNowSeconds(Math.floor(Date.now() / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  const remaining = expiresAt - nowSeconds;
+  if (remaining <= 0) {
+    return <>{t("projectTools.tunnelExpired")}</>;
+  }
+  return <>{t("projectTools.tunnelExpiresIn").replace("{time}", formatRemaining(remaining))}</>;
+});
+
+type TunnelRowProps = {
+  active: boolean;
+  tunnel: TunnelStatus;
+  scope: TunnelScope;
+  offline: boolean;
+  isEditing: boolean;
+  editTargetUrl: string;
+  editName: string;
+  editTtlSeconds: EditTtlValue;
+  editTargetValidationKey: string | null;
+  pendingAction?: TunnelRowAction;
+  rowError?: string;
+  copied: boolean;
+  enabled: boolean;
+  mutationsEnabled: boolean;
+  disabledMessage?: string;
+  publicUrl: string;
+  healthTitle: (health: TunnelHealth | null) => string;
+  onEditTargetUrlChange: (value: string) => void;
+  onEditNameChange: (value: string) => void;
+  onEditTtlSecondsChange: (value: EditTtlValue) => void;
+  onUpdate: (tunnel: TunnelStatus) => void;
+  onCancelEdit: () => void;
+  onBeginEdit: (tunnel: TunnelStatus) => void;
+  onCopyLink: (tunnel: TunnelStatus) => void;
+  onOpenLink: (tunnel: TunnelStatus) => void;
+  onCheck: (id: string) => void;
+  onClose: (id: string) => void;
+};
+
+const TunnelRow = memo(function TunnelRow(props: TunnelRowProps) {
+  const {
+    active,
+    tunnel,
+    scope,
+    offline,
+    isEditing,
+    editTargetUrl,
+    editName,
+    editTtlSeconds,
+    editTargetValidationKey,
+    pendingAction,
+    rowError,
+    copied,
+    enabled,
+    mutationsEnabled,
+    disabledMessage,
+    publicUrl,
+    healthTitle,
+    onEditTargetUrlChange,
+    onEditNameChange,
+    onEditTtlSecondsChange,
+    onUpdate,
+    onCancelEdit,
+    onBeginEdit,
+    onCopyLink,
+    onOpenLink,
+    onCheck,
+    onClose,
+  } = props;
+  const { t } = useLocale();
+  const hasExpiry = tunnel.expiresAt > 0;
+  // The 1s tick lives in TunnelRemainingTime; the row only needs a render-time
+  // notion of "expired" (snapshot broadcasts re-render rows soon after expiry).
+  const expired = hasExpiry && tunnel.expiresAt <= Math.floor(Date.now() / 1000);
+  const updating = pendingAction === "save";
+  const localHealth = tunnel.local;
+  const localStatus: HealthDisplayStatus = localHealth?.status ?? "unknown";
+  const tunnelProjectPathKey = normalizeProjectPathKey(tunnel.projectPathKey);
+  const handleEditKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      onUpdate(tunnel);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      onCancelEdit();
+    }
+  };
+  return (
+    <div className="min-w-0 overflow-hidden rounded-xl border border-border/60 bg-background/70 shadow-[0_1px_2px_hsl(0_0%_0%_/_0.04)] backdrop-blur-xl transition-shadow duration-200 hover:shadow-[0_3px_10px_hsl(0_0%_0%_/_0.07)]">
+      <div className="flex min-w-0 items-center gap-2 px-3 pt-2.5">
+        <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+          {displayTunnelName(tunnel)}
+        </div>
+        <span
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+            offline
+              ? "border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+              : expired
+                ? "border-border/60 bg-muted/70 text-muted-foreground"
+                : "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+          )}
+        >
+          <span
+            className={cn(
+              "h-1.5 w-1.5 rounded-full",
+              offline
+                ? "bg-amber-500"
+                : expired
+                  ? "bg-muted-foreground/50"
+                  : "animate-pulse bg-emerald-500 motion-reduce:animate-none",
+            )}
+          />
+          {t(
+            offline
+              ? "projectTools.tunnelStatusOffline"
+              : expired
+                ? "projectTools.tunnelStatusExpired"
+                : "projectTools.tunnelStatusActive",
+          )}
+        </span>
+      </div>
+
+      {isEditing ? (
+        <>
+          <div className="grid min-w-0 gap-2.5 px-3 pb-1 pt-2">
+            <div className="grid gap-1.5">
+              <Label
+                htmlFor={`tunnel-edit-target-${tunnel.id}`}
+                className="text-xs text-muted-foreground"
+              >
+                {t("projectTools.tunnelTargetUrl")}
+              </Label>
+              <Input
+                id={`tunnel-edit-target-${tunnel.id}`}
+                value={editTargetUrl}
+                onChange={(event) => onEditTargetUrlChange(event.target.value)}
+                onKeyDown={handleEditKeyDown}
+                disabled={!mutationsEnabled || updating}
+                inputMode="url"
+                autoComplete="off"
+                spellCheck={false}
+                className={cn(TUNNEL_INPUT_CLASS, "font-mono")}
+              />
+              {editTargetValidationKey ? (
+                <div className="flex items-start gap-1 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
+                  <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                  <span className="min-w-0">{t(editTargetValidationKey)}</span>
+                </div>
+              ) : null}
+            </div>
+            <div className="grid gap-1.5">
+              <Label
+                htmlFor={`tunnel-edit-name-${tunnel.id}`}
+                className="text-xs text-muted-foreground"
+              >
+                {t("projectTools.tunnelName")}
+              </Label>
+              <Input
+                id={`tunnel-edit-name-${tunnel.id}`}
+                value={editName}
+                onChange={(event) => onEditNameChange(event.target.value)}
+                onKeyDown={handleEditKeyDown}
+                placeholder={t("projectTools.tunnelNamePlaceholder")}
+                disabled={!mutationsEnabled || updating}
+                autoComplete="off"
+                className={TUNNEL_INPUT_CLASS}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs text-muted-foreground">{t("projectTools.tunnelTtl")}</Label>
+              <button
+                type="button"
+                aria-pressed={editTtlSeconds === "keep"}
+                onClick={() => onEditTtlSecondsChange("keep")}
+                disabled={!mutationsEnabled || updating}
+                className={cn(
+                  "flex h-7 min-w-0 items-center justify-center truncate rounded-lg bg-muted/70 px-2 text-xs text-muted-foreground transition-all duration-200 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+                  editTtlSeconds === "keep" &&
+                    "bg-background font-medium text-foreground shadow-sm ring-1 ring-border/60",
+                )}
+              >
+                {t("projectTools.tunnelKeepCurrentTtl")}
+              </button>
+              <TtlSegmented
+                value={editTtlSeconds === "keep" ? null : editTtlSeconds}
+                onChange={onEditTtlSecondsChange}
+                disabled={!mutationsEnabled || updating}
+              />
+            </div>
+          </div>
+          <div className="mt-1.5 flex items-center justify-end gap-1.5 border-t border-border/40 px-3 py-1.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 rounded-lg px-2.5 text-xs text-muted-foreground hover:text-foreground"
+              disabled={updating}
+              onClick={onCancelEdit}
+              title={t("projectTools.tunnelCancelEdit")}
+            >
+              <X className="h-3.5 w-3.5" />
+              {t("settings.cancel")}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 gap-1 rounded-lg px-2.5 text-xs"
+              disabled={!mutationsEnabled || updating || Boolean(editTargetValidationKey)}
+              onClick={() => onUpdate(tunnel)}
+              title={updating ? t("projectTools.tunnelUpdating") : t("projectTools.tunnelSave")}
+            >
+              {updating ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Check className="h-3.5 w-3.5" />
+              )}
+              {t("settings.save")}
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={() => onCopyLink(tunnel)}
+            disabled={!publicUrl}
+            title={copied ? t("projectTools.tunnelCopied") : t("projectTools.tunnelCopyLink")}
+            aria-label={copied ? t("projectTools.tunnelCopied") : t("projectTools.tunnelCopyLink")}
+            className="mx-3 mt-2 flex w-[calc(100%-1.5rem)] min-w-0 items-center gap-1.5 rounded-lg border border-border/50 bg-muted/40 px-2 py-1.5 text-left transition-colors duration-150 hover:border-border hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+          >
+            <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground/85">
+              {publicUrl}
+            </span>
+            {copied ? (
+              <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            ) : (
+              <Copy className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
+            )}
+          </button>
+          <div
+            className="mt-1.5 flex min-w-0 items-center gap-1 px-3 text-[11px] text-muted-foreground"
+            title={tunnel.targetUrl}
+          >
+            <Link2 className="h-3 w-3 shrink-0" />
+            <span className="shrink-0">{t("projectTools.tunnelTarget")}</span>
+            <span className="min-w-0 truncate font-mono">{tunnel.targetUrl}</span>
+          </div>
+          <div className="mx-3 mt-2 flex min-w-0 items-center gap-1">
+            <div
+              title={`${t("projectTools.tunnelServiceLabel")} · ${healthTitle(localHealth)}`}
+              className={cn(
+                "flex h-6 min-w-0 items-center gap-1 rounded-md border px-1.5 text-[10px] font-medium",
+                localStatus === "ok"
+                  ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                  : localStatus === "failed"
+                    ? "border-destructive/20 bg-destructive/10 text-destructive"
+                    : "border-border/60 bg-muted/50 text-muted-foreground",
+              )}
+            >
+              <span
+                className={cn(
+                  "h-1.5 w-1.5 shrink-0 rounded-full",
+                  localStatus === "ok"
+                    ? "bg-emerald-500"
+                    : localStatus === "failed"
+                      ? "bg-destructive"
+                      : "bg-muted-foreground/45",
+                )}
+              />
+              <span className="truncate">{t("projectTools.tunnelServiceLabel")}</span>
+              {localStatus === "ok" && localHealth && localHealth.httpStatus > 0 ? (
+                <span className="shrink-0 tabular-nums">HTTP {localHealth.httpStatus}</span>
+              ) : (
+                <span className="truncate">{t(healthStatusLabelKey(localStatus))}</span>
+              )}
+            </div>
+          </div>
+          {rowError ? (
+            <div className="mx-3 mt-2 rounded-lg border border-destructive/25 bg-destructive/10 px-2 py-1.5 text-[11px] leading-relaxed text-destructive">
+              {rowError}
+            </div>
+          ) : null}
+          <div className="mt-2 flex items-center justify-between gap-2 border-t border-border/40 py-1 pl-3 pr-1.5">
+            <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+              <span
+                className="inline-flex min-w-0 items-center gap-1"
+                title={hasExpiry ? formatDateTime(tunnel.expiresAt) : undefined}
+              >
+                <Clock3 className="h-3 w-3 shrink-0" />
+                <span className="min-w-0 truncate tabular-nums">
+                  {!hasExpiry ? (
+                    t("projectTools.tunnelTtlInfinite")
+                  ) : (
+                    <TunnelRemainingTime active={active} expiresAt={tunnel.expiresAt} />
+                  )}
+                </span>
+              </span>
+              {scope === "global" ? (
+                tunnelProjectPathKey ? (
+                  <span
+                    title={tunnelProjectPathKey}
+                    className="min-w-0 max-w-[120px] truncate rounded-full bg-muted/80 px-1.5 py-px text-[10px]"
+                  >
+                    {projectNameFromPathKey(tunnelProjectPathKey) ||
+                      t("projectTools.tunnelScopeProjectBadge")}
+                  </span>
+                ) : (
+                  <span className="shrink-0 rounded-full bg-muted/80 px-1.5 py-px text-[10px]">
+                    {t("projectTools.tunnelScopeGlobalBadge")}
+                  </span>
+                )
+              ) : null}
+            </div>
+            <div className="flex shrink-0 items-center gap-0.5">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-lg text-muted-foreground hover:text-foreground"
+                disabled={!mutationsEnabled || expired || Boolean(pendingAction)}
+                onClick={() => onCheck(tunnel.id)}
+                title={!enabled ? disabledMessage : t("projectTools.tunnelCheckAction")}
+                aria-label={t("projectTools.tunnelCheckAction")}
+              >
+                {pendingAction === "check" ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-lg text-muted-foreground hover:text-foreground"
+                disabled={!mutationsEnabled || expired}
+                onClick={() => onBeginEdit(tunnel)}
+                title={!enabled ? disabledMessage : t("projectTools.tunnelEdit")}
+                aria-label={t("projectTools.tunnelEdit")}
+              >
+                <Edit3 className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-lg text-muted-foreground hover:text-foreground"
+                disabled={!publicUrl || expired}
+                onClick={() => onOpenLink(tunnel)}
+                title={t("projectTools.tunnelOpenLink")}
+                aria-label={t("projectTools.tunnelOpenLink")}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                disabled={!mutationsEnabled || Boolean(pendingAction)}
+                onClick={() => onClose(tunnel.id)}
+                title={!enabled ? disabledMessage : t("projectTools.tunnelClose")}
+                aria-label={t("projectTools.tunnelClose")}
+              >
+                {pendingAction === "close" ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="h-3.5 w-3.5" />
+                )}
+              </Button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+});
+
 export function LocalTunnelPanel({
+  active = false,
   client,
   enabled,
   disabledMessage,
@@ -241,6 +651,9 @@ export function LocalTunnelPanel({
   const [createOpen, setCreateOpen] = useState(true);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  // Errors scoped to the tunnel list ("check all" failures, an edited tunnel
+  // vanishing) render near the list instead of polluting the create banner.
+  const [listError, setListError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState("");
   const [editTargetUrl, setEditTargetUrl] = useState("");
   const [editName, setEditName] = useState("");
@@ -250,7 +663,6 @@ export function LocalTunnelPanel({
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [checkingAll, setCheckingAll] = useState(false);
   const [copiedId, setCopiedId] = useState("");
-  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000));
   const targetValidationKey = useMemo(() => validateLocalHttpTarget(targetUrl), [targetUrl]);
   const editTargetValidationKey = useMemo(
     () => (editingId ? validateLocalHttpTarget(editTargetUrl) : null),
@@ -258,6 +670,9 @@ export function LocalTunnelPanel({
   );
 
   useEffect(() => {
+    // A replaced client (e.g. a new gateway session) must not keep showing the
+    // previous client's snapshot; clear before the new subscription seeds one.
+    setSnapshot(null);
     if (!client) return;
     return client.subscribeTunnelState((next) => {
       setSnapshot((current) => (current && next.revision <= current.revision ? current : next));
@@ -272,16 +687,29 @@ export function LocalTunnelPanel({
   }, [normalizedProjectPathKey, scope]);
 
   const tunnels = useMemo(() => snapshot?.tunnels ?? [], [snapshot]);
-  const hasFiniteExpiry = useMemo(() => tunnels.some((tunnel) => tunnel.expiresAt > 0), [tunnels]);
+
+  const cancelEdit = useCallback(() => {
+    setEditingId("");
+    setEditTargetUrl("");
+    setEditName("");
+    setEditTtlSeconds("keep");
+  }, []);
 
   useEffect(() => {
-    if (!hasFiniteExpiry) return;
-    setNowSeconds(Math.floor(Date.now() / 1000));
-    const timer = window.setInterval(() => {
-      setNowSeconds(Math.floor(Date.now() / 1000));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [hasFiniteExpiry]);
+    // Snapshot updates can remove tunnels that still have row-scoped UI state;
+    // drop the orphans so stale spinners/errors don't reattach to reused ids.
+    if (!snapshot) return;
+    const liveIds = new Set(tunnels.map((tunnel) => tunnel.id));
+    setPendingActions((current) => pruneByIds(current, liveIds));
+    setRowErrors((current) => pruneByIds(current, liveIds));
+  }, [snapshot, tunnels]);
+
+  useEffect(() => {
+    if (!snapshot || !editingId) return;
+    if (tunnels.some((tunnel) => tunnel.id === editingId)) return;
+    cancelEdit();
+    setListError(t("projectTools.tunnelEditingClosed"));
+  }, [cancelEdit, editingId, snapshot, t, tunnels]);
 
   useEffect(() => {
     if (!copiedId) return;
@@ -359,13 +787,6 @@ export function LocalTunnelPanel({
     });
   }, []);
 
-  const cancelEdit = useCallback(() => {
-    setEditingId("");
-    setEditTargetUrl("");
-    setEditName("");
-    setEditTtlSeconds("keep");
-  }, []);
-
   const updateTunnel = useCallback(
     (tunnel: TunnelStatus) => {
       const validationKey = validateLocalHttpTarget(editTargetUrl);
@@ -436,10 +857,10 @@ export function LocalTunnelPanel({
   const checkAllTunnels = useCallback(() => {
     if (!client || !mutationsEnabled || checkingAll) return;
     setCheckingAll(true);
-    setCreateError(null);
+    setListError(null);
     void client
       .checkTunnel()
-      .catch((err) => setCreateError(asErrorMessage(err)))
+      .catch((err) => setListError(asErrorMessage(err)))
       .finally(() => setCheckingAll(false));
   }, [checkingAll, client, mutationsEnabled]);
 
@@ -511,6 +932,7 @@ export function LocalTunnelPanel({
   );
   const loading = Boolean(client) && snapshot === null;
   const agentOnline = snapshot?.agentOnline === true;
+  const offline = snapshot !== null && !agentOnline;
   const linkStatus: HealthDisplayStatus = snapshot ? (agentOnline ? "ok" : "failed") : "unknown";
   const relayStatus: HealthDisplayStatus = snapshot?.relay?.status ?? "unknown";
   const canCreate =
@@ -773,6 +1195,11 @@ export function LocalTunnelPanel({
               </span>
             ) : null}
           </div>
+          {listError ? (
+            <div className="mb-2 rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-destructive">
+              {listError}
+            </div>
+          ) : null}
           {loading && sortedTunnels.length === 0 ? (
             <div className="grid gap-2">
               <span className="sr-only">{t("projectTools.tunnelLoading")}</span>
@@ -800,346 +1227,38 @@ export function LocalTunnelPanel({
           ) : (
             <div className="grid gap-2">
               {sortedTunnels.map((tunnel) => {
-                const hasExpiry = tunnel.expiresAt > 0;
-                const remaining = hasExpiry ? tunnel.expiresAt - nowSeconds : 0;
-                const expired = hasExpiry && remaining <= 0;
-                const offline = snapshot !== null && !agentOnline;
                 const isEditing = editingId === tunnel.id;
-                const pendingAction = pendingActions[tunnel.id];
-                const updating = pendingAction === "save";
-                const rowError = rowErrors[tunnel.id];
-                const publicUrl = publicUrlFor(tunnel);
-                const localHealth = tunnel.local;
-                const localStatus: HealthDisplayStatus = localHealth?.status ?? "unknown";
-                const tunnelProjectPathKey = normalizeProjectPathKey(tunnel.projectPathKey);
-                const handleEditKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-                  if (event.nativeEvent.isComposing) return;
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    updateTunnel(tunnel);
-                  } else if (event.key === "Escape") {
-                    event.preventDefault();
-                    cancelEdit();
-                  }
-                };
                 return (
-                  <div
+                  <TunnelRow
                     key={tunnel.id}
-                    className="min-w-0 overflow-hidden rounded-xl border border-border/60 bg-background/70 shadow-[0_1px_2px_hsl(0_0%_0%_/_0.04)] backdrop-blur-xl transition-shadow duration-200 hover:shadow-[0_3px_10px_hsl(0_0%_0%_/_0.07)]"
-                  >
-                    <div className="flex min-w-0 items-center gap-2 px-3 pt-2.5">
-                      <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-                        {displayTunnelName(tunnel)}
-                      </div>
-                      <span
-                        className={cn(
-                          "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium",
-                          offline
-                            ? "border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400"
-                            : expired
-                              ? "border-border/60 bg-muted/70 text-muted-foreground"
-                              : "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-                        )}
-                      >
-                        <span
-                          className={cn(
-                            "h-1.5 w-1.5 rounded-full",
-                            offline
-                              ? "bg-amber-500"
-                              : expired
-                                ? "bg-muted-foreground/50"
-                                : "animate-pulse bg-emerald-500 motion-reduce:animate-none",
-                          )}
-                        />
-                        {t(
-                          offline
-                            ? "projectTools.tunnelStatusOffline"
-                            : expired
-                              ? "projectTools.tunnelStatusExpired"
-                              : "projectTools.tunnelStatusActive",
-                        )}
-                      </span>
-                    </div>
-
-                    {isEditing ? (
-                      <>
-                        <div className="grid min-w-0 gap-2.5 px-3 pb-1 pt-2">
-                          <div className="grid gap-1.5">
-                            <Label
-                              htmlFor={`tunnel-edit-target-${tunnel.id}`}
-                              className="text-xs text-muted-foreground"
-                            >
-                              {t("projectTools.tunnelTargetUrl")}
-                            </Label>
-                            <Input
-                              id={`tunnel-edit-target-${tunnel.id}`}
-                              value={editTargetUrl}
-                              onChange={(event) => setEditTargetUrl(event.target.value)}
-                              onKeyDown={handleEditKeyDown}
-                              disabled={!mutationsEnabled || updating}
-                              inputMode="url"
-                              autoComplete="off"
-                              spellCheck={false}
-                              className={cn(TUNNEL_INPUT_CLASS, "font-mono")}
-                            />
-                            {editTargetValidationKey ? (
-                              <div className="flex items-start gap-1 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
-                                <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-                                <span className="min-w-0">{t(editTargetValidationKey)}</span>
-                              </div>
-                            ) : null}
-                          </div>
-                          <div className="grid gap-1.5">
-                            <Label
-                              htmlFor={`tunnel-edit-name-${tunnel.id}`}
-                              className="text-xs text-muted-foreground"
-                            >
-                              {t("projectTools.tunnelName")}
-                            </Label>
-                            <Input
-                              id={`tunnel-edit-name-${tunnel.id}`}
-                              value={editName}
-                              onChange={(event) => setEditName(event.target.value)}
-                              onKeyDown={handleEditKeyDown}
-                              placeholder={t("projectTools.tunnelNamePlaceholder")}
-                              disabled={!mutationsEnabled || updating}
-                              autoComplete="off"
-                              className={TUNNEL_INPUT_CLASS}
-                            />
-                          </div>
-                          <div className="grid gap-1.5">
-                            <Label className="text-xs text-muted-foreground">
-                              {t("projectTools.tunnelTtl")}
-                            </Label>
-                            <button
-                              type="button"
-                              aria-pressed={editTtlSeconds === "keep"}
-                              onClick={() => setEditTtlSeconds("keep")}
-                              disabled={!mutationsEnabled || updating}
-                              className={cn(
-                                "flex h-7 min-w-0 items-center justify-center truncate rounded-lg bg-muted/70 px-2 text-xs text-muted-foreground transition-all duration-200 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
-                                editTtlSeconds === "keep" &&
-                                  "bg-background font-medium text-foreground shadow-sm ring-1 ring-border/60",
-                              )}
-                            >
-                              {t("projectTools.tunnelKeepCurrentTtl")}
-                            </button>
-                            <TtlSegmented
-                              value={editTtlSeconds === "keep" ? null : editTtlSeconds}
-                              onChange={setEditTtlSeconds}
-                              disabled={!mutationsEnabled || updating}
-                            />
-                          </div>
-                        </div>
-                        <div className="mt-1.5 flex items-center justify-end gap-1.5 border-t border-border/40 px-3 py-1.5">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 gap-1 rounded-lg px-2.5 text-xs text-muted-foreground hover:text-foreground"
-                            disabled={updating}
-                            onClick={cancelEdit}
-                            title={t("projectTools.tunnelCancelEdit")}
-                          >
-                            <X className="h-3.5 w-3.5" />
-                            {t("settings.cancel")}
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            className="h-7 gap-1 rounded-lg px-2.5 text-xs"
-                            disabled={
-                              !mutationsEnabled || updating || Boolean(editTargetValidationKey)
-                            }
-                            onClick={() => updateTunnel(tunnel)}
-                            title={
-                              updating
-                                ? t("projectTools.tunnelUpdating")
-                                : t("projectTools.tunnelSave")
-                            }
-                          >
-                            {updating ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <Check className="h-3.5 w-3.5" />
-                            )}
-                            {t("settings.save")}
-                          </Button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => copyLink(tunnel)}
-                          disabled={!publicUrl}
-                          title={
-                            copiedId === tunnel.id
-                              ? t("projectTools.tunnelCopied")
-                              : t("projectTools.tunnelCopyLink")
-                          }
-                          aria-label={
-                            copiedId === tunnel.id
-                              ? t("projectTools.tunnelCopied")
-                              : t("projectTools.tunnelCopyLink")
-                          }
-                          className="mx-3 mt-2 flex w-[calc(100%-1.5rem)] min-w-0 items-center gap-1.5 rounded-lg border border-border/50 bg-muted/40 px-2 py-1.5 text-left transition-colors duration-150 hover:border-border hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-                        >
-                          <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground/85">
-                            {publicUrl}
-                          </span>
-                          {copiedId === tunnel.id ? (
-                            <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                          ) : (
-                            <Copy className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
-                          )}
-                        </button>
-                        <div
-                          className="mt-1.5 flex min-w-0 items-center gap-1 px-3 text-[11px] text-muted-foreground"
-                          title={tunnel.targetUrl}
-                        >
-                          <Link2 className="h-3 w-3 shrink-0" />
-                          <span className="shrink-0">{t("projectTools.tunnelTarget")}</span>
-                          <span className="min-w-0 truncate font-mono">{tunnel.targetUrl}</span>
-                        </div>
-                        <div className="mx-3 mt-2 flex min-w-0 items-center gap-1">
-                          <div
-                            title={`${t("projectTools.tunnelServiceLabel")} · ${healthTitle(localHealth)}`}
-                            className={cn(
-                              "flex h-6 min-w-0 items-center gap-1 rounded-md border px-1.5 text-[10px] font-medium",
-                              localStatus === "ok"
-                                ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                                : localStatus === "failed"
-                                  ? "border-destructive/20 bg-destructive/10 text-destructive"
-                                  : "border-border/60 bg-muted/50 text-muted-foreground",
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "h-1.5 w-1.5 shrink-0 rounded-full",
-                                localStatus === "ok"
-                                  ? "bg-emerald-500"
-                                  : localStatus === "failed"
-                                    ? "bg-destructive"
-                                    : "bg-muted-foreground/45",
-                              )}
-                            />
-                            <span className="truncate">{t("projectTools.tunnelServiceLabel")}</span>
-                            {localStatus === "ok" && localHealth && localHealth.httpStatus > 0 ? (
-                              <span className="shrink-0 tabular-nums">
-                                HTTP {localHealth.httpStatus}
-                              </span>
-                            ) : (
-                              <span className="truncate">
-                                {t(healthStatusLabelKey(localStatus))}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        {rowError ? (
-                          <div className="mx-3 mt-2 rounded-lg border border-destructive/25 bg-destructive/10 px-2 py-1.5 text-[11px] leading-relaxed text-destructive">
-                            {rowError}
-                          </div>
-                        ) : null}
-                        <div className="mt-2 flex items-center justify-between gap-2 border-t border-border/40 py-1 pl-3 pr-1.5">
-                          <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
-                            <span
-                              className="inline-flex min-w-0 items-center gap-1"
-                              title={hasExpiry ? formatDateTime(tunnel.expiresAt) : undefined}
-                            >
-                              <Clock3 className="h-3 w-3 shrink-0" />
-                              <span className="min-w-0 truncate tabular-nums">
-                                {!hasExpiry
-                                  ? t("projectTools.tunnelTtlInfinite")
-                                  : expired
-                                    ? t("projectTools.tunnelExpired")
-                                    : t("projectTools.tunnelExpiresIn").replace(
-                                        "{time}",
-                                        formatRemaining(remaining),
-                                      )}
-                              </span>
-                            </span>
-                            {scope === "global" ? (
-                              tunnelProjectPathKey ? (
-                                <span
-                                  title={tunnelProjectPathKey}
-                                  className="min-w-0 max-w-[120px] truncate rounded-full bg-muted/80 px-1.5 py-px text-[10px]"
-                                >
-                                  {projectNameFromPathKey(tunnelProjectPathKey) ||
-                                    t("projectTools.tunnelScopeProjectBadge")}
-                                </span>
-                              ) : (
-                                <span className="shrink-0 rounded-full bg-muted/80 px-1.5 py-px text-[10px]">
-                                  {t("projectTools.tunnelScopeGlobalBadge")}
-                                </span>
-                              )
-                            ) : null}
-                          </div>
-                          <div className="flex shrink-0 items-center gap-0.5">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 rounded-lg text-muted-foreground hover:text-foreground"
-                              disabled={!mutationsEnabled || expired || Boolean(pendingAction)}
-                              onClick={() => checkTunnel(tunnel.id)}
-                              title={
-                                !enabled ? disabledMessage : t("projectTools.tunnelCheckAction")
-                              }
-                              aria-label={t("projectTools.tunnelCheckAction")}
-                            >
-                              {pendingAction === "check" ? (
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                              ) : (
-                                <RefreshCw className="h-3.5 w-3.5" />
-                              )}
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 rounded-lg text-muted-foreground hover:text-foreground"
-                              disabled={!mutationsEnabled || expired}
-                              onClick={() => beginEdit(tunnel)}
-                              title={!enabled ? disabledMessage : t("projectTools.tunnelEdit")}
-                              aria-label={t("projectTools.tunnelEdit")}
-                            >
-                              <Edit3 className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 rounded-lg text-muted-foreground hover:text-foreground"
-                              disabled={!publicUrl || expired}
-                              onClick={() => openLink(tunnel)}
-                              title={t("projectTools.tunnelOpenLink")}
-                              aria-label={t("projectTools.tunnelOpenLink")}
-                            >
-                              <ExternalLink className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                              disabled={!mutationsEnabled || Boolean(pendingAction)}
-                              onClick={() => closeTunnel(tunnel.id)}
-                              title={!enabled ? disabledMessage : t("projectTools.tunnelClose")}
-                              aria-label={t("projectTools.tunnelClose")}
-                            >
-                              {pendingAction === "close" ? (
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                              ) : (
-                                <Trash2 className="h-3.5 w-3.5" />
-                              )}
-                            </Button>
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </div>
+                    active={active}
+                    tunnel={tunnel}
+                    scope={scope}
+                    offline={offline}
+                    isEditing={isEditing}
+                    editTargetUrl={isEditing ? editTargetUrl : ""}
+                    editName={isEditing ? editName : ""}
+                    editTtlSeconds={isEditing ? editTtlSeconds : "keep"}
+                    editTargetValidationKey={isEditing ? editTargetValidationKey : null}
+                    pendingAction={pendingActions[tunnel.id]}
+                    rowError={rowErrors[tunnel.id]}
+                    copied={copiedId === tunnel.id}
+                    enabled={enabled}
+                    mutationsEnabled={mutationsEnabled}
+                    disabledMessage={disabledMessage}
+                    publicUrl={publicUrlFor(tunnel)}
+                    healthTitle={healthTitle}
+                    onEditTargetUrlChange={setEditTargetUrl}
+                    onEditNameChange={setEditName}
+                    onEditTtlSecondsChange={setEditTtlSeconds}
+                    onUpdate={updateTunnel}
+                    onCancelEdit={cancelEdit}
+                    onBeginEdit={beginEdit}
+                    onCopyLink={copyLink}
+                    onOpenLink={openLink}
+                    onCheck={checkTunnel}
+                    onClose={closeTunnel}
+                  />
                 );
               })}
             </div>

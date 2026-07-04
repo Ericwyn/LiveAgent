@@ -18,7 +18,7 @@ type RightDockContentProps = {
   error: string | null;
   creating: boolean;
   loading: boolean;
-  onTerminalError: (error: string | null) => void;
+  onTerminalError: (sessionId: string, message: string | null) => void;
   onInitialTerminalSnapshotConsumed: (sessionId: string) => void;
   onCreateTerminal: () => void;
 };

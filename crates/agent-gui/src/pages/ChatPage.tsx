@@ -29,7 +29,7 @@ import { MacOsTitleBarSpacer, MacOsTitleBarToggle } from "../components/MacOsTit
 import type {
   GitCommitContextPayload,
   GitFileContextPayload,
-} from "../components/project-tools/GitReviewPanel";
+} from "../components/project-tools/git-review";
 import { RightDockPanel } from "../components/project-tools/RightDockPanel";
 import { Button } from "../components/ui/button";
 import { useConfirmDialog } from "../components/ui/confirm-dialog";
@@ -5768,13 +5768,7 @@ export function ChatPage(props: ChatPageProps) {
                 chatRuntimeControls={chatRuntimeControlsForCurrentProvider}
                 reasoningOptions={chatRuntimeReasoningOptions}
                 gitClient={tauriGitClient}
-                onGitChanged={(gitWorkdir) =>
-                  window.dispatchEvent(
-                    new CustomEvent("liveagent:git-changed", {
-                      detail: { workdir: gitWorkdir },
-                    }),
-                  )
-                }
+                workspaceActivityClient={tauriWorkspaceActivityClient}
                 onSend={handleSend}
                 onStop={handleStopSending}
                 onComposerBusyChange={handleComposerBusyChange}

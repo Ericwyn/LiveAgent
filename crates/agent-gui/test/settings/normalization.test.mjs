@@ -191,7 +191,6 @@ test("settings normalization canonicalizes project keyed maps with Windows path 
           selectedPath: "src/main.ts",
           expandedPaths: ["", "src", "src/components"],
           revision: 2,
-          stateVersion: 0,
         },
       },
       gitReview: {
@@ -620,7 +619,6 @@ test("gateway settings sync payload redacts provider api keys", () => {
               selectedPath: "src/main.ts",
               expandedPaths: ["", "src", "src/bad"],
               revision: 3,
-              stateVersion: 0,
             },
           },
           tunnel: {
@@ -951,7 +949,6 @@ test("normalizes right dock from current settings", () => {
           selectedPath: "src/main.ts",
           expandedPaths: ["", "src", "src/components"],
           revision: 4,
-          stateVersion: 5,
         },
       },
     },
@@ -985,7 +982,6 @@ test("opens right dock singleton tabs and updates file tree state per project", 
     selectedPath: "src/../main.ts",
     expandedPaths: ["", "src", "src/../bad", "src\\components", "src"],
     bumpRevision: true,
-    bumpStateVersion: true,
   });
   const updatedState = settings.getRightDockProjectState(
     updated.customSettings,
@@ -1002,7 +998,6 @@ test("opens right dock singleton tabs and updates file tree state per project", 
     selectedPath: "src/main.ts",
     expandedPaths: ["", "src", "src/bad", "src/components"],
     revision: 1,
-    stateVersion: 1,
   });
   assert.equal(updatedState.openVersion, 1);
   assert.equal(updatedState.stateVersion, 2);
@@ -1235,7 +1230,6 @@ test("gateway settings sync keeps right dock width local and syncs project state
       selectedPath: "desktop.ts",
       expandedPaths: ["", "src"],
       revision: 1,
-      stateVersion: 3,
     },
   );
   assert.equal(synced.customSettings.rightDock.projects["/shared/project"].openVersion, 5);

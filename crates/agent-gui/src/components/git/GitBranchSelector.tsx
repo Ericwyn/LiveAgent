@@ -8,6 +8,8 @@ import type {
 } from "../../lib/git/types";
 import { emptyGitRepositoryState } from "../../lib/git/types";
 import { cn } from "../../lib/shared/utils";
+import type { WorkspaceActivityClient } from "../../lib/workspace-activity/types";
+import { useWorkspaceInvalidation } from "../../lib/workspace-activity/useWorkspaceInvalidation";
 import { Check, GitBranch, Loader2, Plus, RefreshCw, X } from "../icons";
 import { Button } from "../ui/button";
 import {
@@ -203,20 +205,22 @@ function GitInitModal(props: {
 export function GitBranchSelector(props: {
   workdir: string;
   gitClient?: GitClient | null;
+  // Push-based refresh channel; when absent the selector falls back to its
+  // low-frequency poll.
+  workspaceActivityClient?: WorkspaceActivityClient | null;
   disabled?: boolean;
   canWrite?: boolean;
   disabledMessage?: string;
   onStateChange?: (state: GitRepositoryState) => void;
-  onChanged?: () => void;
 }) {
   const {
     workdir,
     gitClient,
+    workspaceActivityClient,
     disabled,
     canWrite = true,
     disabledMessage,
     onStateChange,
-    onChanged,
   } = props;
   const { t } = useLocale();
   const [state, setState] = useState<GitRepositoryState>(() => emptyGitRepositoryState(workdir));
@@ -281,15 +285,27 @@ export function GitBranchSelector(props: {
     void refresh();
   }, [refresh]);
 
-  useEffect(() => {
-    if (!gitClient || !workdir.trim()) return;
-    const handleGitChanged = () => void refresh({ force: true, silent: true });
-    window.addEventListener("liveagent:git-changed", handleGitChanged);
-    return () => window.removeEventListener("liveagent:git-changed", handleGitChanged);
-  }, [gitClient, refresh, workdir]);
+  // Push-based refresh: workspace-activity events with the git flag replace
+  // both the old window-event broadcast and the constant poll.
+  const handleWorkspaceInvalidate = useCallback(
+    (hint: { fs: boolean; git: boolean }) => {
+      if (!hint.git || !gitClient || !workdir.trim()) return;
+      void refresh({ force: true, silent: true });
+    },
+    [gitClient, refresh, workdir],
+  );
+
+  useWorkspaceInvalidation({
+    client: gitClient ? workspaceActivityClient : null,
+    workdir,
+    active: true,
+    onInvalidate: handleWorkspaceInvalidate,
+  });
 
   useEffect(() => {
-    if (!gitClient || !workdir.trim()) return;
+    if (workspaceActivityClient || !gitClient || !workdir.trim()) return;
+    // No workspace-activity push channel (no-push environment): fall back to
+    // the low-frequency visible poll.
     let stopped = false;
     const refreshVisibleSelector = () => {
       if (stopped || document.hidden) return;
@@ -313,7 +329,7 @@ export function GitBranchSelector(props: {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [gitClient, refresh, workdir]);
+  }, [gitClient, refresh, workdir, workspaceActivityClient]);
 
   const localBranches = useMemo(
     () => branches.filter((branch) => branch.kind === "local"),
@@ -352,7 +368,6 @@ export function GitBranchSelector(props: {
         const result = await task();
         assertGitOperationResult(result, t("git.branchSelector.operationFailed"));
         await refresh({ force: true });
-        onChanged?.();
         return true;
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -361,7 +376,7 @@ export function GitBranchSelector(props: {
         setMutating(false);
       }
     },
-    [canWrite, disabledMessage, gitClient, onChanged, refresh, t, workdir],
+    [canWrite, disabledMessage, gitClient, refresh, t, workdir],
   );
 
   const selectBranch = useCallback(
@@ -419,7 +434,6 @@ export function GitBranchSelector(props: {
       setState(result.state);
       onStateChange?.(result.state);
       await refresh({ force: true });
-      onChanged?.();
       setInitModalOpen(false);
     } catch (err) {
       setInitError(err instanceof Error ? err.message : String(err));
@@ -434,7 +448,6 @@ export function GitBranchSelector(props: {
     initUserEmail,
     initUserName,
     initializing,
-    onChanged,
     onStateChange,
     refresh,
     t,
