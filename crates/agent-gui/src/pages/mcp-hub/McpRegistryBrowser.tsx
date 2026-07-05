@@ -765,11 +765,14 @@ function RegistryCard(props: {
           {hasVersionSelector ? (
             <Select value={card.id} onValueChange={setSelectedCardId}>
               <SelectTrigger
-                className="h-7 w-[5.75rem] rounded-lg border-border/40 bg-background/85 px-2 py-0 text-[10.5px] shadow-none backdrop-blur-md [&>svg]:h-3 [&>svg]:w-3"
-                title={t("mcpHub.storeVersion")}
+                className="h-7 w-[5.75rem] overflow-hidden rounded-lg border-border/40 bg-background/85 px-2 py-0 text-[10.5px] shadow-none backdrop-blur-md [&>svg]:h-3 [&>svg]:w-3 [&>svg]:shrink-0"
+                title={versionLabelForCard(card) ?? t("mcpHub.storeVersionLatest")}
                 aria-label={t("mcpHub.storeVersion")}
               >
-                <SelectValue placeholder={t("mcpHub.storeVersionLatest")} />
+                <SelectValue
+                  className="min-w-0 flex-1 truncate text-left"
+                  placeholder={t("mcpHub.storeVersionLatest")}
+                />
               </SelectTrigger>
               <SelectContent className="z-[70] min-w-[5.75rem]">
                 {versionOptions.map((option) => (
