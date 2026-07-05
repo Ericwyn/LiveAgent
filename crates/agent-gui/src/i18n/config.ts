@@ -1280,7 +1280,11 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.remoteWebTunnelsHint":
       "开启后，已登录 WebUI 可为 localhost 或 IP 地址 HTTP 服务创建和关闭临时访问链接。",
     "settings.remoteHeartbeat": "心跳间隔",
+    "settings.remoteHeartbeatHint": "本地 Agent 向 Gateway 上报存活状态的间隔",
     "settings.remoteHeartbeatUnit": "秒",
+    "settings.remoteConnectionStatus": "连接状态",
+    "settings.remoteConnectedSince": "连接起始时间",
+    "settings.remoteLastHeartbeat": "最近一次心跳",
 
     /* ── MCP Hub ── */
     "mcpHub.title": "MCP Servers",
@@ -2871,7 +2875,11 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.remoteWebTunnelsHint":
       "Allow authenticated WebUI clients to create and close temporary links for localhost or IP-address HTTP services.",
     "settings.remoteHeartbeat": "Heartbeat Interval",
+    "settings.remoteHeartbeatHint": "How often the local Agent reports liveness to the Gateway",
     "settings.remoteHeartbeatUnit": "seconds",
+    "settings.remoteConnectionStatus": "Connection Status",
+    "settings.remoteConnectedSince": "Connected Since",
+    "settings.remoteLastHeartbeat": "Last Heartbeat",
 
     /* ── MCP Hub ── */
     "mcpHub.title": "MCP Servers",
