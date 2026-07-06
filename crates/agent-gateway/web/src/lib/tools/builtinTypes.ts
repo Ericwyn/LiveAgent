@@ -188,7 +188,6 @@ export type SkillsManagerActionResultDetails = {
   deletedName?: string;
   validationOk?: boolean;
   packageArchive?: string;
-  seededCount?: number;
   target?: string;
   backup?: string;
   clawhubResultCount?: number;

@@ -2225,3 +2225,10 @@ export function setSelectedModel(
     selectedModel,
   });
 }
+
+export {
+  applyMcpOps,
+  applyMcpOpsToAppSettings,
+  type McpSettingsOp,
+  selectEnabledMcpServers,
+} from "./mcpOps";

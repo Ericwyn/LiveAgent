@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import {
   type McpServerConfig,
   type McpSettings,
+  type McpSettingsOp,
   normalizeMcpServerConfig,
   normalizeMcpSettings,
 } from "../settings";
@@ -96,6 +97,10 @@ const WRITE_ACTIONS = new Set<McpManagerAction>([
   "disable",
 ]);
 
+// Restarting or killing a pooled runtime instance affects every conversation
+// sharing the process-wide runtime manager, so it is gated like a write.
+const RUNTIME_MUTATING_ACTIONS = new Set<McpManagerAction>(["restart", "stop"]);
+
 const MCP_STRING_MAP_SCHEMA = Type.Record(Type.String(), Type.String());
 
 const MCP_SERVER_PARAMETERS = Type.Object(
@@ -172,6 +177,16 @@ const MCP_MANAGER_PARAMETERS = Type.Object({
   include_stderr: Type.Optional(Type.Boolean()),
 });
 
+class McpManagerCancelledError extends Error {
+  constructor() {
+    super("Cancelled");
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw new McpManagerCancelledError();
+}
+
 function asErrorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
 }
@@ -231,36 +246,9 @@ function targetServerIds(args: Record<string, unknown>) {
   return Array.from(ids);
 }
 
-function normalizeManagedMcpSettings(input: unknown): McpSettings {
-  const normalized = normalizeMcpSettings(input as Partial<McpSettings>);
-  const enabledIds = new Set(
-    normalized.servers
-      .filter((server) => server.enabled && server.id.trim())
-      .map((server) => server.id),
-  );
-  return {
-    servers: normalized.servers,
-    selected: normalized.selected.filter((id) => enabledIds.has(id)),
-  };
-}
-
-function normalizeServerForCreate(input: unknown): McpServerConfig {
-  const raw = asObject(input, "McpManager.server");
-  validateRawServerShape(raw, "McpManager.server");
-  return normalizeMcpServerConfig({
-    enabled: true,
-    transport: "stdio",
-    command: "",
-    args: [],
-    url: "",
-    timeoutMs: 60_000,
-    ...raw,
-  });
-}
-
-function normalizeInlineServer(input: unknown): McpServerConfig {
-  const raw = asObject(input, "McpManager.server");
-  validateRawServerShape(raw, "McpManager.server");
+function normalizeServerInput(input: unknown, label = "McpManager.server"): McpServerConfig {
+  const raw = asObject(input, label);
+  validateRawServerShape(raw, label);
   return normalizeMcpServerConfig({
     enabled: true,
     transport: "stdio",
@@ -465,8 +453,8 @@ async function runtimeStatus(serverId: string) {
 async function runtimeTest(
   server: McpServerConfig,
   includeSchema: boolean,
-  restart = false,
-  persist = true,
+  restart: boolean,
+  persist: boolean,
 ) {
   return invoke<McpRuntimeTestResponse>(restart ? "mcp_restart_server" : "mcp_test_server", {
     server,
@@ -617,8 +605,10 @@ function detailsForResult(result: McpManagerExecutionResult): McpManagerResultDe
 
 export function createMcpManagerTools(params: {
   workdir: string;
+  /** Live read of the authoritative MCP settings; must never be a snapshot. */
   getMcpSettings: () => McpSettings;
-  setMcpSettings?: (next: McpSettings) => void;
+  /** Id-keyed merge commit; absent means this scope cannot modify settings. */
+  applyMcpOps?: (ops: McpSettingsOp[]) => void;
   runtimeScope: SystemToolRuntimeScope;
   resolveHomeDir?: () => Promise<string>;
 }): BuiltinToolBundle {
@@ -651,31 +641,92 @@ export function createMcpManagerTools(params: {
   }
 
   function currentSettings() {
-    return normalizeManagedMcpSettings(params.getMcpSettings());
+    return normalizeMcpSettings(params.getMcpSettings());
   }
 
-  function commitSettings(next: McpSettings) {
-    if (!params.setMcpSettings) {
+  function requireApplyOps() {
+    if (!params.applyMcpOps) {
       throw new Error("McpManager cannot modify MCP settings in this runtime scope.");
     }
-    const normalized = normalizeManagedMcpSettings(next);
-    params.setMcpSettings(normalized);
-    return normalized;
+    return params.applyMcpOps;
   }
 
-  async function executeAction(args: Record<string, unknown>): Promise<McpManagerExecutionResult> {
+  // Write commits are deliberately synchronous: each one re-reads the live
+  // settings, validates, and applies its ops without any await in between, so
+  // the single-threaded JS runtime guarantees the read-modify-write is atomic
+  // with respect to UI edits, gateway sync, and concurrent turns. Never make
+  // these functions async, and never reuse settings read before an await.
+
+  function commitCreate(server: McpServerConfig, conflict: "fail" | "overwrite") {
+    const applyOps = requireApplyOps();
+    const existed = Boolean(findServer(currentSettings(), server.id));
+    if (existed && conflict === "fail") {
+      throw new Error(`MCP server already exists: ${server.id}`);
+    }
+    applyOps([{ kind: "upsert", server }]);
+    return { existed };
+  }
+
+  function commitUpdate(serverId: string, patch: Partial<McpServerConfig>) {
+    const applyOps = requireApplyOps();
+    const existing = requireExistingServer(currentSettings(), serverId);
+    const updated = normalizeMcpServerConfig({ ...existing, ...patch, id: existing.id });
+    const validation = validateServer(updated);
+    if (!validation.ok) return { server: updated, validation, changed: false };
+    applyOps([{ kind: "patch", serverId, patch }]);
+    return { server: updated, validation, changed: true };
+  }
+
+  function commitDelete(serverId: string) {
+    const applyOps = requireApplyOps();
+    requireExistingServer(currentSettings(), serverId);
+    applyOps([{ kind: "remove", serverId }]);
+  }
+
+  function commitSetEnabled(serverIds: string[], enabled: boolean) {
+    const applyOps = requireApplyOps();
+    const settings = currentSettings();
+    for (const id of serverIds) requireExistingServer(settings, id);
+    applyOps([{ kind: "setEnabled", serverIds, enabled }]);
+  }
+
+  // The config commit is the source of truth; runtime cleanup afterwards is
+  // best effort. If the stop fails (or the call was aborted post-commit) the
+  // stale pooled client is replaced on the next ensure_client config check.
+  async function stopRuntimeAfterCommit(
+    serverIds: string[],
+    runtimeWarnings: string[],
+    signal?: AbortSignal,
+  ) {
+    let stopped = false;
+    for (const id of serverIds) {
+      if (signal?.aborted) {
+        runtimeWarnings.push(
+          `cancelled before runtime cleanup for ${id}; the old runtime instance (if any) is replaced on next use.`,
+        );
+        continue;
+      }
+      stopped = (await stopRuntime(id, runtimeWarnings)) || stopped;
+    }
+    return stopped;
+  }
+
+  async function executeAction(
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<McpManagerExecutionResult> {
     const action = normalizeAction(args.action);
-    if (WRITE_ACTIONS.has(action) && params.runtimeScope !== "chat") {
+    if (
+      params.runtimeScope !== "chat" &&
+      (WRITE_ACTIONS.has(action) || RUNTIME_MUTATING_ACTIONS.has(action))
+    ) {
       throw new Error(`McpManager action=${action} is not allowed in ${params.runtimeScope}.`);
     }
 
-    const settings = currentSettings();
     const includeSchema = args.include_schema === true;
-    const includeStderr = Object.hasOwn(args, "include_stderr")
-      ? args.include_stderr === true
-      : false;
 
     if (action === "list") {
+      const settings = currentSettings();
       const includeDisabled = args.include_disabled !== false;
       const servers = includeDisabled
         ? settings.servers
@@ -688,7 +739,7 @@ export function createMcpManagerTools(params: {
 
     if (action === "read") {
       const serverId = requireServerId(args.server_id);
-      const server = requireExistingServer(settings, serverId);
+      const server = requireExistingServer(currentSettings(), serverId);
       return {
         action,
         serverId,
@@ -698,11 +749,12 @@ export function createMcpManagerTools(params: {
 
     if (action === "create") {
       const server = await resolveServerCwd(
-        normalizeServerForCreate(args.server),
+        normalizeServerInput(args.server),
         "McpManager.server.cwd",
       );
+      throwIfAborted(signal);
       const validation = validateServer(server);
-      if (!validation.ok)
+      if (!validation.ok) {
         return {
           action,
           serverId: server.id,
@@ -710,23 +762,14 @@ export function createMcpManagerTools(params: {
           validation,
           changed: false,
         };
+      }
 
       const conflict = args.conflict === "overwrite" ? "overwrite" : "fail";
-      const existingIndex = settings.servers.findIndex((item) => item.id === server.id);
-      if (existingIndex >= 0 && conflict === "fail") {
-        throw new Error(`MCP server already exists: ${server.id}`);
-      }
-
+      const { existed } = commitCreate(server, conflict);
       const runtimeWarnings: string[] = [];
-      let servers = settings.servers.slice();
-      let stopped = false;
-      if (existingIndex >= 0) {
-        servers[existingIndex] = server;
-        stopped = await stopRuntime(server.id, runtimeWarnings);
-      } else {
-        servers = [...servers, server];
-      }
-      commitSettings({ servers, selected: settings.selected });
+      const stopped = existed
+        ? await stopRuntimeAfterCommit([server.id], runtimeWarnings, signal)
+        : false;
       return {
         action,
         serverId: server.id,
@@ -740,28 +783,26 @@ export function createMcpManagerTools(params: {
 
     if (action === "update") {
       const serverId = requireServerId(args.server_id);
-      const existing = requireExistingServer(settings, serverId);
       const patch = await resolvePatchCwd(normalizePatch(args.patch), "McpManager.patch.cwd");
-      const updated = normalizeMcpServerConfig({ ...existing, ...patch, id: existing.id });
-      const validation = validateServer(updated);
-      if (!validation.ok)
+      throwIfAborted(signal);
+      const { server, validation, changed } = commitUpdate(serverId, patch);
+      if (!changed) {
         return {
           action,
           serverId,
-          server: redactMcpServerConfig(updated),
+          server: redactMcpServerConfig(server),
           validation,
-          changed: false,
+          changed,
         };
-      const servers = settings.servers.map((server) => (server.id === serverId ? updated : server));
-      commitSettings({ servers, selected: settings.selected });
+      }
       const runtimeWarnings: string[] = [];
-      const stopped = await stopRuntime(serverId, runtimeWarnings);
+      const stopped = await stopRuntimeAfterCommit([serverId], runtimeWarnings, signal);
       return {
         action,
         serverId,
-        server: redactMcpServerConfig(updated),
+        server: redactMcpServerConfig(server),
         validation,
-        changed: true,
+        changed,
         stopped,
         runtimeWarnings,
       };
@@ -769,39 +810,26 @@ export function createMcpManagerTools(params: {
 
     if (action === "delete") {
       const serverId = requireServerId(args.server_id);
-      requireExistingServer(settings, serverId);
-      commitSettings({
-        servers: settings.servers.filter((server) => server.id !== serverId),
-        selected: settings.selected.filter((id) => id !== serverId),
-      });
+      commitDelete(serverId);
       const runtimeWarnings: string[] = [];
-      const stopped = await stopRuntime(serverId, runtimeWarnings);
+      const stopped = await stopRuntimeAfterCommit([serverId], runtimeWarnings, signal);
       return { action, serverId, changed: true, stopped, runtimeWarnings };
     }
 
     if (action === "enable" || action === "disable") {
       const ids = targetServerIds(args);
-      for (const id of ids) requireExistingServer(settings, id);
       const enable = action === "enable";
-      const servers = settings.servers.map((server) =>
-        ids.includes(server.id) ? { ...server, enabled: enable } : server,
-      );
-      commitSettings({ servers, selected: settings.selected });
+      commitSetEnabled(ids, enable);
       const runtimeWarnings: string[] = [];
-      let stopped = false;
-      if (!enable) {
-        for (const id of ids) {
-          stopped = (await stopRuntime(id, runtimeWarnings)) || stopped;
-        }
-      }
+      const stopped = enable ? false : await stopRuntimeAfterCommit(ids, runtimeWarnings, signal);
       return { action, serverIds: ids, changed: true, stopped, runtimeWarnings };
     }
 
     if (action === "validate") {
       const server = args.server
-        ? await resolveServerCwd(normalizeInlineServer(args.server), "McpManager.server.cwd")
-        : requireExistingServer(settings, requireServerId(args.server_id));
-      const validation = validateServer(server, args.server ? undefined : settings);
+        ? await resolveServerCwd(normalizeServerInput(args.server), "McpManager.server.cwd")
+        : requireExistingServer(currentSettings(), requireServerId(args.server_id));
+      const validation = validateServer(server, args.server ? undefined : currentSettings());
       return {
         action,
         serverId: server.id,
@@ -822,9 +850,10 @@ export function createMcpManagerTools(params: {
     if (action === "test" || action === "tools" || action === "restart" || action === "diagnose") {
       const hasInlineServer = Boolean(args.server);
       const server = hasInlineServer
-        ? await resolveServerCwd(normalizeInlineServer(args.server), "McpManager.server.cwd")
-        : requireExistingServer(settings, requireServerId(args.server_id));
-      const validation = validateServer(server, hasInlineServer ? undefined : settings);
+        ? await resolveServerCwd(normalizeServerInput(args.server), "McpManager.server.cwd")
+        : requireExistingServer(currentSettings(), requireServerId(args.server_id));
+      throwIfAborted(signal);
+      const validation = validateServer(server, hasInlineServer ? undefined : currentSettings());
       let runtime: McpRuntimeStatus | null = null;
       if (!hasInlineServer) {
         runtime = await runtimeStatus(server.id).catch((err) => ({
@@ -834,6 +863,7 @@ export function createMcpManagerTools(params: {
           transport: server.transport,
           lastError: asErrorMessage(err),
         }));
+        throwIfAborted(signal);
       }
       if (!validation.ok) {
         const suggestions = buildSuggestions({ validation, server });
@@ -848,10 +878,13 @@ export function createMcpManagerTools(params: {
         };
       }
       const shouldIncludeStderr = Object.hasOwn(args, "include_stderr")
-        ? includeStderr
+        ? args.include_stderr === true
         : action === "diagnose";
+      // Outside chat, tests never persist into (or restart entries of) the
+      // shared runtime pool: the connection is transient.
+      const persist = params.runtimeScope === "chat" && !hasInlineServer;
       const test = applyRuntimeTestOutputOptions(
-        await runtimeTest(server, includeSchema, action === "restart", !hasInlineServer),
+        await runtimeTest(server, includeSchema, action === "restart", persist),
         shouldIncludeStderr,
       );
       const tools = (test.tools ?? []).map((tool) => summarizeTool(tool, includeSchema));
@@ -886,17 +919,6 @@ export function createMcpManagerTools(params: {
     signal?: AbortSignal,
   ): Promise<ToolResultMessage> {
     const now = Date.now();
-    if (signal?.aborted) {
-      return {
-        role: "toolResult",
-        toolCallId: toolCall.id,
-        toolName: toolCall.name,
-        content: [{ type: "text", text: "Cancelled" }],
-        details: {},
-        isError: true,
-        timestamp: now,
-      };
-    }
     if (toolCall.name !== "McpManager") {
       return {
         role: "toolResult",
@@ -910,7 +932,11 @@ export function createMcpManagerTools(params: {
     }
 
     try {
-      const result = await executeAction((toolCall.arguments ?? {}) as Record<string, unknown>);
+      throwIfAborted(signal);
+      const result = await executeAction(
+        (toolCall.arguments ?? {}) as Record<string, unknown>,
+        signal,
+      );
       return {
         role: "toolResult",
         toolCallId: toolCall.id,
@@ -921,6 +947,17 @@ export function createMcpManagerTools(params: {
         timestamp: now,
       };
     } catch (err) {
+      if (err instanceof McpManagerCancelledError) {
+        return {
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [{ type: "text", text: "Cancelled" }],
+          details: {},
+          isError: true,
+          timestamp: now,
+        };
+      }
       return {
         role: "toolResult",
         toolCallId: toolCall.id,

@@ -49,9 +49,7 @@ async function buildRegistry(params = {}) {
     runtimeScope: "chat",
     currentChatModel: { customProviderId: "p", model: "m" },
     selectedSystemToolIds: [],
-    mcpSettings: { selected: [], servers: [] },
-    enabledMcpServerIds: [],
-    selectableMcpServers: [],
+    getMcpSettings: () => ({ selected: [], servers: [] }),
     ...params,
   });
 }

@@ -106,6 +106,7 @@ import {
 import { createModelFromConfig, toModelValue } from "../lib/providers/llm";
 import {
   type AppSettings,
+  applyMcpOpsToAppSettings,
   type ChatRuntimeControls,
   DEFAULT_WORKSPACE_PROJECT_ID,
   type ExecutionMode,
@@ -130,7 +131,6 @@ import {
   type SystemToolId,
   updateChatRuntimeControlsForProvider,
   updateCustomSettings,
-  updateMcp,
   updateMemorySettings,
   updateRightDockFileTreeState,
   updateRightDockProjectState,
@@ -281,6 +281,8 @@ function createLocalGatewayChatRunId(conversationId: string) {
 type ChatPageProps = {
   settings: AppSettings;
   setSettings: (updater: (prev: AppSettings) => AppSettings) => void;
+  /** Reads the authoritative settingsRef (not render-time state) so tools never see a stale snapshot. */
+  getMcpSettings: () => AppSettings["mcp"];
   context: Context;
   setContext: (next: Context) => void;
   onOpenSettings: (section?: SectionId) => void;
@@ -590,8 +592,16 @@ function createWorkspaceProjectFromPath(path: string, kind: WorkspaceProject["ki
 }
 
 export function ChatPage(props: ChatPageProps) {
-  const { settings, setSettings, context, setContext, onOpenSettings, onToggleTheme, appUpdate } =
-    props;
+  const {
+    settings,
+    setSettings,
+    getMcpSettings,
+    context,
+    setContext,
+    onOpenSettings,
+    onToggleTheme,
+    appUpdate,
+  } = props;
   // Monaco reads NLS globals while the lazy editor module imports monaco-editor.
   setPreferredMonacoNlsLocale(settings.locale);
   const effectiveTheme = resolveEffectiveTheme(settings.theme);
@@ -697,19 +707,6 @@ export function ChatPage(props: ChatPageProps) {
     sidebarStore.setScope(sidebarScope);
   }, [sidebarScope, sidebarStore]);
   const historyScopeKey = sidebarScopeKey(sidebarScope);
-  const enabledMcpServers = useMemo(
-    () => settings.mcp.servers.filter((server) => server.enabled),
-    [settings.mcp.servers],
-  );
-  const selectableMcpServers = useMemo(
-    () => enabledMcpServers.filter((server) => server.id.trim()),
-    [enabledMcpServers],
-  );
-  const enabledMcpServerIds = useMemo(
-    () => selectableMcpServers.map((server) => server.id),
-    [selectableMcpServers],
-  );
-
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeView, setActiveView] = useState<"chat" | "skills-hub" | "mcp-hub">("chat");
   const [rightDockOpen, setRightDockOpen] = useState(false);
@@ -4617,12 +4614,10 @@ export function ChatPage(props: ChatPageProps) {
             },
             agentTemplates: settings.agents,
             selectedSystemToolIds: effectiveSelectedSystemToolIds,
-            mcpSettings: settings.mcp,
-            updateMcpSettings: (nextMcp) => {
-              setSettings((prev) => updateMcp(prev, nextMcp));
+            getMcpSettings,
+            applyMcpOps: (ops) => {
+              setSettings((prev) => applyMcpOpsToAppSettings(prev, ops));
             },
-            enabledMcpServerIds,
-            selectableMcpServers,
             remoteWebTunnelsEnabled: settings.remote.enableWebTunnels,
             tunnelPublicBaseUrl: settings.remote.gatewayUrl.trim(),
             sshHosts: settings.ssh.hosts,

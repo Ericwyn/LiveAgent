@@ -52,3 +52,16 @@ pub(crate) use validate::*;
 /// 跨子模块共享的 Skill 限制常量。
 pub(crate) const MAX_SKILL_DESCRIPTION_LENGTH: usize = 1024;
 pub(crate) const MAX_SKILL_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Skills 根目录的进程级写锁。
+///
+/// 四路写者（agent 同步调用、gateway 转发、UI 后台安装线程、内置 Skill 种子）
+/// 共享同一目录树；所有对活动目标目录的变更（swap/删除/打包/种子写入）都必须
+/// 持有本锁。下载与暂存构建不持锁——只有毫秒级的落位段在锁内。
+static SKILLS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn skills_write_guard() -> std::sync::MutexGuard<'static, ()> {
+    SKILLS_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}

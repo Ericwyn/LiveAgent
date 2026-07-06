@@ -36,6 +36,7 @@ const DOCS_SERVER = {
 function createRegistryHarness() {
   const runnerCalls = [];
   const listedServerIds = [];
+  const listedServerCommands = [];
   const loader = createTsModuleLoader({
     mocks: {
       [agentRunnerModulePath]: {
@@ -55,6 +56,7 @@ function createRegistryHarness() {
         async invoke(command, args) {
           if (command === "mcp_list_tools") {
             listedServerIds.push((args.servers ?? []).map((server) => server.id));
+            listedServerCommands.push((args.servers ?? []).map((server) => server.command));
             return [
               {
                 serverId: "docs",
@@ -96,13 +98,14 @@ function createRegistryHarness() {
       },
     },
   });
-  return { loader, runnerCalls, listedServerIds };
+  return { loader, runnerCalls, listedServerIds, listedServerCommands };
 }
 
 async function buildRegistry(harness, { withSubagentRuntime, storeIpc } = {}) {
   const { loader } = harness;
   const { buildBuiltinToolRegistry } = loader.loadModule("src/lib/tools/builtinRegistry.ts");
   const { createFileToolState } = loader.loadModule("src/lib/tools/fileToolState.ts");
+  const mcpSettingsHolder = { value: { selected: ["docs"], servers: [DOCS_SERVER] } };
   const baseParams = {
     workdir: "/tmp/liveagent-subagent-registry-test",
     providerId: "codex",
@@ -110,12 +113,10 @@ async function buildRegistry(harness, { withSubagentRuntime, storeIpc } = {}) {
     skillsEnabled: true,
     runtimeScope: "chat",
     selectedSystemToolIds: [],
-    mcpSettings: { selected: ["docs"], servers: [DOCS_SERVER] },
-    enabledMcpServerIds: ["docs"],
-    selectableMcpServers: [DOCS_SERVER],
+    getMcpSettings: () => mcpSettingsHolder.value,
   };
   if (!withSubagentRuntime) {
-    return { registry: await buildBuiltinToolRegistry(baseParams) };
+    return { registry: await buildBuiltinToolRegistry(baseParams), mcpSettingsHolder };
   }
 
   const storeModule = loader.loadModule("src/lib/subagents/store.ts");
@@ -144,7 +145,7 @@ async function buildRegistry(harness, { withSubagentRuntime, storeIpc } = {}) {
       scheduler: schedulerModule.createSubagentScheduler(),
     },
   });
-  return { registry, store, ipc };
+  return { registry, store, ipc, mcpSettingsHolder };
 }
 
 test("registry without a subagent runtime exposes neither Agent nor SendMessage", async () => {
@@ -250,6 +251,29 @@ test("worktree children get fs/shell/ro-memory/MCP tools but no skills, system, 
 
   // The child executed inside the isolated worktree workdir.
   assert.equal(harness.runnerCalls[0].workdir, "/tmp/liveagent-subagents/agent-a");
+});
+
+test("subagent registries list MCP servers from live settings, not turn-start snapshots", async () => {
+  const harness = createRegistryHarness();
+  const { registry, mcpSettingsHolder } = await buildRegistry(harness, {
+    withSubagentRuntime: true,
+  });
+
+  // The config changes after the parent registry was built (e.g. the model
+  // just ran McpManager update); the child registry must see the new config
+  // instead of rolling the server back to the turn-start snapshot.
+  mcpSettingsHolder.value = {
+    selected: ["docs"],
+    servers: [{ ...DOCS_SERVER, command: "mock-mcp-server-v2" }],
+  };
+
+  const result = await registry.executeToolCall(
+    createAgentToolCall({
+      agents: [{ id: "agent-live", prompt: "Use docs if useful.", mode: "worktree" }],
+    }),
+  );
+  assert.equal(result.isError, false);
+  assert.deepEqual(harness.listedServerCommands, [["mock-mcp-server"], ["mock-mcp-server-v2"]]);
 });
 
 test("read-only children inherit MCP business tools but no write, shell, or manager tools", async () => {

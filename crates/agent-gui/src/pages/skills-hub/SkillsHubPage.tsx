@@ -26,6 +26,7 @@ import { useLocale } from "../../i18n";
 import { type AppSettings, updateSkills } from "../../lib/settings";
 import { cn } from "../../lib/shared/utils";
 import {
+  cancelSkillInstallJob,
   discoverSkills,
   getSkillInstallJobStatus,
   isAlwaysEnabledSkillName,
@@ -52,7 +53,7 @@ type SkillsHubView = "installed" | "store";
 
 const STORE_PAGE_LIMIT = 24;
 const INSTALLED_SKILL_PREVIEW_LINES = 10_000;
-const TERMINAL_INSTALL_PHASES = new Set(["done", "error"]);
+const TERMINAL_INSTALL_PHASES = new Set(["done", "error", "cancelled"]);
 const STORE_SORT_OPTIONS: Array<{ value: ClawHubSort; labelKey: string }> = [
   { value: "downloads", labelKey: "settings.skillsStoreSortMostDownloaded" },
   { value: "stars", labelKey: "settings.skillsStoreSortMostStarred" },
@@ -1793,7 +1794,21 @@ function SkillsStoreView(props: {
                         <div className="space-y-1.5">
                           <div className="flex items-center justify-between gap-3 text-[10.5px] text-muted-foreground">
                             <span>{installPhaseLabel(job, t)}</span>
-                            <span>{formatInstallProgress(job)}</span>
+                            <span className="flex items-center gap-1.5">
+                              {formatInstallProgress(job)}
+                              <button
+                                type="button"
+                                title={t("settings.cancel")}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void cancelSkillInstallJob(job.jobId).catch(() => undefined);
+                                }}
+                                onKeyDown={(event) => event.stopPropagation()}
+                                className="text-muted-foreground/70 transition-colors hover:text-foreground"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
                           </div>
                           <div className="h-1.5 overflow-hidden rounded-full bg-foreground/[0.08]">
                             {progress === null ? (

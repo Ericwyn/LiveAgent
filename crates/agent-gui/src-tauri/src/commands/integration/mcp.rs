@@ -1393,26 +1393,41 @@ fn run_client_test(
 }
 
 impl McpRuntimeManager {
+    // Lock discipline: the clients-map lock is only ever held for a get/insert
+    // and is never held while locking an individual client or spawning one.
+    // Holding the map lock across a busy client (long tools/call) or a slow
+    // spawn would stall every other server's commands behind it. Two threads
+    // racing with an identical config can briefly double-spawn; the loser's
+    // client is dropped (and its transport killed) when the Arc goes away,
+    // which is the correct trade-off versus global head-of-line blocking.
     fn ensure_client(&self, cfg: McpServerConfig) -> Result<Arc<Mutex<McpClient>>, String> {
         let id = cfg.id.trim().to_string();
         validate_runtime_config(&cfg)?;
 
-        let mut map = self
+        let existing = self
             .clients
             .lock()
-            .map_err(|_| "MCP 状态锁失败".to_string())?;
-        if let Some(existing) = map.get(&id) {
-            // Restart if config changed.
-            if let Ok(client) = existing.lock() {
-                if client.config == cfg {
-                    return Ok(existing.clone());
-                }
+            .map_err(|_| "MCP 状态锁失败".to_string())?
+            .get(&id)
+            .cloned();
+        if let Some(existing) = existing {
+            // Restart if config changed. Same-id calls serialize on the client
+            // lock (protocol streams cannot be shared), other servers do not.
+            let same_config = existing
+                .lock()
+                .map(|client| client.config == cfg)
+                .unwrap_or(false);
+            if same_config {
+                return Ok(existing);
             }
         }
 
         let client = McpClient::spawn(cfg)?;
         let arc = Arc::new(Mutex::new(client));
-        map.insert(id, arc.clone());
+        self.clients
+            .lock()
+            .map_err(|_| "MCP 状态锁失败".to_string())?
+            .insert(id, arc.clone());
         Ok(arc)
     }
 
@@ -1603,10 +1618,12 @@ pub async fn mcp_call_tool(
             .clients
             .lock()
             .map_err(|_| "Failed to lock MCP state".to_string())?;
-        let client = map
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| format!("Unknown MCP server: {id}"))?;
+        let client = map.get(&id).cloned().ok_or_else(|| {
+            format!(
+                "Unknown MCP server: {id} (it may have been reconfigured or stopped; \
+                 the tool list refreshes on the next conversation turn)"
+            )
+        })?;
         drop(map);
 
         let mut locked = client
@@ -1776,5 +1793,83 @@ mod tests {
             locked.last(),
             Some(&format!("line-{}", STDERR_TAIL_MAX_LINES + 4))
         );
+    }
+
+    // http transport spawn only parses the URL and builds a client, so real
+    // pool entries can be constructed offline.
+    fn offline_http_config(id: &str) -> McpServerConfig {
+        url_config(id, "http", Some("http://127.0.0.1:9/mcp"))
+    }
+
+    #[test]
+    fn ensure_client_reuses_same_config_and_replaces_changed_config() {
+        let manager = McpRuntimeManager::default();
+        let first = manager
+            .ensure_client(offline_http_config("srv"))
+            .expect("first ensure");
+        let second = manager
+            .ensure_client(offline_http_config("srv"))
+            .expect("second ensure");
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let changed = manager
+            .ensure_client(url_config("srv", "http", Some("http://127.0.0.1:9/mcp2")))
+            .expect("changed ensure");
+        assert!(!Arc::ptr_eq(&first, &changed));
+    }
+
+    #[test]
+    fn busy_client_does_not_block_other_servers() {
+        use std::sync::Barrier;
+        use std::time::Duration;
+
+        let manager = Arc::new(McpRuntimeManager::default());
+        let client_a = manager
+            .ensure_client(offline_http_config("server-a"))
+            .expect("seed server-a");
+
+        let barrier = Arc::new(Barrier::new(3));
+        // Holder simulates a long-running tools/call on server A.
+        let holder = {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let _guard = client_a.lock().expect("hold server-a");
+                barrier.wait();
+                std::thread::sleep(Duration::from_millis(800));
+            })
+        };
+        // Contender blocks on server A's client lock inside ensure_client. The
+        // old implementation did this while holding the pool map lock, which
+        // stalled every other server's commands behind it.
+        let contender = {
+            let manager = manager.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                manager.ensure_client(offline_http_config("server-a"))
+            })
+        };
+
+        barrier.wait();
+        std::thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        manager
+            .ensure_client(offline_http_config("server-b"))
+            .expect("ensure server-b");
+        let status = manager
+            .runtime_status("server-b")
+            .expect("status server-b");
+        assert_eq!(status.server_id, "server-b");
+        assert!(manager.stop_client("server-b").expect("stop server-b"));
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "server-b commands stalled behind server-a's busy client"
+        );
+
+        contender
+            .join()
+            .expect("join contender")
+            .expect("contender ensure eventually succeeds");
+        holder.join().expect("join holder");
     }
 }

@@ -6,8 +6,8 @@
 |---|---|---|
 | builtin source | `crates/agent-gui/src-tauri/prompt/skills/<skill-name>` | 内置 skills 源文件。 |
 | runtime root | `~/.liveagent/skills` | 用户运行时 skills 根目录。 |
-| Rust service | `src-tauri/src/services/skills.rs` | seed builtin、list/read/manage/install/create/validate/package/ClawHub。 |
-| Frontend lib | `src/lib/skills/*`、WebUI copy | discover skills、build prompt、ClawHub client、install status。 |
+| Rust service | `src-tauri/src/services/skills/*` | seed builtin、list/read/manage/install/create/validate/package/ClawHub。写侧由进程级 `skills_write_guard()` 串行化（agent 调用、gateway 转发、UI 后台安装线程、builtin seeding 四路写者）；安装走 stage-then-swap：内容（含 `_meta.json`）先在 `<root>/.staging/` 完整构建，再原子 rename 入位，读者永远看不到半成品。 |
+| Frontend lib | `src/lib/skills/*`、WebUI copy | discover skills（仅 managed list，经 `SkillsManager list`）、build prompt、ClawHub client、install status。 |
 | Tool | `src/lib/tools/skillTools.ts` | `SkillsManager`。 |
 | Hub UI | `src/pages/skills-hub/SkillsHubPage.tsx`、WebUI mirror | Installed/Store 两个视图，选择、扫描、预览、安装。 |
 
@@ -33,6 +33,8 @@
 | `clawhub_search` | 搜索/浏览 ClawHub。 |
 | `clawhub_install` | 按 ClawHub slug 下载并安装。 |
 
+另有 UI 专用的后台安装 job 动作（不在 agent 工具 schema 内）：`install_start` 启动带进度的后台安装线程、`install_status` 轮询快照、`install_cancel` 协作式取消（下载与逐 skill 安装循环检查取消标记，终态为 `phase: "cancelled"`）。
+
 ## Skills 选择与 Prompt 注入
 
 | 阶段 | 说明 |
@@ -52,6 +54,7 @@
 | Rust runtime | `src-tauri/src/commands/mcp.rs` | stdio/http/sse server lifecycle、tools/list、call_tool、test/restart/stop/status。 |
 | Dynamic tools | `src/lib/tools/mcpTools.ts` | 把 enabled MCP server 的工具暴露给模型。 |
 | Manager tool | `src/lib/tools/mcpManagerTools.ts` | MCP 配置 CRUD、诊断与生命周期控制。 |
+| Write path | `src/lib/settings/mcpOps.ts` | 唯一的 MCP 配置写路径：`McpSettingsOp`（upsert/patch/remove/setEnabled）+ 纯 reducer `applyMcpOps`，按 id 合并进 `setSettings(prev => ...)`；工具读取走 `getMcpSettings` 实时 getter（权威 `settingsRef`），不做 turn 级快照，读改写决策与提交在同一同步段内完成，从根上消除多写者覆盖。 |
 
 ## MCP 动态工具生命周期
 
@@ -62,7 +65,8 @@
 | List tools | 前端调用 Tauri `mcp_list_tools`，Rust 端启动/同步 server 并返回 tool info。 |
 | 命名 | 前端把 server/tool 名规范化为 `mcp_<server>_<tool>`，避免冲突和过长。 |
 | Call tool | 模型调用动态工具，前端 executor 调用 Tauri `mcp_call_tool`，结果进入 tool trace。 |
-| 管理 | `McpManager` 做 add/update/delete/enable/disable/status/test/restart/stop/tools/list。 |
+| 管理 | `McpManager` 做 add/update/delete/enable/disable/status/test/restart/stop/tools/list。写操作一律先 commit 配置、后 best-effort 停旧 runtime（stop 失败降级为 warning，由下次 `ensure_client` 配置判等自愈）。非 chat 作用域（如 cron）禁止写操作与 restart/stop，test/tools/diagnose 强制 `persist=false` 走瞬时连接，不触碰共享连接池。 |
+| Runtime pool | `McpRuntimeManager` 的 clients map 锁只做 get/insert 短持有，绝不在持 map 锁时锁单个 client 或 spawn——同 id 调用在 client 锁上串行，不同 server 互不阻塞。 |
 
 ## MCP Registry
 

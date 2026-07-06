@@ -46,9 +46,11 @@ import { assistantMessageToText } from "../../../lib/providers/llm";
 import { resolveRuntimePlatform } from "../../../lib/runtimePlatform";
 import {
   type AppSettings,
+  type McpSettingsOp,
   type ProviderId,
   type SshHostConfig,
   type SystemToolId,
+  selectEnabledMcpServers,
   workspaceProjectPathKey,
 } from "../../../lib/settings";
 import {
@@ -231,10 +233,8 @@ export type RunAgentConversationTurnParams = {
   }) => void | Promise<void>;
   agentTemplates: AppSettings["agents"];
   selectedSystemToolIds: SystemToolId[];
-  mcpSettings: AppSettings["mcp"];
-  updateMcpSettings?: (next: AppSettings["mcp"]) => void;
-  enabledMcpServerIds: string[];
-  selectableMcpServers: AppSettings["mcp"]["servers"];
+  getMcpSettings: () => AppSettings["mcp"];
+  applyMcpOps?: (ops: McpSettingsOp[]) => void;
   remoteWebTunnelsEnabled?: boolean;
   tunnelPublicBaseUrl?: string;
   onTunnelsChanged?: (change: TunnelManagerChange) => void;
@@ -320,10 +320,8 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     onManagedSkillsChanged,
     agentTemplates,
     selectedSystemToolIds,
-    mcpSettings,
-    updateMcpSettings,
-    enabledMcpServerIds,
-    selectableMcpServers,
+    getMcpSettings,
+    applyMcpOps,
     remoteWebTunnelsEnabled,
     tunnelPublicBaseUrl,
     onTunnelsChanged,
@@ -446,10 +444,8 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     runtimeScope: "chat",
     currentChatModel: selectedModel,
     selectedSystemToolIds,
-    mcpSettings,
-    updateMcpSettings,
-    enabledMcpServerIds,
-    selectableMcpServers,
+    getMcpSettings,
+    applyMcpOps,
     remoteWebTunnelsEnabled,
     tunnelProjectPathKey: workspaceProjectPathKey(effectiveWorkdir),
     tunnelPublicBaseUrl,
@@ -477,7 +473,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   });
   finishAgentPerfSpan(conversationDebugLogger, "builtin_registry.build", buildRegistryStartedAt, {
     toolCount: builtinRegistry.tools.length,
-    enabledMcpServerCount: enabledMcpServerIds.length,
+    enabledMcpServerCount: selectEnabledMcpServers(getMcpSettings()).length,
   });
   const combinedTools = builtinRegistry.tools;
 

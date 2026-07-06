@@ -3,7 +3,8 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use uuid::Uuid;
 
@@ -25,6 +26,9 @@ pub(crate) struct SkillInstallJobState {
     pub(crate) started_at: u64,
     pub(crate) updated_at: u64,
     pub(crate) finished_at: Option<u64>,
+    /// Cooperative cancellation flag checked by the worker's download and
+    /// per-skill install loops; surfaced to clients as `phase: "cancelled"`.
+    pub(crate) cancel_requested: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +116,22 @@ pub(crate) fn get_install_job_snapshot(
     Ok(install_job_snapshot(job))
 }
 
+pub(crate) fn cancel_install_job(job_id: &str) -> Result<SystemSkillInstallJobSnapshot, String> {
+    let mut jobs = skill_install_jobs()
+        .lock()
+        .map_err(|_| "Failed to lock Skill install jobs".to_string())?;
+    let job = jobs
+        .get_mut(job_id)
+        .ok_or_else(|| format!("Skill install job not found: {job_id}"))?;
+    if job.finished_at.is_some() {
+        return Err(format!("Skill install job already finished: {job_id}"));
+    }
+    job.cancel_requested.store(true, Ordering::Relaxed);
+    job.message = Some("Cancelling Skill install".to_string());
+    job.updated_at = now_millis();
+    Ok(install_job_snapshot(job))
+}
+
 pub(crate) fn start_install_job_from_payload(
     root: PathBuf,
     payload: &serde_json::Map<String, Value>,
@@ -127,6 +147,7 @@ pub(crate) fn start_install_job_from_payload(
 
     let job_id = Uuid::new_v4().to_string();
     let now = now_millis();
+    let cancel_requested = Arc::new(AtomicBool::new(false));
     let snapshot = insert_install_job(SkillInstallJobState {
         job_id: job_id.clone(),
         phase: "queued".to_string(),
@@ -142,27 +163,34 @@ pub(crate) fn start_install_job_from_payload(
         started_at: now,
         updated_at: now,
         finished_at: None,
+        cancel_requested: cancel_requested.clone(),
     })?;
 
     let thread_job_id = job_id.clone();
     let payload = payload.clone();
     thread::spawn(move || {
         let progress_job_id = thread_job_id.clone();
-        let result = install_source_from_payload_with_progress(&root, &payload, move |update| {
-            let _ = update_install_job(&progress_job_id, |job| {
-                job.phase = update.phase.to_string();
-                if update.phase == "downloading" {
-                    job.total_bytes = update.total_bytes;
-                }
-                if let Some(downloaded_bytes) = update.downloaded_bytes {
-                    job.downloaded_bytes = downloaded_bytes;
-                }
-                if let Some(message) = update.message {
-                    job.message = Some(message);
-                }
-                job.error = None;
-            });
-        });
+        let should_cancel = || cancel_requested.load(Ordering::Relaxed);
+        let result = install_source_from_payload_with_progress(
+            &root,
+            &payload,
+            move |update| {
+                let _ = update_install_job(&progress_job_id, |job| {
+                    job.phase = update.phase.to_string();
+                    if update.phase == "downloading" {
+                        job.total_bytes = update.total_bytes;
+                    }
+                    if let Some(downloaded_bytes) = update.downloaded_bytes {
+                        job.downloaded_bytes = downloaded_bytes;
+                    }
+                    if let Some(message) = update.message {
+                        job.message = Some(message);
+                    }
+                    job.error = None;
+                });
+            },
+            &should_cancel,
+        );
 
         match result {
             Ok(installed) => {
@@ -171,6 +199,14 @@ pub(crate) fn start_install_job_from_payload(
                     job.message = Some("Skill installed".to_string());
                     job.error = None;
                     job.installed = Some(installed);
+                    job.finished_at = Some(now_millis());
+                });
+            }
+            Err(error) if error == INSTALL_CANCELLED_ERROR => {
+                let _ = update_install_job(&thread_job_id, |job| {
+                    job.phase = "cancelled".to_string();
+                    job.message = Some("Skill install cancelled".to_string());
+                    job.error = None;
                     job.finished_at = Some(now_millis());
                 });
             }

@@ -264,34 +264,6 @@ pub(crate) fn read_skill_source_metadata(skill_dir: &Path) -> Option<SystemSkill
     })
 }
 
-pub(crate) fn write_skill_source_metadata_for_install(
-    root: &Path,
-    payload: &serde_json::Map<String, Value>,
-    installed: &[SystemSkillInstallResult],
-) -> Result<(), String> {
-    let Some(slug) = object_string(payload, "slug") else {
-        return Ok(());
-    };
-    let version = object_string(payload, "version").map(ToOwned::to_owned);
-    let published_at = payload.get("publishedAt").and_then(Value::as_u64);
-    let metadata = serde_json::json!({
-        "registry": "clawhub",
-        "slug": slug,
-        "version": version,
-        "publishedAt": published_at,
-    });
-    let bytes = serde_json::to_vec_pretty(&metadata)
-        .map_err(|e| format!("Failed to serialize Skill source metadata: {e}"))?;
-
-    for item in installed {
-        let target = root.join(&item.name);
-        fs::write(target.join("_meta.json"), &bytes)
-            .map_err(|e| format!("Failed to write Skill source metadata: {e}"))?;
-    }
-
-    Ok(())
-}
-
 pub(crate) fn skill_summary_from_dir(
     root: &Path,
     skill_dir: &Path,
@@ -349,6 +321,7 @@ pub(crate) fn delete_installed_skill(
 ) -> Result<SystemSkillDeleteResponse, String> {
     let name = sanitize_skill_name(name)?;
     ensure_not_builtin_skill_management_target(&name, "delete")?;
+    let _guard = skills_write_guard();
     let target = root.join(&name);
     let metadata = fs::symlink_metadata(&target).map_err(|e| {
         format!(
@@ -381,6 +354,7 @@ pub(crate) fn package_installed_skill(
     name: &str,
 ) -> Result<SystemSkillPackageResponse, String> {
     let name = sanitize_skill_name(name)?;
+    let _guard = skills_write_guard();
     let target = root.join(&name);
     let validation = validate_skill_dir(&target);
     if !validation.ok {

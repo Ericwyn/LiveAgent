@@ -106,5 +106,5 @@ pub(crate) fn create_skill_from_payload(
         ));
     }
 
-    copy_skill_with_conflict(&source_dir, root, &name, &conflict)
+    install_skill_dir(root, &source_dir, &name, &conflict, None)
 }

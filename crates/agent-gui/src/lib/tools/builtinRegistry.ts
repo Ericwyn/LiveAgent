@@ -1,7 +1,13 @@
 import type { ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { homeDir } from "@tauri-apps/api/path";
 import type { RuntimePlatform } from "../runtimePlatform";
-import type { McpServerConfig, ProviderId, SshHostConfig } from "../settings";
+import {
+  type McpSettings,
+  type McpSettingsOp,
+  type ProviderId,
+  type SshHostConfig,
+  selectEnabledMcpServers,
+} from "../settings";
 import {
   createSendMessageTools,
   createSubagentTools,
@@ -132,13 +138,10 @@ type BuildBuiltinBaseToolRegistryParams = {
     model: string;
   };
   selectedSystemToolIds: SystemToolId[];
-  mcpSettings: {
-    servers: McpServerConfig[];
-    selected: string[];
-  };
-  updateMcpSettings?: (next: { servers: McpServerConfig[]; selected: string[] }) => void;
-  enabledMcpServerIds: string[];
-  selectableMcpServers: McpServerConfig[];
+  /** Live read of the authoritative MCP settings (never a turn-level snapshot). */
+  getMcpSettings: () => McpSettings;
+  /** Id-keyed merge commit into the authoritative settings; absent in read-only scopes. */
+  applyMcpOps?: (ops: McpSettingsOp[]) => void;
   onMcpLoadError?: (message: string) => void;
   mcpLoadFailureMode?: "continue" | "throw";
   memoryToolMode?: "rw" | "ro";
@@ -155,7 +158,6 @@ type BuildBuiltinBaseToolRegistryParams = {
 const resolveHomeDir = () => homeDir();
 
 async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryParams) {
-  let currentMcpSettings = params.mcpSettings;
   const baseBundles: BuiltinToolBundle[] = [
     createFsTools({
       workdir: params.workdir,
@@ -189,13 +191,8 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
     }),
     createMcpManagerTools({
       workdir: params.workdir,
-      getMcpSettings: () => currentMcpSettings,
-      setMcpSettings: params.updateMcpSettings
-        ? (next) => {
-            currentMcpSettings = next;
-            params.updateMcpSettings?.(next);
-          }
-        : undefined,
+      getMcpSettings: params.getMcpSettings,
+      applyMcpOps: params.applyMcpOps,
       runtimeScope: params.runtimeScope,
       resolveHomeDir,
     }),
@@ -237,11 +234,8 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
       : []),
   ];
 
-  if (params.enabledMcpServerIds.length > 0) {
-    const enabledMcpServerIdSet = new Set(params.enabledMcpServerIds);
-    const enabledServers = params.selectableMcpServers.filter((server) =>
-      enabledMcpServerIdSet.has(server.id),
-    );
+  const enabledServers = selectEnabledMcpServers(params.getMcpSettings());
+  if (enabledServers.length > 0) {
     baseBundles.push(
       await createMcpTools({
         servers: enabledServers,
@@ -306,9 +300,8 @@ export async function buildBuiltinToolRegistry(
             workdir,
             fileState: createFileToolState(),
             skillsEnabled: false,
-            updateMcpSettings: undefined,
+            applyMcpOps: undefined,
             selectedSystemToolIds: [],
-            enabledMcpServerIds: params.enabledMcpServerIds,
             mcpLoadFailureMode: "continue",
             memoryToolMode: "ro",
           }),

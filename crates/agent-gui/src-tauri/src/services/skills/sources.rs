@@ -95,6 +95,7 @@ pub(crate) fn write_download_to_path_with_progress<F>(
     url: &str,
     target: &Path,
     mut on_progress: F,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, String>
 where
     F: FnMut(u64, Option<u64>),
@@ -135,6 +136,9 @@ where
     on_progress(downloaded, total_bytes);
 
     loop {
+        if should_cancel() {
+            return Err(INSTALL_CANCELLED_ERROR.to_string());
+        }
         let read = response
             .read(&mut buffer)
             .map_err(|e| format!("Failed to read Skill source response: {e}"))?;
@@ -160,8 +164,12 @@ where
     Ok(bytes)
 }
 
-pub(crate) fn write_download_to_path(url: &str, target: &Path) -> Result<Vec<u8>, String> {
-    write_download_to_path_with_progress(url, target, |_, _| {})
+pub(crate) fn write_download_to_path(
+    url: &str,
+    target: &Path,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Vec<u8>, String> {
+    write_download_to_path_with_progress(url, target, |_, _| {}, should_cancel)
 }
 
 pub(crate) fn is_github_source(value: &str) -> bool {
@@ -249,6 +257,7 @@ pub(crate) fn prepare_github_source(
     method: &str,
     default_ref: &str,
     tmp_root: &Path,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<PathBuf, String> {
     let source = parse_github_url(value, default_ref)?;
     let mut repo_root = None;
@@ -258,7 +267,7 @@ pub(crate) fn prepare_github_source(
             "https://codeload.github.com/{}/{}/zip/{}",
             source.owner, source.repo, source.git_ref
         );
-        match write_download_to_path(&zip_url, &archive).and_then(|_| {
+        match write_download_to_path(&zip_url, &archive, should_cancel).and_then(|_| {
             let extract_dir = tmp_root.join("github-download");
             safe_extract_zip(&archive, &extract_dir)?;
             let mut top_levels = fs::read_dir(&extract_dir)
@@ -274,11 +283,15 @@ pub(crate) fn prepare_github_source(
             Ok(top_levels.remove(0))
         }) {
             Ok(path) => repo_root = Some(path),
+            Err(error) if error == INSTALL_CANCELLED_ERROR => return Err(error),
             Err(error) if method == "download" => {
                 return Err(format!("GitHub download failed: {error}"));
             }
             Err(_) => {}
         }
+    }
+    if should_cancel() {
+        return Err(INSTALL_CANCELLED_ERROR.to_string());
     }
 
     if repo_root.is_none() {
@@ -324,6 +337,7 @@ pub(crate) fn prepare_http_source_with_progress<F>(
     value: &str,
     tmp_root: &Path,
     mut on_progress: F,
+    should_cancel: &dyn Fn() -> bool,
 ) -> Result<PathBuf, String>
 where
     F: FnMut(SkillInstallProgressUpdate),
@@ -337,15 +351,19 @@ where
         total_bytes: None,
         message: Some("Downloading Skill archive".to_string()),
     });
-    let bytes =
-        write_download_to_path_with_progress(value, &download_path, |downloaded, total| {
+    let bytes = write_download_to_path_with_progress(
+        value,
+        &download_path,
+        |downloaded, total| {
             on_progress(SkillInstallProgressUpdate {
                 phase: "downloading",
                 downloaded_bytes: Some(downloaded),
                 total_bytes: total,
                 message: Some("Downloading Skill archive".to_string()),
             });
-        })?;
+        },
+        should_cancel,
+    )?;
     let is_zip = lower_path.ends_with(".zip")
         || lower_path.ends_with(".skill")
         || bytes.starts_with(b"PK\x03\x04");

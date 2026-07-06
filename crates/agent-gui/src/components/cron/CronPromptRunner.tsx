@@ -55,16 +55,6 @@ function getActiveAgentPrompt(settings: AppSettings) {
   );
 }
 
-function resolveEnabledMcpServers(settings: AppSettings) {
-  const selectableMcpServers = settings.mcp.servers.filter(
-    (server) => server.enabled && server.id.trim(),
-  );
-  return {
-    selectableMcpServers,
-    enabledMcpServerIds: selectableMcpServers.map((server) => server.id),
-  };
-}
-
 async function buildCronSkillsContext(settings: AppSettings) {
   const selectedSkillNames = settings.skills.selected.filter(
     (name) => !isAlwaysEnabledSkillName(name),
@@ -137,7 +127,6 @@ async function executeCronPromptRun(
 
   const skillsContext = await buildCronSkillsContext(settings);
   const activeAgentPrompt = getActiveAgentPrompt(settings);
-  const { selectableMcpServers, enabledMcpServerIds } = resolveEnabledMcpServers(settings);
   const runtimePlatform = await resolveRuntimePlatform();
   const builtinRegistry = await buildBuiltinToolRegistry({
     workdir,
@@ -153,9 +142,7 @@ async function executeCronPromptRun(
       model: request.model,
     },
     selectedSystemToolIds: settings.system.selectedSystemTools,
-    mcpSettings: settings.mcp,
-    enabledMcpServerIds,
-    selectableMcpServers,
+    getMcpSettings: () => settings.mcp,
     mcpLoadFailureMode: "throw",
   });
 

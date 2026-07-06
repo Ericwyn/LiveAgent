@@ -68,11 +68,6 @@ function isCommonSkillMentionEnvVar(name: string) {
   );
 }
 
-type SystemListSkillFilesResponse = {
-  rootDir: string;
-  paths: string[];
-  truncated: boolean;
-};
 type SystemBuiltinSkillSeedResponse = {
   name: string;
   target: string;
@@ -140,7 +135,6 @@ type SystemManageSkillResponse = {
     name: string;
     target: string;
   } | null;
-  seeded?: SystemBuiltinSkillSeedResponse[] | null;
   installJob?: SkillInstallJobSnapshot | null;
   clawhubResults?: ClawHubSkillCard[] | null;
   clawhubNextCursor?: string | null;
@@ -150,13 +144,6 @@ type SystemManageSkillResponse = {
 
 type DiscoverSkillsOptions = {
   force?: boolean;
-};
-
-type SkillDirFiles = {
-  baseDir: string;
-  jsonFile?: string;
-  markdownFile?: string;
-  readmeFile?: string;
 };
 
 const README_INLINE_READ_LENGTH_LINES = 10000;
@@ -310,67 +297,8 @@ function normalizeSkillSourceMetadata(
   };
 }
 
-function isSkillJsonPath(path: string) {
-  return /(?:^|\/)skill\.json$/i.test(path);
-}
-
-function isSkillMarkdownPath(path: string) {
-  return /(?:^|\/)skill\.md$/i.test(path);
-}
-
 function isSkillReadmePath(path: string) {
   return /(?:^|\/)readme\.md$/i.test(path);
-}
-
-function getSkillBaseDir(path: string) {
-  return path.replace(/(?:^|\/)(?:skill\.(?:json|md)|readme\.md)$/i, "");
-}
-
-function normalizeSkillNameFromBaseDir(baseDir: string) {
-  const segments = normalizeRelPath(baseDir).split("/").filter(Boolean);
-  const segment = segments.length > 0 ? segments[segments.length - 1] : "readme-skill";
-  return (
-    segment
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .replace(/-+/g, "-") || "readme-skill"
-  );
-}
-
-function firstReadmeDescriptionLine(content: string) {
-  for (const rawLine of content.replace(/^\uFEFF/, "").split(/\r?\n/)) {
-    const line = rawLine
-      .trim()
-      .replace(/^#+\s*/, "")
-      .replace(/^[*_`]+|[*_`]+$/g, "")
-      .trim();
-    if (line === "---") continue;
-    if (line) return line.slice(0, 280);
-  }
-  return "";
-}
-
-async function buildReadmeFallbackSkill(params: {
-  baseDir: string;
-  skillFile: string;
-}): Promise<SkillSummary> {
-  const readme = await readSkillText({
-    path: params.skillFile,
-    length: README_INLINE_READ_LENGTH_LINES,
-  });
-  const name = normalizeSkillNameFromBaseDir(params.baseDir);
-  const description =
-    firstReadmeDescriptionLine(readme.content) || `README.md skill instructions for ${name}`;
-  return {
-    name,
-    description,
-    skillFile: params.skillFile,
-    baseDir: params.baseDir,
-    inlineContent: readme.content,
-    inlineContentTruncated: readme.truncated,
-  };
 }
 
 export async function ensureBuiltinSkills() {
@@ -486,121 +414,9 @@ async function managedSkillListToDiscovery(
   return discovery;
 }
 
-async function discoverSkillsViaManagedList(): Promise<SkillDiscovery | null> {
-  try {
-    return await managedSkillListToDiscovery(await manageSkill({ action: "list" }));
-  } catch {
-    return null;
-  }
-}
-
-async function discoverSkillsViaLegacyFileScan(): Promise<SkillDiscovery> {
-  const response = await invoke<SystemListSkillFilesResponse>("system_list_skill_files");
-  const rootDir = normalizeDisplayPath(response.rootDir ?? "");
-  const sourceByBaseDir = new Map<string, SkillSourceMetadata>();
-  const sourceByName = new Map<string, SkillSourceMetadata>();
-  try {
-    const managed = await manageSkill({ action: "list" });
-    for (const skill of managed.skills ?? []) {
-      if (!skill.source) continue;
-      const source = normalizeSkillSourceMetadata(skill.source);
-      if (!source) continue;
-      sourceByBaseDir.set(normalizeRelPath(skill.baseDir), source);
-      sourceByName.set(skill.name, source);
-    }
-  } catch {
-    // Source metadata is best-effort; core discovery still works without it.
-  }
-  const groups = new Map<string, SkillDirFiles>();
-  for (const rawPath of Array.from(response.paths ?? [])) {
-    const path = normalizeRelPath(String(rawPath));
-    const baseDir = getSkillBaseDir(path);
-    const existing = groups.get(baseDir) ?? { baseDir };
-    if (isSkillJsonPath(path)) {
-      existing.jsonFile = existing.jsonFile ?? path;
-    } else if (isSkillMarkdownPath(path)) {
-      existing.markdownFile = existing.markdownFile ?? path;
-    } else if (isSkillReadmePath(path)) {
-      existing.readmeFile = existing.readmeFile ?? path;
-    } else {
-      continue;
-    }
-    groups.set(baseDir, existing);
-  }
-
-  const skills: SkillSummary[] = [];
-  const readErrors: string[] = [];
-  const invalidMetadata: string[] = [];
-  for (const group of Array.from(groups.values())) {
-    const metadataFile = group.jsonFile ?? group.markdownFile ?? group.readmeFile;
-    const skillFile = group.markdownFile ?? group.jsonFile ?? group.readmeFile;
-    if (!metadataFile || !skillFile) continue;
-    try {
-      const metadata = await invoke<SystemReadSkillMetadataResponse>("system_read_skill_metadata", {
-        path: metadataFile,
-      } as any);
-
-      const name = typeof metadata.name === "string" ? metadata.name.trim() : "";
-      const description =
-        typeof metadata.description === "string" ? metadata.description.trim() : "";
-      if (!name || !description) {
-        if (
-          !name &&
-          !description &&
-          metadataFile === group.readmeFile &&
-          skillFile === group.readmeFile
-        ) {
-          skills.push(
-            await buildReadmeFallbackSkill({
-              baseDir: group.baseDir,
-              skillFile,
-            }),
-          );
-          continue;
-        }
-        invalidMetadata.push(metadataFile);
-        continue;
-      }
-
-      skills.push({
-        name,
-        description,
-        skillFile,
-        baseDir: group.baseDir,
-        source: sourceByBaseDir.get(group.baseDir) ?? sourceByName.get(name) ?? null,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      readErrors.push(`${metadataFile}: ${message}`);
-    }
-  }
-
-  const discovery: SkillDiscovery = {
-    rootDir,
-    skills: sortAndDedupeSkills(skills),
-  };
-
-  if (discovery.skills.length > 0) {
-    return discovery;
-  }
-
-  if ((response.paths?.length ?? 0) > 0) {
-    if (readErrors.length > 0) {
-      throw new Error(`发现 Skill 文件但读取失败：${readErrors[0]}`);
-    }
-    if (invalidMetadata.length > 0) {
-      throw new Error(`发现 Skill 元数据无效：${invalidMetadata[0]}（需要 name + description）`);
-    }
-  }
-
-  return discovery;
-}
-
 async function loadSkillsDiscovery(): Promise<SkillDiscovery> {
   await ensureBuiltinSkills();
-  const managedDiscovery = await discoverSkillsViaManagedList();
-  if (managedDiscovery) return managedDiscovery;
-  return discoverSkillsViaLegacyFileScan();
+  return managedSkillListToDiscovery(await manageSkill({ action: "list" }));
 }
 
 export async function discoverSkills(options: DiscoverSkillsOptions = {}): Promise<SkillDiscovery> {
@@ -676,6 +492,14 @@ export async function getSkillInstallJobStatus(jobId: string): Promise<SkillInst
   const response = await manageSkill({ action: "install_status", jobId });
   if (!response.installJob) {
     throw new Error("SkillsManager install_status did not return an install job");
+  }
+  return response.installJob;
+}
+
+export async function cancelSkillInstallJob(jobId: string): Promise<SkillInstallJobSnapshot> {
+  const response = await manageSkill({ action: "install_cancel", jobId });
+  if (!response.installJob) {
+    throw new Error("SkillsManager install_cancel did not return an install job");
   }
   return response.installJob;
 }

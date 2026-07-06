@@ -128,7 +128,7 @@ pub struct SystemSkillInstallJobSnapshot {
     pub finished_at: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemManageSkillResponse {
     pub action: String,
@@ -145,12 +145,21 @@ pub struct SystemManageSkillResponse {
     pub validation: Option<SystemSkillValidationResponse>,
     pub package: Option<SystemSkillPackageResponse>,
     pub deleted: Option<SystemSkillDeleteResponse>,
-    pub seeded: Option<Vec<SystemBuiltinSkillSeedResponse>>,
     pub install_job: Option<SystemSkillInstallJobSnapshot>,
     pub clawhub_results: Option<Vec<SystemClawHubSkillCard>>,
     pub clawhub_next_cursor: Option<String>,
     pub clawhub_slug: Option<String>,
     pub clawhub_download_url: Option<String>,
+}
+
+impl SystemManageSkillResponse {
+    pub(crate) fn base(action: String, root_dir: String) -> Self {
+        Self {
+            action,
+            root_dir,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

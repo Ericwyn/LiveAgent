@@ -143,6 +143,9 @@ pub(crate) fn builtin_skill_files_match(
 pub(crate) fn ensure_builtin_agent_skills_in_root(
     root: &Path,
 ) -> Result<Vec<SystemBuiltinSkillSeedResponse>, String> {
+    // Seeding backs up and rewrites live skill directories in place, so it
+    // must be serialized with every other skills-root writer.
+    let _guard = skills_write_guard();
     fs::create_dir_all(root).map_err(|e| format!("Failed to create Skills root directory: {e}"))?;
     let mut results = Vec::new();
     for builtin in BUILTIN_AGENT_SKILLS {

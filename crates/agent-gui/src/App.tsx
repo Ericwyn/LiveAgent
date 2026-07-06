@@ -269,6 +269,11 @@ export default function App() {
     [queueSettingsSave],
   );
 
+  // Authoritative live read for tool write paths: settingsRef is updated
+  // synchronously by setSettings, so read-modify-write sequences that stay in
+  // one synchronous segment can never observe a stale snapshot.
+  const getMcpSettings = useCallback(() => settingsRef.current.mcp, []);
+
   const reloadPersistedSettings = useCallback(async () => {
     await saveChainRef.current.catch(() => undefined);
     const { settings: loaded, defaultWorkdir } = await loadPersistedSettingsWithDefaults();
@@ -401,6 +406,7 @@ export default function App() {
         <ChatPage
           settings={settings}
           setSettings={setSettings}
+          getMcpSettings={getMcpSettings}
           context={context}
           setContext={setContext}
           onOpenSettings={openSettings}
