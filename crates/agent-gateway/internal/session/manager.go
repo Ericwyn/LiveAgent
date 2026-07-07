@@ -28,12 +28,13 @@ type AuthSnapshot struct {
 }
 
 type Manager struct {
-	registry     *sessionRegistry
-	syncHub      *syncHub
-	convStreams  *conversationStreamStore
-	tunnels      *tunnelRuntime
-	cmdQueue     *commandQueue
-	workspaceHub *workspaceActivityHub
+	registry         *sessionRegistry
+	syncHub          *syncHub
+	convStreams      *conversationStreamStore
+	tunnels          *tunnelRuntime
+	cmdQueue         *commandQueue
+	workspaceHub     *workspaceActivityHub
+	managedProcesses *managedProcessHub
 }
 
 type AgentSession struct {
@@ -78,11 +79,12 @@ type Status struct {
 
 func NewManager() *Manager {
 	m := &Manager{
-		registry:     newSessionRegistry(),
-		syncHub:      newSyncHub(),
-		tunnels:      newTunnelRuntime(),
-		cmdQueue:     newCommandQueue(defaultCommandQueueTimeout),
-		workspaceHub: newWorkspaceActivityHub(),
+		registry:         newSessionRegistry(),
+		syncHub:          newSyncHub(),
+		tunnels:          newTunnelRuntime(),
+		cmdQueue:         newCommandQueue(defaultCommandQueueTimeout),
+		workspaceHub:     newWorkspaceActivityHub(),
+		managedProcesses: newManagedProcessHub(),
 	}
 	m.convStreams = newConversationStreamStore(m.IsOnline)
 	go m.tunnelExpirySweepLoop()

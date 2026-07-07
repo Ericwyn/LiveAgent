@@ -162,6 +162,9 @@ impl GatewayController {
             if let Err(error) = self.publish_desired_tunnels().await {
                 eprintln!("publish gateway tunnel desired state failed: {error}");
             }
+            if let Err(error) = self.publish_current_managed_processes().await {
+                eprintln!("publish gateway managed processes failed: {error}");
+            }
             if let Err(error) = self.republish_chat_run_states().await {
                 eprintln!("republish gateway chat run states failed: {error}");
             }

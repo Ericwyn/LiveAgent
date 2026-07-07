@@ -3,6 +3,7 @@
   "guiRoot": "crates/agent-gui/src",
   "webRoot": "crates/agent-gateway/web/src",
   "files": [
+    "components/project-tools/BackgroundTasksPanel.tsx",
     "components/project-tools/rightDockModel.ts",
     "components/project-tools/rightDockRegistry.tsx",
     "components/project-tools/RightDockContent.tsx",
@@ -57,6 +58,8 @@
     "pages/settings/HookModal.tsx",
     "pages/settings/HooksSection.tsx",
     "pages/settings/CronTaskModal.tsx",
-    "pages/settings/CronTaskViewModal.tsx"
+    "pages/settings/CronTaskViewModal.tsx",
+    "lib/managed-process/store.ts",
+    "lib/managed-process/types.ts"
   ]
 }

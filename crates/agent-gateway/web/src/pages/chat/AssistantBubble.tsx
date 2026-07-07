@@ -843,6 +843,7 @@ const TOOL_CARD_ACTION_NAMES = new Set([
   "MemoryManager",
   "TunnelManager",
   "SSHManager",
+  "ManagedProcess",
 ]);
 
 function getManagerToolActionName(toolCall: { name: string; arguments?: Record<string, unknown> }) {
@@ -1096,6 +1097,21 @@ function getToolDisplay(toolCall: { name: string; arguments?: Record<string, unk
       return { type: "search" as const, path, pattern, tags };
     case "Bash":
       return { type: "bash" as const, path: null, pattern: null, tags };
+    case "ManagedProcess": {
+      if (typeof args.action === "string") tags.push({ label: "action", value: args.action });
+      if (typeof args.process_id === "string")
+        tags.push({ label: "process", value: args.process_id as string });
+      if (typeof args.label === "string")
+        tags.push({ label: "label", value: args.label as string });
+      if (typeof args.cwd === "string") tags.push({ label: "cwd", value: args.cwd as string });
+      if (args.isolated === true) tags.push({ label: "isolated", value: "true" });
+      if (typeof args.max_bytes === "number")
+        tags.push({ label: "max_bytes", value: String(args.max_bytes) });
+      const command = typeof args.command === "string" ? (args.command as string).trim() : "";
+      return command
+        ? { type: "bash" as const, path: null, pattern: null, tags }
+        : { type: "generic" as const, path: null, pattern: null, tags };
+    }
     default: {
       // Generic: collect all string/number/boolean args
       const entries: MetaTag[] = [];
@@ -1155,7 +1171,7 @@ function ToolArgsDisplay({ item }: { item: ToolTraceItem }) {
     );
   }
 
-  // Bash: terminal block
+  // Bash / ManagedProcess(start): terminal block
   if (display.type === "bash") {
     const cmd =
       typeof toolCall.arguments?.command === "string"
@@ -1163,12 +1179,15 @@ function ToolArgsDisplay({ item }: { item: ToolTraceItem }) {
         : "";
     if (!cmd) return null;
     return (
-      <ToolSurface className="overflow-hidden border-emerald-500/15 bg-zinc-950/90 px-0 py-0 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] dark:border-white/[0.08] dark:bg-zinc-950/90">
-        <ToolScrollablePre className="max-h-44 rounded-none text-emerald-300/90">
-          <span className="mr-1 select-none text-emerald-500/30">$</span>
-          {cmd}
-        </ToolScrollablePre>
-      </ToolSurface>
+      <div className="tool-expand flex flex-col gap-2">
+        <ToolSurface className="overflow-hidden border-emerald-500/15 bg-zinc-950/90 px-0 py-0 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] dark:border-white/[0.08] dark:bg-zinc-950/90">
+          <ToolScrollablePre className="max-h-44 rounded-none text-emerald-300/90">
+            <span className="mr-1 select-none text-emerald-500/30">$</span>
+            {cmd}
+          </ToolScrollablePre>
+        </ToolSurface>
+        {display.tags.length > 0 ? <MetaTags tags={display.tags} /> : null}
+      </div>
     );
   }
 
@@ -2593,13 +2612,16 @@ function ToolCallItem({
     (!isSubagentCard || !result) &&
     (isStreamingFilePreviewTool ? !result : hasArgs);
   const isBash = item.toolCall.name === "Bash";
-  const bashCmd =
-    !isRedactedToolContent && isBash && typeof item.toolCall.arguments?.command === "string"
+  const isManagedProcess = item.toolCall.name === "ManagedProcess";
+  const inlineCommand =
+    !isRedactedToolContent &&
+    (isBash || isManagedProcess) &&
+    typeof item.toolCall.arguments?.command === "string"
       ? item.toolCall.arguments.command.trim()
       : "";
-  const firstLine = bashCmd ? bashCmd.split("\n")[0] : "";
+  const firstLine = inlineCommand ? inlineCommand.split("\n")[0] : "";
   const toolArgsSummary =
-    isRedactedToolContent || isBash
+    isRedactedToolContent || isBash || inlineCommand
       ? ""
       : isSubagentCard
         ? getSubagentInlineSummary(item)
@@ -2675,7 +2697,7 @@ function ToolCallItem({
             (styled per the block container) matches the summary text */}
         <div
           className="min-w-0 truncate font-mono text-[11px] leading-5 text-muted-foreground/55"
-          title={!isBash && toolArgsSummary ? toolArgsSummary : undefined}
+          title={!isBash && !inlineCommand && toolArgsSummary ? toolArgsSummary : undefined}
         >
           <span className="font-sans text-[12.5px] font-semibold tracking-[-0.01em] text-foreground/90">
             {title.name}
@@ -2687,7 +2709,7 @@ function ToolCallItem({
             ) : null}
           </span>
 
-          {isBash && firstLine ? (
+          {firstLine ? (
             <span className="ml-1.5">
               <span className="text-muted-foreground/30">$</span>{" "}
               {firstLine.length > 48 ? `${firstLine.slice(0, 48)}…` : firstLine}
@@ -2721,7 +2743,7 @@ function ToolCallItem({
   const body = effectiveOpen ? (
     <div className="space-y-3 border-t border-black/[0.04] px-2.5 py-2.5 dark:border-white/[0.05]">
       {shouldShowArgs ? (
-        <ToolSection label={isBash ? t("chat.tool.command") : t("chat.tool.args")}>
+        <ToolSection label={isBash || inlineCommand ? t("chat.tool.command") : t("chat.tool.args")}>
           <ToolArgsDisplay item={item} />
         </ToolSection>
       ) : null}

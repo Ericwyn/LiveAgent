@@ -1,4 +1,5 @@
 pub mod managed_process;
+pub mod managed_process_journal;
 pub mod platform;
 pub mod process;
 pub mod project_path;

@@ -88,6 +88,11 @@ func (m *Manager) dispatchFromAgent(expected *AgentSession, env *gatewayv1.Agent
 		return
 	}
 
+	if managedProcessSnapshot := env.GetManagedProcessSnapshot(); managedProcessSnapshot != nil {
+		m.broadcastManagedProcessSnapshot(managedProcessSnapshot)
+		return
+	}
+
 	// Desired-state and probe payloads fan out broadcasts and relay probes;
 	// run them off the gRPC read loop so tunnel frames keep flowing.
 	if tunnelDesired := env.GetTunnelDesired(); tunnelDesired != nil {
@@ -100,7 +105,8 @@ func (m *Manager) dispatchFromAgent(expected *AgentSession, env *gatewayv1.Agent
 		return
 	}
 
-	// TunnelMutationResult intentionally falls through to session.dispatch:
-	// it answers a gateway-issued request and correlates by request id.
+	// TunnelMutationResult and ManagedProcessResponse intentionally fall
+	// through to session.dispatch: they answer gateway-issued requests and
+	// correlate by request id.
 	session.dispatch(env)
 }

@@ -20,6 +20,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::commands::settings::RemoteSettingsPayload;
+use crate::runtime::managed_process::ManagedProcessRegistry;
 use crate::runtime::sftp::SftpSessionRegistry;
 use crate::runtime::terminal::TerminalSessionRegistry;
 use crate::services::chat_run_ledger::ChatRunLedger;
@@ -38,6 +39,7 @@ mod connection;
 mod controller;
 mod envelope_handler;
 mod history_sync;
+mod managed_process;
 mod settings_sync;
 mod sftp;
 mod terminal;
@@ -81,6 +83,7 @@ pub struct GatewayController {
     memory_store: Arc<MemoryStore>,
     terminal_registry: Arc<TerminalSessionRegistry>,
     sftp_registry: Arc<SftpSessionRegistry>,
+    managed_process_registry: Arc<ManagedProcessRegistry>,
     config_tx: watch::Sender<RemoteSettingsPayload>,
     runner_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     status: Mutex<GatewayStatusSnapshot>,

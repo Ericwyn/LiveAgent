@@ -148,6 +148,8 @@ macro_rules! app_invoke_handler {
             commands::process::managed_process_status,
             commands::process::managed_process_stop,
             commands::process::managed_process_read_log,
+            commands::process::managed_process_snapshot,
+            commands::process::managed_process_clear,
             commands::terminal::terminal_shell_options,
             commands::terminal::terminal_list,
             commands::terminal::terminal_create,
@@ -386,6 +388,7 @@ pub fn run() {
         services::memory::MemoryStore::open().expect("failed to initialize LiveAgent memory store"),
     );
     let power_activity = Arc::new(services::power_activity::PowerActivityManager::default());
+    let managed_process_registry = Arc::new(runtime::managed_process::ManagedProcessRegistry::open());
     let terminal_registry = Arc::new(runtime::terminal::TerminalSessionRegistry::default());
     let sftp_registry = Arc::new(runtime::sftp::SftpSessionRegistry::new(Arc::clone(
         &terminal_registry,
@@ -400,9 +403,7 @@ pub fn run() {
         .manage(Arc::clone(&memory_store))
         .manage(Arc::clone(&power_activity))
         .manage(Arc::new(runtime::shell_runner::ShellRunRegistry::default()))
-        .manage(Arc::new(
-            runtime::managed_process::ManagedProcessRegistry::default(),
-        ))
+        .manage(Arc::clone(&managed_process_registry))
         .manage(Arc::clone(&terminal_registry))
         .manage(Arc::clone(&sftp_registry))
         .manage(Arc::clone(&allow_exit))
@@ -413,6 +414,7 @@ pub fn run() {
             let allow_exit = Arc::clone(&allow_exit);
             let terminal_registry = Arc::clone(&terminal_registry);
             let sftp_registry = Arc::clone(&sftp_registry);
+            let managed_process_registry = Arc::clone(&managed_process_registry);
             move |app| {
                 commands::history_db::initialize_history_db()?;
                 configure_system_tray(
@@ -434,7 +436,16 @@ pub fn run() {
                     Arc::clone(&memory_store),
                     Arc::clone(&terminal_registry),
                     Arc::clone(&sftp_registry),
+                    Arc::clone(&managed_process_registry),
                 ));
+                managed_process_registry.set_notifier(
+                    runtime::managed_process::ManagedProcessNotifier {
+                        app_handle: app.handle().clone(),
+                        gateway: Arc::downgrade(&gateway_controller),
+                    },
+                );
+                managed_process_registry.spawn_startup_reconcile();
+                managed_process_registry.spawn_monitor();
                 automation_store.set_notifier(services::automation::AutomationNotifier {
                     app_handle: app.handle().clone(),
                     gateway: Arc::downgrade(&gateway_controller),
@@ -497,6 +508,9 @@ pub fn run() {
                 }
                 api.prevent_exit();
             } else {
+                // Real exit: reclaim every non-isolated managed process
+                // before the OS tears us down (Drop is not guaranteed).
+                managed_process_registry.shutdown_cleanup();
                 power_activity.clear_all();
             }
         }

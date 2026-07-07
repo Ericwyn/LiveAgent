@@ -575,6 +575,8 @@ func (m *Manager) onAgentSessionCleared() {
 	m.tunnels.relay = nil
 	m.tunnels.mu.Unlock()
 	m.broadcastTunnelState()
+	// Managed-process subscribers re-render with agent_online=false.
+	m.rebroadcastManagedProcessState()
 }
 
 func (m *Manager) tunnelExpirySweepLoop() {

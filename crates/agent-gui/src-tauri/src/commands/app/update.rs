@@ -518,6 +518,20 @@ pub async fn app_update_install(
 
 #[tauri::command]
 pub fn app_restart(app: AppHandle) -> Result<(), String> {
+    // restart() tears the process down without firing ExitRequested/Exit
+    // (sync command, main thread), so the exit-path cleanup must run here or
+    // non-isolated managed processes leak across every update restart.
+    use tauri::Manager;
+    if let Some(registry) =
+        app.try_state::<std::sync::Arc<crate::runtime::managed_process::ManagedProcessRegistry>>()
+    {
+        registry.shutdown_cleanup();
+    }
+    if let Some(power) = app
+        .try_state::<std::sync::Arc<crate::services::power_activity::PowerActivityManager>>()
+    {
+        power.clear_all();
+    }
     app.restart();
 }
 

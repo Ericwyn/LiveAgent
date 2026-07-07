@@ -19,6 +19,9 @@ export const FILE_TREE_TAB_ID = RIGHT_DOCK_SINGLETON_TAB_IDS.fileTree;
 export const GIT_REVIEW_TAB_ID = RIGHT_DOCK_SINGLETON_TAB_IDS.gitReview;
 export const TUNNEL_TAB_ID = RIGHT_DOCK_SINGLETON_TAB_IDS.tunnel;
 export const SSH_TUNNEL_TAB_ID = RIGHT_DOCK_SINGLETON_TAB_IDS.sshTunnel;
+// Derived tab: exists while the managed-process store has records; never
+// persisted into right-dock settings.
+export const BACKGROUND_TASKS_TAB_ID = "background-tasks";
 export const PROJECT_TOOLS_RESIZE_END_EVENT = "liveagent:project-tools-resize-end";
 
 export type RightDockSingletonTabKind = RightDockToolKind;
@@ -31,6 +34,10 @@ export type RightDockVisibleTab =
       id: string;
       kind: "terminal";
       session: TerminalSession;
+    }
+  | {
+      id: string;
+      kind: "backgroundTasks";
     }
   | {
       id: string;
@@ -103,12 +110,14 @@ export function rightDockTabRequiresProject(kind: RightDockSingletonTabKind) {
 }
 
 export function getRightDockVisibleTabs(options: {
+  backgroundTasksVisible: boolean;
   localSessions: TerminalSession[];
   projectPathKey: string;
   projectState: RightDockProjectState;
   tunnelAvailable: boolean;
 }) {
-  const { localSessions, projectPathKey, projectState, tunnelAvailable } = options;
+  const { backgroundTasksVisible, localSessions, projectPathKey, projectState, tunnelAvailable } =
+    options;
   const nextTabs: RightDockVisibleTab[] = localSessions.map((session) => ({
     id: session.id,
     kind: "terminal",
@@ -119,6 +128,9 @@ export function getRightDockVisibleTabs(options: {
     if (kind === "tunnel" && !tunnelAvailable) continue;
     if (rightDockTabRequiresProject(kind) && !projectPathKey) continue;
     nextTabs.push({ id: rightDockSingletonTabId(kind), kind });
+  }
+  if (backgroundTasksVisible) {
+    nextTabs.push({ id: BACKGROUND_TASKS_TAB_ID, kind: "backgroundTasks" });
   }
   return nextTabs;
 }
@@ -132,7 +144,14 @@ export function resolveEffectiveActiveTabId(
   sessionsLoaded: boolean,
 ): string | null {
   if (activeTabId && orderedVisibleTabIds.includes(activeTabId)) return activeTabId;
-  if (activeTabId && !sessionsLoaded && !rightDockToolKindForTabId(activeTabId)) return null;
+  if (
+    activeTabId &&
+    !sessionsLoaded &&
+    activeTabId !== BACKGROUND_TASKS_TAB_ID &&
+    !rightDockToolKindForTabId(activeTabId)
+  ) {
+    return null;
+  }
   return orderedVisibleTabIds[0] ?? null;
 }
 

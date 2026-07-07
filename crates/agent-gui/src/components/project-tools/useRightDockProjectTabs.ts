@@ -6,6 +6,7 @@ import {
 } from "../../lib/settings";
 import type { TerminalSession } from "../../lib/terminal/types";
 import {
+  BACKGROUND_TASKS_TAB_ID,
   closeRightDockToolTabState,
   getCurrentRightDockActiveTab,
   getRightDockVisibleTabs,
@@ -18,6 +19,7 @@ import {
 } from "./rightDockModel";
 
 type UseRightDockProjectTabsOptions = {
+  backgroundTasksVisible: boolean;
   localSessions: TerminalSession[];
   projectPathKey: string;
   projectState: RightDockProjectState;
@@ -30,6 +32,7 @@ type UseRightDockProjectTabsOptions = {
 
 export function useRightDockProjectTabs(options: UseRightDockProjectTabsOptions) {
   const {
+    backgroundTasksVisible,
     localSessions,
     onProjectStateChange,
     projectPathKey,
@@ -45,12 +48,13 @@ export function useRightDockProjectTabs(options: UseRightDockProjectTabsOptions)
   const visibleTabs = useMemo(
     () =>
       getRightDockVisibleTabs({
+        backgroundTasksVisible,
         localSessions,
         projectPathKey,
         projectState,
         tunnelAvailable,
       }),
-    [localSessions, projectPathKey, projectState, tunnelAvailable],
+    [backgroundTasksVisible, localSessions, projectPathKey, projectState, tunnelAvailable],
   );
   const effectiveTabOrder = draftTabOrder ?? projectState.tabOrder;
   const orderedProjectTabs = useMemo(
@@ -117,6 +121,7 @@ export function useRightDockProjectTabs(options: UseRightDockProjectTabsOptions)
         const keepsId = (id: string) => {
           const toolKind = rightDockToolKindForTabId(id);
           if (toolKind) return Boolean(current.tools[toolKind]);
+          if (id === BACKGROUND_TASKS_TAB_ID) return backgroundTasksVisible;
           return liveSessionIds.has(id) || !sessionsLoaded;
         };
         const ordered: string[] = [];
@@ -129,7 +134,7 @@ export function useRightDockProjectTabs(options: UseRightDockProjectTabsOptions)
         return { ...current, tabOrder: ordered };
       });
     },
-    [localSessions, onProjectStateChange, sessionsLoaded],
+    [backgroundTasksVisible, localSessions, onProjectStateChange, sessionsLoaded],
   );
 
   return {

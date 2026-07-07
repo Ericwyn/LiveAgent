@@ -126,7 +126,11 @@ type websocketConnection struct {
 	chatActivityEventsCleanup func()
 	tunnelStateEvents         <-chan *gatewayv1.TunnelStateSnapshot
 	tunnelStateEventsCleanup  func()
-	heartbeatOnce             sync.Once
+
+	managedProcessEvents        <-chan *gatewayv1.ManagedProcessSnapshot
+	managedProcessEventsCleanup func()
+
+	heartbeatOnce sync.Once
 
 	terminalInterest *websocketTerminalInterestTracker
 
@@ -264,6 +268,10 @@ func (c *websocketConnection) close() {
 			c.tunnelStateEventsCleanup()
 			c.tunnelStateEventsCleanup = nil
 		}
+		if c.managedProcessEventsCleanup != nil {
+			c.managedProcessEventsCleanup()
+			c.managedProcessEventsCleanup = nil
+		}
 		c.cleanupChatStreamSubscriptions()
 		c.cleanupWorkspaceSubscriptions()
 		_ = c.conn.Close()
@@ -293,6 +301,7 @@ func (c *websocketConnection) handleAuth(req websocketRequest) {
 	c.startChatQueueEventForwarder()
 	c.startChatActivityForwarder()
 	c.startTunnelStateForwarder()
+	c.startManagedProcessStateForwarder()
 	c.startWebSocketHeartbeat()
 	if err := c.writeResponse(req.ID, map[string]any{"ok": true}); err != nil {
 		c.close()
@@ -300,6 +309,7 @@ func (c *websocketConnection) handleAuth(req websocketRequest) {
 	}
 	c.replayTerminalSessionSnapshot()
 	c.replayTunnelStateSnapshot()
+	c.replayManagedProcessSnapshot()
 }
 
 func (c *websocketConnection) startHistorySyncForwarder() {

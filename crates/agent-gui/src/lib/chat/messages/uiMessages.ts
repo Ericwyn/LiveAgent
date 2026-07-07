@@ -403,7 +403,26 @@ export function summarizeToolCall(
                                             ? `command=${summarizeToolArg(args.command)}`
                                             : null,
                                         ]
-                                      : [];
+                                      : name === "ManagedProcess"
+                                        ? [
+                                            includeManagerAction && typeof args.action === "string"
+                                              ? `action=${args.action}`
+                                              : null,
+                                            typeof args.process_id === "string"
+                                              ? `process=${summarizeToolArg(args.process_id)}`
+                                              : null,
+                                            typeof args.label === "string"
+                                              ? `label=${summarizeToolArg(args.label)}`
+                                              : null,
+                                            typeof args.cwd === "string"
+                                              ? `cwd=${summarizeToolArg(args.cwd)}`
+                                              : null,
+                                            args.isolated === true ? "isolated=true" : null,
+                                            typeof args.max_bytes === "number"
+                                              ? `maxBytes=${args.max_bytes}`
+                                              : null,
+                                          ]
+                                        : [];
 
   const summary = parts.filter(Boolean).join(" ");
   if (!summary) return includeName ? name : "";

@@ -70,7 +70,7 @@ export const RIGHT_DOCK_TOOL_KINDS = ["fileTree", "gitReview", "tunnel", "sshTun
 
 export type RightDockToolKind = (typeof RIGHT_DOCK_TOOL_KINDS)[number];
 
-export type RightDockTabKind = RightDockToolKind | "terminal";
+export type RightDockTabKind = RightDockToolKind | "terminal" | "backgroundTasks";
 
 export type RightDockToolTab = {
   openedAt: number;

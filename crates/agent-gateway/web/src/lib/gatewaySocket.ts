@@ -218,6 +218,67 @@ export type {
 
 type TunnelStateListener = (snapshot: TunnelStateSnapshot) => void;
 
+export type ManagedProcessRecordPayload = {
+  id: string;
+  label: string;
+  command: string;
+  cwd: string;
+  shell: string;
+  pid: number;
+  logPath: string;
+  startedAt: number;
+  finishedAt: number | null;
+  exitCode: number | null;
+  running: boolean;
+  isolated: boolean;
+  restored: boolean;
+};
+
+export type ManagedProcessStatePayload = {
+  revision: number;
+  agentOnline: boolean;
+  processes: ManagedProcessRecordPayload[];
+};
+
+export type ManagedProcessLogPayload = {
+  content: string;
+  logPath: string;
+  truncated: boolean;
+};
+
+type ManagedProcessStateListener = (state: ManagedProcessStatePayload) => void;
+
+type RawManagedProcessRecord = {
+  id?: string;
+  label?: string;
+  command?: string;
+  cwd?: string;
+  shell?: string;
+  pid?: number;
+  log_path?: string;
+  started_at?: number;
+  finished_at?: number;
+  exit_code?: number;
+  running?: boolean;
+  isolated?: boolean;
+  restored?: boolean;
+};
+
+type RawManagedProcessStatePayload = {
+  revision?: number;
+  agent_online?: boolean;
+  processes?: RawManagedProcessRecord[];
+};
+
+type RawManagedProcessOpPayload = {
+  action?: string;
+  stopped?: boolean;
+  state?: RawManagedProcessStatePayload;
+  log_content?: string;
+  log_path?: string;
+  log_truncated?: boolean;
+};
+
 type RawTunnelHealth = {
   status?: string;
   http_status?: number;
@@ -1017,6 +1078,31 @@ function normalizeTunnelStatus(input: RawTunnelStatus): TunnelStatus {
   };
 }
 
+function normalizeManagedProcessState(
+  input: RawManagedProcessStatePayload,
+): ManagedProcessStatePayload {
+  const processes = Array.isArray(input.processes) ? input.processes : [];
+  return {
+    revision: Number(input.revision ?? 0),
+    agentOnline: input.agent_online === true,
+    processes: processes.map((record) => ({
+      id: String(record.id ?? ""),
+      label: String(record.label ?? ""),
+      command: String(record.command ?? ""),
+      cwd: String(record.cwd ?? ""),
+      shell: String(record.shell ?? ""),
+      pid: Number(record.pid ?? 0),
+      logPath: String(record.log_path ?? ""),
+      startedAt: Number(record.started_at ?? 0),
+      finishedAt: typeof record.finished_at === "number" ? record.finished_at : null,
+      exitCode: typeof record.exit_code === "number" ? record.exit_code : null,
+      running: record.running === true,
+      isolated: record.isolated === true,
+      restored: record.restored === true,
+    })),
+  };
+}
+
 function normalizeTunnelStateSnapshot(input: RawTunnelStatePayload): TunnelStateSnapshot {
   return {
     revision: Number(input.revision ?? 0),
@@ -1122,6 +1208,8 @@ export class GatewayWebSocketClient {
   // revision instead.
   private lastTunnelStateServerRevision = 0;
   private tunnelStateRevisionCounter = 0;
+  private processStateListeners = new Set<ManagedProcessStateListener>();
+  private lastProcessState: ManagedProcessStatePayload | null = null;
   readonly conversationStreams = new ConversationStreamClient({
     request: (type, payload) => this.request(type, payload),
   });
@@ -1231,6 +1319,16 @@ export class GatewayWebSocketClient {
     }
     return () => {
       this.tunnelStateListeners.delete(listener);
+    };
+  }
+
+  subscribeProcessState(listener: ManagedProcessStateListener): () => void {
+    this.processStateListeners.add(listener);
+    if (this.lastProcessState) {
+      listener(this.lastProcessState);
+    }
+    return () => {
+      this.processStateListeners.delete(listener);
     };
   }
 
@@ -1508,6 +1606,43 @@ export class GatewayWebSocketClient {
       conversation_id: normalized,
       run_id: runId?.trim() || undefined,
     });
+  }
+
+  async processSnapshot(): Promise<ManagedProcessStatePayload> {
+    const payload = await this.requestWithRecovery<RawManagedProcessStatePayload>(
+      "process.snapshot",
+      {},
+    );
+    const state = normalizeManagedProcessState(payload ?? {});
+    this.emitProcessState(state);
+    return state;
+  }
+
+  async processStop(processId: string): Promise<ManagedProcessStatePayload | null> {
+    const payload = await this.requestWithRecovery<RawManagedProcessOpPayload>("process.stop", {
+      process_id: processId,
+    });
+    return payload?.state ? normalizeManagedProcessState(payload.state) : null;
+  }
+
+  async processClear(processId?: string): Promise<ManagedProcessStatePayload | null> {
+    const payload = await this.requestWithRecovery<RawManagedProcessOpPayload>(
+      "process.clear",
+      processId ? { process_id: processId } : {},
+    );
+    return payload?.state ? normalizeManagedProcessState(payload.state) : null;
+  }
+
+  async processReadLog(processId: string, maxBytes?: number): Promise<ManagedProcessLogPayload> {
+    const payload = await this.requestWithRecovery<RawManagedProcessOpPayload>(
+      "process.read_log",
+      maxBytes ? { process_id: processId, max_bytes: maxBytes } : { process_id: processId },
+    );
+    return {
+      content: String(payload?.log_content ?? ""),
+      logPath: String(payload?.log_path ?? ""),
+      truncated: payload?.log_truncated === true,
+    };
   }
 
   async cronManage(payload: CronManagePayload): Promise<CronManageResponse> {
@@ -2380,6 +2515,16 @@ export class GatewayWebSocketClient {
     }
   }
 
+  // No server-revision guard here: managed-process revisions are stamped by
+  // the desktop agent and persisted across restarts; the mirrored store does
+  // its own monotonic filtering.
+  private emitProcessState(state: ManagedProcessStatePayload) {
+    this.lastProcessState = state;
+    for (const listener of this.processStateListeners) {
+      listener(state);
+    }
+  }
+
   private emitTunnelState(snapshot: TunnelStateSnapshot) {
     // Drop stale/reordered snapshots from the current gateway process.
     if (snapshot.revision <= this.lastTunnelStateServerRevision) {
@@ -2609,6 +2754,17 @@ export class GatewayWebSocketClient {
       const event = normalizeSftpTransferEvent(envelope.payload as RawSftpEvent);
       if (event) {
         this.emitSftpTransfer(event);
+      }
+      return;
+    }
+
+    if (envelope.type === "process.state") {
+      const payload =
+        envelope.payload && typeof envelope.payload === "object"
+          ? (envelope.payload as RawManagedProcessStatePayload)
+          : null;
+      if (payload) {
+        this.emitProcessState(normalizeManagedProcessState(payload));
       }
       return;
     }
@@ -2942,6 +3098,11 @@ export type GatewayWebSocketClientLike = {
   closeTerminal(sessionId: string, projectPathKey?: string): Promise<TerminalSession>;
   closeProjectTerminals(projectPathKey: string): Promise<TerminalSession[]>;
   subscribeTunnelState(listener: (snapshot: TunnelStateSnapshot) => void): () => void;
+  subscribeProcessState(listener: (state: ManagedProcessStatePayload) => void): () => void;
+  processSnapshot(): Promise<ManagedProcessStatePayload>;
+  processStop(processId: string): Promise<ManagedProcessStatePayload | null>;
+  processClear(processId?: string): Promise<ManagedProcessStatePayload | null>;
+  processReadLog(processId: string, maxBytes?: number): Promise<ManagedProcessLogPayload>;
   subscribeWorkspaceActivity(
     workdir: string,
     listener: (event: WorkspaceActivityEventPayload) => void,
@@ -3014,15 +3175,36 @@ export type GatewayWebSocketClientLike = {
 
 let activeClient: GatewayWebSocketClient | null = null;
 let activeToken = "";
+const clientReplacedListeners = new Set<() => void>();
+
+/**
+ * Fires after the singleton client has been replaced (token change). Module
+ * scoped stores that subscribed on the old instance re-attach here — a
+ * disposed client never delivers events again.
+ */
+export function onGatewayWebSocketClientReplaced(listener: () => void): () => void {
+  clientReplacedListeners.add(listener);
+  return () => {
+    clientReplacedListeners.delete(listener);
+  };
+}
 
 export function getGatewayWebSocketClient(token: string): GatewayWebSocketClient {
   const normalizedToken = token.trim();
   if (activeClient && activeToken === normalizedToken) {
     return activeClient;
   }
+  const replaced = activeClient !== null;
   activeClient?.dispose();
   activeToken = normalizedToken;
   activeClient = new GatewayWebSocketClient(normalizedToken);
+  if (replaced) {
+    // The new instance is already installed, so re-entrant
+    // getGatewayWebSocketClient calls from listeners hit the fast path.
+    for (const listener of clientReplacedListeners) {
+      listener();
+    }
+  }
   return activeClient;
 }
 

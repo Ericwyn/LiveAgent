@@ -12,6 +12,7 @@ import {
 } from "react";
 import { useLocale } from "../../i18n";
 import type { GitClient } from "../../lib/git/types";
+import { ensureManagedProcessInit, useManagedProcesses } from "../../lib/managed-process/store";
 import type {
   RightDockFileTreeState,
   RightDockFileTreeStatePatch,
@@ -30,6 +31,7 @@ import { RightDockToolContext, type RightDockToolContextValue } from "./RightDoc
 import { RightDockChooser, RightDockCreateMenu } from "./RightDockLauncher";
 import { RightDockTabStrip } from "./RightDockTabStrip";
 import {
+  BACKGROUND_TASKS_TAB_ID,
   dirname,
   expandedPathsForFileTreePath,
   formatTerminalSessionTitle,
@@ -446,6 +448,26 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
 
   const activeTerminalError = activeSession ? (terminalErrors.get(activeSession.id) ?? null) : null;
 
+  const managedProcessState = useManagedProcesses();
+  useEffect(() => {
+    ensureManagedProcessInit().catch((error) => {
+      console.error("managed process init failed", error);
+    });
+  }, []);
+  // Session-local visibility: the tab stays derived and never writes
+  // persisted right-dock settings for existence. Closing is hide-only — it
+  // snapshots the current task ids and touches no process state; a task id
+  // outside that snapshot (a newly started one) re-derives the tab.
+  const [backgroundTasksOpened, setBackgroundTasksOpened] = useState(false);
+  const [backgroundTasksDismissedIds, setBackgroundTasksDismissedIds] =
+    useState<ReadonlySet<string> | null>(null);
+  const backgroundTasksVisible =
+    backgroundTasksOpened ||
+    managedProcessState.processes.some((process) => !backgroundTasksDismissedIds?.has(process.id));
+  const backgroundTasksRunning = managedProcessState.processes.filter(
+    (process) => process.running,
+  ).length;
+
   const tunnelAvailable = Boolean(tunnelClient);
   const {
     activateTab,
@@ -462,6 +484,7 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
     sshTunnelInitialized,
     tunnelInitialized,
   } = useRightDockProjectTabs({
+    backgroundTasksVisible,
     localSessions,
     onProjectStateChange,
     projectPathKey,
@@ -473,6 +496,20 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
   const handleCreate = useCallback(() => {
     createTerminal();
   }, [createTerminal]);
+
+  const openBackgroundTasks = useCallback(() => {
+    setBackgroundTasksOpened(true);
+    setBackgroundTasksDismissedIds(null);
+    activateTab(BACKGROUND_TASKS_TAB_ID);
+  }, [activateTab]);
+
+  const closeBackgroundTasks = useCallback(() => {
+    // Ephemeral only; the persisted activeTabId falls back at render time.
+    setBackgroundTasksOpened(false);
+    setBackgroundTasksDismissedIds(
+      new Set(managedProcessState.processes.map((process) => process.id)),
+    );
+  }, [managedProcessState.processes]);
 
   const { consumeSuppressedTabClick, draggingTabId, renderTabDragHandle, tabsScrollRef } =
     useRightDockTabReorder({
@@ -695,6 +732,8 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
                     <RightDockTabStrip
                       tabs={orderedProjectTabs}
                       currentActiveTab={currentActiveTab}
+                      backgroundTasksRunning={backgroundTasksRunning}
+                      onCloseBackgroundTasks={closeBackgroundTasks}
                       activeSession={activeSession}
                       pendingCloseSessionId={pendingCloseSessionId}
                       closingSessionIds={closingSessionIds}
@@ -720,6 +759,7 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
                   creating={creating}
                   onCreateTerminal={createTerminal}
                   onStartTool={startToolTab}
+                  onOpenBackgroundTasks={openBackgroundTasks}
                 />
                 {onClose ? (
                   <Button
@@ -783,6 +823,7 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
                   error={error}
                   onCreateTerminal={createTerminal}
                   onStartTool={startToolTab}
+                  onOpenBackgroundTasks={openBackgroundTasks}
                 />
               ) : (
                 <RightDockContent

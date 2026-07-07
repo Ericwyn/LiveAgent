@@ -5,6 +5,7 @@ import { cn } from "../../lib/shared/utils";
 import type { TerminalSession, TerminalSnapshot } from "../../lib/terminal/types";
 import { Terminal } from "../icons";
 import { Button } from "../ui/button";
+import { BackgroundTasksPanel } from "./BackgroundTasksPanel";
 import { useRightDockToolContext } from "./RightDockContext";
 import { RIGHT_DOCK_TOOL_DEFINITIONS, type RightDockSingletonTabKind } from "./rightDockRegistry";
 import { XTermViewport } from "./XTermViewport";
@@ -61,6 +62,11 @@ export function RightDockContent(props: RightDockContentProps) {
           </div>
         );
       })}
+      {currentActiveTab === "backgroundTasks" ? (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <BackgroundTasksPanel active />
+        </div>
+      ) : null}
       {localSessions.length > 0 ? (
         <div
           className={cn(

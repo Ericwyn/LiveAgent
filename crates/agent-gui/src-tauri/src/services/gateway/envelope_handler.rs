@@ -909,6 +909,37 @@ impl GatewayController {
                     Err(error) => self.send_error_response(request_id, 500, error).await,
                 }
             }
+            Some(proto::gateway_envelope::Payload::ManagedProcessRequest(request)) => {
+                // A stop carries a bounded TERM grace; run it off the inbound
+                // stream loop so tunnel frames and pings keep flowing.
+                let controller = Arc::clone(self);
+                tauri::async_runtime::spawn(async move {
+                    let result = match controller.handle_managed_process_request(request).await {
+                        Ok(response) => {
+                            controller
+                                .send_agent_envelope(proto::AgentEnvelope {
+                                    request_id: request_id.clone(),
+                                    timestamp: now_unix_seconds(),
+                                    payload: Some(
+                                        proto::agent_envelope::Payload::ManagedProcessResponse(
+                                            response,
+                                        ),
+                                    ),
+                                })
+                                .await
+                        }
+                        Err(error) => {
+                            controller
+                                .send_error_response(request_id.clone(), 500, error)
+                                .await
+                        }
+                    };
+                    if let Err(error) = result {
+                        eprintln!("send gateway managed process response failed: {error}");
+                    }
+                });
+                Ok(())
+            }
             None => Ok(()),
         }
     }

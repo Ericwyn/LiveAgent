@@ -3,13 +3,17 @@ import { useLocale } from "../../i18n";
 import type { RightDockTabKind } from "../../lib/settings";
 import { cn } from "../../lib/shared/utils";
 import type { TerminalSession } from "../../lib/terminal/types";
-import { Check, Terminal, X } from "../icons";
+import { Check, Cpu, Terminal, X } from "../icons";
 import { formatTerminalSessionTitle, type RightDockVisibleTab } from "./rightDockModel";
 import { getRightDockToolDefinition, type RightDockSingletonTabKind } from "./rightDockRegistry";
 
 type RightDockTabStripProps = {
   tabs: RightDockVisibleTab[];
   currentActiveTab: RightDockTabKind;
+  backgroundTasksRunning: number;
+  // Hide-only: clears the tab's session-local visibility and never touches
+  // the processes themselves.
+  onCloseBackgroundTasks: () => void;
   activeSession: TerminalSession | null;
   pendingCloseSessionId: string;
   closingSessionIds: ReadonlySet<string>;
@@ -41,6 +45,8 @@ export function RightDockTabStrip(props: RightDockTabStripProps) {
   const {
     tabs,
     currentActiveTab,
+    backgroundTasksRunning,
+    onCloseBackgroundTasks,
     activeSession,
     pendingCloseSessionId,
     closingSessionIds,
@@ -111,6 +117,69 @@ export function RightDockTabStrip(props: RightDockTabStripProps) {
   return (
     <>
       {tabs.map((tab) => {
+        if (tab.kind === "backgroundTasks") {
+          // Derived tab; closing only hides it (a newly started task or the
+          // create menu brings it back).
+          const label = t("projectTools.backgroundTasksTitle");
+          const closeLabel = t("projectTools.bgTaskClosePanel");
+          return (
+            <div
+              key={tab.id}
+              data-project-tools-tab-id={tab.id}
+              className={cn(
+                TAB_BASE_CLASS,
+                currentActiveTab === "backgroundTasks" &&
+                  "border-border bg-muted text-foreground shadow-sm",
+                draggingTabId === tab.id &&
+                  "z-10 scale-[0.98] opacity-80 shadow-md ring-1 ring-ring",
+              )}
+              title={label}
+            >
+              <button
+                type="button"
+                aria-label={label}
+                className="absolute inset-0 z-0 rounded-md bg-transparent p-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                onClick={() => {
+                  if (consumeSuppressedTabClick(tab.id)) return;
+                  onActivateTab(tab.id);
+                }}
+              />
+              {renderTabDragHandle(tab.id, label)}
+              <div
+                aria-hidden="true"
+                className="pointer-events-none relative z-10 flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-inherit"
+              >
+                <Cpu className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 truncate">{label}</span>
+                {backgroundTasksRunning > 0 ? (
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
+                ) : (
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground/50" />
+                )}
+              </div>
+              <button
+                type="button"
+                data-project-tools-tab-action="close"
+                aria-label={closeLabel}
+                title={closeLabel}
+                className={CLOSE_BUTTON_CLASS}
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                }}
+                onMouseDown={(event) => {
+                  event.stopPropagation();
+                }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  consumeSuppressedTabClick(tab.id);
+                  onCloseBackgroundTasks();
+                }}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          );
+        }
         if (tab.kind !== "terminal") {
           const definition = getRightDockToolDefinition(tab.kind);
           if (!definition) return null;

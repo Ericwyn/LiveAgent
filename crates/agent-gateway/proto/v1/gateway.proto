@@ -70,6 +70,7 @@ message GatewayEnvelope {
     TunnelMutation tunnel_mutation = 81;
     TunnelFrame tunnel_frame = 82;
     WorkspaceWatchRequest workspace_watch = 90;
+    ManagedProcessRequest managed_process_request = 91;
   }
 
   // Legacy tunnel control/frame payloads (pre-rewrite protocol) and the
@@ -134,6 +135,8 @@ message AgentEnvelope {
     TunnelFrame tunnel_frame = 82;
     TunnelProbeReport tunnel_probe_report = 83;
     WorkspaceActivityEvent workspace_activity = 90;
+    ManagedProcessResponse managed_process_response = 91;
+    ManagedProcessSnapshot managed_process_snapshot = 92;
     ErrorResponse error = 99;
   }
 
@@ -324,6 +327,47 @@ message WorkspaceActivityEvent {
   bool git = 4;                  // git state (HEAD/refs/index/...) changed
   repeated string changed_paths = 5;  // relative to workdir, deduped, capped
   bool truncated = 6;            // changed_paths hit the cap or is unknown
+}
+
+// ---- Managed processes (ManagedProcess tool children on the agent host).
+// ---- Agent broadcasts full-table snapshots; the gateway caches the latest
+// ---- and fans it out to webui subscribers. Panel operations are forwarded
+// ---- gateway -> agent and answered with the same request_id. ----
+
+message ManagedProcessRecord {
+  string id = 1;
+  string label = 2;
+  string command = 3;
+  string cwd = 4;
+  string shell = 5;
+  uint32 pid = 6;
+  string log_path = 7;
+  int64 started_at = 8;             // unix ms
+  optional int64 finished_at = 9;   // unix ms
+  optional int32 exit_code = 10;    // absent for restored/pid-managed entries
+  bool running = 11;
+  bool isolated = 12;               // survives LiveAgent exit
+  bool restored = 13;               // recovered after restart; managed by pid
+}
+
+message ManagedProcessSnapshot {
+  repeated ManagedProcessRecord processes = 1;
+  uint64 revision = 2;              // agent-side monotonic, restart-safe
+}
+
+message ManagedProcessRequest {
+  string action = 1;                // "snapshot" | "stop" | "read_log" | "clear"
+  string process_id = 2;            // stop/read_log; optional for clear
+  uint32 max_bytes = 3;             // read_log only; 0 = default
+}
+
+message ManagedProcessResponse {
+  string action = 1;
+  ManagedProcessSnapshot snapshot = 2;  // set for snapshot/stop/clear
+  string log_content = 3;               // read_log only
+  string log_path = 4;                  // read_log only
+  bool log_truncated = 5;               // read_log only
+  bool stopped = 6;                     // stop only
 }
 
 message MemoryManageRequest {

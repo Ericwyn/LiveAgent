@@ -1,7 +1,7 @@
 import { useLocale } from "../../i18n";
 import { cn } from "../../lib/shared/utils";
 import type { TerminalShellOption } from "../../lib/terminal/types";
-import { ChevronRight, Plus, Terminal } from "../icons";
+import { ChevronRight, Cpu, Plus, Terminal } from "../icons";
 import { buttonVariants } from "../ui/button";
 import {
   DropdownMenu,
@@ -17,6 +17,9 @@ import { RIGHT_DOCK_TOOL_DEFINITIONS, type RightDockSingletonTabKind } from "./r
 type RightDockLauncherActions = {
   onCreateTerminal: (shell?: string) => void;
   onStartTool: (kind: RightDockSingletonTabKind) => void;
+  // Opens the derived background-tasks tab via ephemeral session state; it
+  // is not a registry tool and never writes persisted right-dock settings.
+  onOpenBackgroundTasks: () => void;
 };
 
 type RightDockCreateMenuProps = RightDockLauncherActions & {
@@ -53,6 +56,7 @@ export function RightDockCreateMenu(props: RightDockCreateMenuProps) {
     creating,
     onCreateTerminal,
     onStartTool,
+    onOpenBackgroundTasks,
   } = props;
   const { t } = useLocale();
 
@@ -119,6 +123,10 @@ export function RightDockCreateMenu(props: RightDockCreateMenuProps) {
             {t(definition.createTitleKey)}
           </DropdownMenuItem>
         ))}
+        <DropdownMenuItem onSelect={onOpenBackgroundTasks} className="gap-2 text-xs">
+          <Cpu className="h-3.5 w-3.5" />
+          {t("projectTools.backgroundTasksTitle")}
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -136,6 +144,7 @@ export function RightDockChooser(props: RightDockChooserProps) {
     error,
     onCreateTerminal,
     onStartTool,
+    onOpenBackgroundTasks,
   } = props;
   const { t } = useLocale();
   const tools = [
@@ -157,6 +166,15 @@ export function RightDockChooser(props: RightDockChooserProps) {
       titleAttr: definition.projectRequired ? disabledMessage : undefined,
       onClick: () => onStartTool(definition.kind),
     })),
+    {
+      key: "backgroundTasks",
+      title: t("projectTools.backgroundTasksTitle"),
+      description: t("projectTools.backgroundTasksDescription"),
+      icon: <Cpu className="h-4.5 w-4.5" />,
+      disabled: false,
+      titleAttr: undefined,
+      onClick: onOpenBackgroundTasks,
+    },
   ];
 
   return (

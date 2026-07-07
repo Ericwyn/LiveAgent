@@ -241,6 +241,7 @@ const TOOL_CARD_ACTION_NAMES = new Set([
   "MemoryManager",
   "TunnelManager",
   "SSHManager",
+  "ManagedProcess",
 ]);
 
 export function getManagerToolActionName(toolCall: {

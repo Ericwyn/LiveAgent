@@ -52,6 +52,8 @@ type ManagedProcessRecord = {
   finished_at?: number | null;
   exit_code?: number | null;
   running: boolean;
+  isolated?: boolean;
+  restored?: boolean;
 };
 
 type ManagedProcessStartResponse = {
@@ -277,6 +279,7 @@ function formatManagedProcessRecord(process: ManagedProcessRecord) {
     `id=${process.id}`,
     process.label ? `label=${process.label}` : null,
     `running=${process.running}`,
+    `isolated=${process.isolated === true}`,
     `pid=${process.pid}`,
     `shell=${process.shell}`,
     `cwd=${process.cwd}`,
@@ -654,7 +657,7 @@ export function createShellTools(params: {
 
   const toolManagedProcess: Tool = {
     name: "ManagedProcess",
-    description: `Start, inspect, read logs for, or stop a long-running local process such as a dev server, watcher, or preview server. Runtime platform: ${platformLabel}; commands use the same platform shell policy as Bash. Use this instead of detached shell/background syntax. action="start" runs a foreground command under LiveAgent process management, redirects stdout/stderr to a log file, and returns immediately with process_id, pid, and log_path. Use action="status" to list or inspect processes, action="read_log" to read recent log output, and action="stop" to terminate the process tree.`,
+    description: `Start, inspect, read logs for, or stop a long-running local process such as a dev server, watcher, or preview server. Runtime platform: ${platformLabel}; commands use the same platform shell policy as Bash. Use this instead of detached shell/background syntax. action="start" runs a foreground command under LiveAgent process management, redirects stdout/stderr to a log file, and returns immediately with process_id, pid, and log_path. By default managed processes are terminated automatically when LiveAgent exits; pass isolated=true only when the user explicitly wants the service to outlive LiveAgent. Use action="status" to list or inspect processes, action="read_log" to read recent log output, and action="stop" to terminate the process tree.`,
     parameters: strictToolParameters({
       action: Type.Union(
         [
@@ -685,6 +688,12 @@ export function createShellTools(params: {
             'Optional human-readable label for action="start", such as "survival-agent dev server".',
         }),
       ),
+      isolated: Type.Optional(
+        Type.Boolean({
+          description:
+            'Only for action="start". Default false: the process is terminated automatically when LiveAgent exits. Set true ONLY when the user explicitly asks for the service to keep running after LiveAgent quits; it then detaches from the LiveAgent lifecycle and must be stopped manually from the background tasks panel.',
+        }),
+      ),
       process_id: Type.Optional(
         Type.String({
           description:
@@ -705,7 +714,7 @@ export function createShellTools(params: {
   const tools: Tool[] = allowManagedProcess ? [toolBash, toolManagedProcess] : [toolBash];
   const allowedArgumentsByToolName: Record<string, readonly string[]> = {
     Bash: ["command", "cwd", "timeout_ms"],
-    ManagedProcess: ["action", "command", "cwd", "label", "process_id", "max_bytes"],
+    ManagedProcess: ["action", "command", "cwd", "label", "isolated", "process_id", "max_bytes"],
   };
 
   async function executeManagedProcessToolCall(
@@ -782,11 +791,13 @@ export function createShellTools(params: {
           typeof toolCall.arguments?.label === "string"
             ? toolCall.arguments.label.trim()
             : undefined;
+        const isolated = toolCall.arguments?.isolated === true;
         const response = await invoke<ManagedProcessStartResponse>("managed_process_start", {
           workdir,
           command,
           cwd: cwd || undefined,
           label: label || undefined,
+          isolated: isolated || undefined,
         } as any);
         return buildManagedProcessToolResult({
           toolCall,

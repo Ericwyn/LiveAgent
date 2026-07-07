@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use crate::commands::settings::{
     load_remote_settings, normalize_remote_settings_payload, open_db, RemoteSettingsPayload,
 };
+use crate::runtime::managed_process::ManagedProcessRegistry;
 use crate::runtime::sftp::SftpSessionRegistry;
 use crate::runtime::terminal::TerminalSessionRegistry;
 use crate::services::chat_run_ledger::{ChatRunLedger, ChatRunLedgerState};
@@ -26,6 +27,7 @@ impl GatewayController {
         memory_store: Arc<MemoryStore>,
         terminal_registry: Arc<TerminalSessionRegistry>,
         sftp_registry: Arc<SftpSessionRegistry>,
+        managed_process_registry: Arc<ManagedProcessRegistry>,
     ) -> Self {
         let initial_config = RemoteSettingsPayload::default();
         let (config_tx, _) = watch::channel(initial_config);
@@ -37,6 +39,7 @@ impl GatewayController {
             memory_store,
             terminal_registry,
             sftp_registry,
+            managed_process_registry,
             config_tx,
             runner_task: Mutex::new(None),
             status: Mutex::new(GatewayStatusSnapshot {
