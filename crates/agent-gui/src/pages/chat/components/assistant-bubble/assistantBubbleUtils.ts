@@ -288,9 +288,10 @@ export function groupRoundBlocks(blocks: UiRound["blocks"]): GroupedRoundBlock[]
     } else {
       groupedBlocks.push({
         kind: "toolGroup",
-        key: `tool-group-${pendingStartIndex}-${pendingTools
-          .map((item, index) => getToolTraceKey(item, pendingStartIndex + index))
-          .join("|")}`,
+        // Anchored to the group's start only: appending tools to a streaming
+        // group must keep the key stable, or the remount would wipe the
+        // user's manual expand/collapse state mid-run.
+        key: `tool-group-${pendingStartIndex}-${getToolTraceKey(pendingTools[0], pendingStartIndex)}`,
         items: pendingTools,
       });
     }

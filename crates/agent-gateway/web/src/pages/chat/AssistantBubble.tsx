@@ -884,9 +884,10 @@ function groupRoundBlocks(blocks: UiRound["blocks"]): GroupedRoundBlock[] {
     } else {
       groupedBlocks.push({
         kind: "toolGroup",
-        key: `tool-group-${pendingStartIndex}-${pendingTools
-          .map((item, index) => getToolTraceKey(item, pendingStartIndex + index))
-          .join("|")}`,
+        // Anchored to the group's start only: appending tools to a streaming
+        // group must keep the key stable, or the remount would wipe the
+        // user's manual expand/collapse state mid-run.
+        key: `tool-group-${pendingStartIndex}-${getToolTraceKey(pendingTools[0], pendingStartIndex)}`,
         items: pendingTools,
       });
     }
@@ -2904,14 +2905,24 @@ function ToolTraceGroup(props: {
   );
   const ToolIcon = allBash ? Terminal : meta.Icon;
   const shouldAutoOpen = counts.failed > 0 || (counts.running > 0 && items.length <= 3);
+  // Auto-collapse is state-driven, not remount-driven: the live article keeps
+  // its instance mounted after the run settles (folding only happens at the
+  // next run_started), so the group must fold itself once every call has a
+  // non-error result. Failed groups stay open (mirroring auto-open);
+  // `waiting` keeps groups whose results never landed (e.g. aborted runs)
+  // untouched.
+  const shouldAutoClose = counts.running === 0 && counts.waiting === 0 && counts.failed === 0;
   const [open, setOpen] = useState(readOnly ? false : shouldAutoOpen);
   const userInteractedRef = useRef(false);
 
   useEffect(() => {
-    if (!readOnly && !userInteractedRef.current && shouldAutoOpen) {
+    if (readOnly || userInteractedRef.current) return;
+    if (shouldAutoOpen) {
       setOpen(true);
+    } else if (shouldAutoClose) {
+      setOpen(false);
     }
-  }, [readOnly, shouldAutoOpen]);
+  }, [readOnly, shouldAutoOpen, shouldAutoClose]);
 
   const statusLabel =
     counts.failed > 0

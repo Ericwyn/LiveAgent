@@ -29,14 +29,23 @@ export function ToolTraceGroup(props: { items: ToolTraceItem[]; runningToolCallI
   );
   const ToolIcon = allBash ? Terminal : meta.Icon;
   const shouldAutoOpen = counts.failed > 0 || (counts.running > 0 && items.length <= 3);
+  // Auto-collapse is state-driven, not remount-driven: the live bubble can
+  // keep this instance mounted long after the burst settles, so the group
+  // must fold itself once every call has a non-error result. Failed groups
+  // stay open (mirroring auto-open); `waiting` keeps groups whose results
+  // never landed (e.g. aborted runs) untouched.
+  const shouldAutoClose = counts.running === 0 && counts.waiting === 0 && counts.failed === 0;
   const [open, setOpen] = useState(shouldAutoOpen);
   const userInteractedRef = useRef(false);
 
   useEffect(() => {
-    if (!userInteractedRef.current && shouldAutoOpen) {
+    if (userInteractedRef.current) return;
+    if (shouldAutoOpen) {
       setOpen(true);
+    } else if (shouldAutoClose) {
+      setOpen(false);
     }
-  }, [shouldAutoOpen]);
+  }, [shouldAutoOpen, shouldAutoClose]);
 
   const statusLabel =
     counts.failed > 0
