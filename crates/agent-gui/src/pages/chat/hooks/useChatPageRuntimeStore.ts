@@ -1,5 +1,5 @@
 import { type Dispatch, type SetStateAction, useCallback, useEffect, useRef } from "react";
-import type { CompactionStatus } from "../../../lib/chat/compaction/contextCompaction";
+import type { CompactionStatus } from "../../../lib/chat/compaction/types";
 import {
   type ConversationViewState,
   createConversationStateFromContext,

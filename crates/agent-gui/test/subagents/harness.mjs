@@ -4,9 +4,9 @@ import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const rootDir = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
 export const agentRunnerModulePath = path.join(rootDir, "src/lib/chat/runner/agentRunner.ts");
-export const contextCompactionModulePath = path.join(
+export const compactionControllerModulePath = path.join(
   rootDir,
-  "src/lib/chat/compaction/contextCompaction.ts",
+  "src/lib/chat/compaction/controller.ts",
 );
 
 export function sleep(ms) {
@@ -295,29 +295,58 @@ export function createFakeWorktreeIpc(options = {}) {
   };
 }
 
-export function createDefaultCompactionMock(compactionCalls, options = {}) {
-  return {
-    createCompactionThrottleState() {
-      return {};
-    },
-    noteCompactionApplied() {},
-    noteCompactionRound() {},
-    async runPreCompactConversation(params) {
-      compactionCalls.push({ phase: "pre", incomingUserText: params.incomingUserText });
-      if (options.preCompactionError) throw options.preCompactionError;
-      return {
-        applied: false,
-        state: params.state,
-        decision: { shouldCompact: false, trigger: "below_threshold" },
-      };
-    },
-    async runMidTurnCompaction(params) {
+export function createDefaultCompactionMock(compactionCalls) {
+  class FakeCompactionController {
+    #presend = undefined;
+
+    bindTurn(binding) {
+      this.#presend = binding?.presend;
+    }
+
+    unbindTurn() {
+      this.#presend = undefined;
+    }
+
+    get stats() {
+      return { compactionsApplied: 0 };
+    }
+
+    beginRequest() {}
+
+    shouldProtectMidStream() {
+      return false;
+    }
+
+    async maybeCompactPreSend() {
+      compactionCalls.push({ phase: "pre", incomingUserText: this.#presend?.pendingUserText });
+      return false;
+    }
+
+    async compactDuringRun() {
       compactionCalls.push({ phase: "mid" });
-      if (options.midCompactionError) throw options.midCompactionError;
+      return null;
+    }
+
+    async handleTurnAbort() {
+      return false;
+    }
+  }
+
+  return {
+    CompactionController: FakeCompactionController,
+    createCompactionControllerRegistry() {
+      const controllers = new Map();
       return {
-        applied: false,
-        state: params.state,
-        decision: { shouldCompact: false, trigger: "below_threshold" },
+        get(conversationId) {
+          const existing = controllers.get(conversationId);
+          if (existing) return existing;
+          const created = new FakeCompactionController();
+          controllers.set(conversationId, created);
+          return created;
+        },
+        dispose(conversationId) {
+          controllers.delete(conversationId);
+        },
       };
     },
   };
@@ -364,8 +393,8 @@ export async function createSubagentHarness(options = {}) {
         }
       },
     },
-    [contextCompactionModulePath]:
-      options.compactionMock ?? createDefaultCompactionMock(compactionCalls, options),
+    [compactionControllerModulePath]:
+      options.compactionMock ?? createDefaultCompactionMock(compactionCalls),
   };
 
   const loader = createTsModuleLoader({ mocks });

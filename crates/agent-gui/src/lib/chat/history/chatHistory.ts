@@ -255,7 +255,7 @@ export async function getChatHistoryActiveSegment(id: string, fallbackSystemProm
   } satisfies ChatHistoryActiveSegmentRecord;
 }
 
-function enqueueConversationWrite<T>(conversationId: string, task: () => Promise<T>): Promise<T> {
+function withConversationWriteLock<T>(conversationId: string, task: () => Promise<T>): Promise<T> {
   const key = conversationId.trim();
   if (!key) {
     return task();
@@ -319,32 +319,27 @@ function buildChatHistorySegmentInput(segment: StoredContextSegment): ChatHistor
   };
 }
 
-export async function upsertChatHistory(input: ChatHistoryUpsertInput) {
-  return enqueueConversationWrite(input.id, () =>
-    invoke<ChatHistorySummary>("chat_history_upsert", { input }),
-  );
+// Raw IPC wrappers: callers must already hold the conversation write lock.
+async function upsertChatHistoryRaw(input: ChatHistoryUpsertInput) {
+  return invoke<ChatHistorySummary>("chat_history_upsert", { input });
 }
 
-async function upsertChatHistoryActiveSegment(input: ChatHistorySegmentMutationInput) {
-  return enqueueConversationWrite(input.conversation.id, () =>
-    invoke<ChatHistorySummary>("chat_history_upsert_active_segment", { input }),
-  );
+async function upsertChatHistoryActiveSegmentRaw(input: ChatHistorySegmentMutationInput) {
+  return invoke<ChatHistorySummary>("chat_history_upsert_active_segment", { input });
 }
 
-async function appendChatHistorySegment(input: ChatHistorySegmentMutationInput) {
-  return enqueueConversationWrite(input.conversation.id, () =>
-    invoke<ChatHistorySummary>("chat_history_append_segment", { input }),
-  );
+async function appendChatHistorySegmentRaw(input: ChatHistorySegmentMutationInput) {
+  return invoke<ChatHistorySummary>("chat_history_append_segment", { input });
 }
 
 export async function renameChatHistory(id: string, title: string) {
-  return enqueueConversationWrite(id, () =>
+  return withConversationWriteLock(id, () =>
     invoke<ChatHistorySummary>("chat_history_rename", { id, title }),
   );
 }
 
 export async function setChatHistoryPinned(id: string, isPinned: boolean) {
-  return enqueueConversationWrite(id, () =>
+  return withConversationWriteLock(id, () =>
     invoke<ChatHistorySummary>("chat_history_set_pinned", { id, isPinned }),
   );
 }
@@ -358,7 +353,7 @@ export async function setChatHistoryShare(
   enabled: boolean,
   options?: { redactToolContent?: boolean },
 ) {
-  return enqueueConversationWrite(id, () =>
+  return withConversationWriteLock(id, () =>
     invoke<ChatHistoryShareStatus>("chat_history_share_set", {
       id,
       enabled,
@@ -368,7 +363,7 @@ export async function setChatHistoryShare(
 }
 
 export async function deleteChatHistory(id: string) {
-  return enqueueConversationWrite(id, async () => {
+  return withConversationWriteLock(id, async () => {
     await invoke<void>("chat_history_delete", { id });
   });
 }
@@ -408,16 +403,19 @@ type PersistConversationStateParams = {
   createdAt?: number;
   updatedAt: number;
   state: ConversationViewState;
-  previousState?: ConversationViewState | null;
+  // 差量基线的读与推进必须发生在写锁内：并发持久化会串行排队，
+  // 后来者由此读到前一次真正落盘的状态，differential 选择才不会误判。
+  getPreviousState: () => ConversationViewState | null;
+  commitPersistedState: (state: ConversationViewState) => void;
 };
 
-export async function persistConversationState(params: PersistConversationStateParams) {
-  const conversation = buildChatHistoryConversationInput(params);
-  const previousState = params.previousState ?? null;
-  const nextState = params.state;
-
+async function writeConversationState(
+  conversation: ChatHistoryConversationInput,
+  previousState: ConversationViewState | null,
+  nextState: ConversationViewState,
+) {
   if (!previousState) {
-    return upsertChatHistory({
+    return upsertChatHistoryRaw({
       ...conversation,
       segments: nextState.segments.map(buildChatHistorySegmentInput),
     });
@@ -436,7 +434,7 @@ export async function persistConversationState(params: PersistConversationStateP
   ) {
     const activeSegment = nextState.segments[nextState.activeSegmentIndex];
     if (activeSegment) {
-      return upsertChatHistoryActiveSegment({
+      return upsertChatHistoryActiveSegmentRaw({
         conversation,
         segment: buildChatHistorySegmentInput(activeSegment),
       });
@@ -452,15 +450,28 @@ export async function persistConversationState(params: PersistConversationStateP
   ) {
     const appendedSegment = nextState.segments[nextState.activeSegmentIndex];
     if (appendedSegment) {
-      return appendChatHistorySegment({
+      return appendChatHistorySegmentRaw({
         conversation,
         segment: buildChatHistorySegmentInput(appendedSegment),
       });
     }
   }
 
-  return upsertChatHistory({
+  return upsertChatHistoryRaw({
     ...conversation,
     segments: nextState.segments.map(buildChatHistorySegmentInput),
+  });
+}
+
+export async function persistConversationState(params: PersistConversationStateParams) {
+  return withConversationWriteLock(params.conversationId, async () => {
+    const conversation = buildChatHistoryConversationInput(params);
+    const summary = await writeConversationState(
+      conversation,
+      params.getPreviousState(),
+      params.state,
+    );
+    params.commitPersistedState(params.state);
+    return summary;
   });
 }

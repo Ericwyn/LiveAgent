@@ -1,10 +1,6 @@
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
-import {
-  type CompactionThrottleState,
-  noteCompactionRound,
-  type ProviderRuntimeConfig,
-  shouldProtectionCompactConversation,
-} from "../../../lib/chat/compaction/contextCompaction";
+import type { CompactionController } from "../../../lib/chat/compaction/controller";
+import type { ProviderRuntimeConfig } from "../../../lib/chat/compaction/types";
 import {
   appendMessagesToConversation,
   type ConversationViewState,
@@ -14,6 +10,7 @@ import type {
   ConversationHookLifecycle,
   GatewayBridgeEventController,
 } from "../../../lib/chat/conversation/run";
+import type { TurnCancellation } from "../../../lib/chat/conversation/turnCancellation";
 import { memoryExtraction } from "../../../lib/chat/memory/extractionController";
 import type {
   MemoryExtractionModelConfig,
@@ -39,24 +36,12 @@ import {
   buildPartialAssistantMessage,
   type ConversationRuntimeEntry,
 } from "../runtime/chatPageRuntime";
-import { buildProtectionCompactionStatus } from "../runtime/compactionStatusText";
 
 export type RuntimeModel = {
   api: AssistantMessage["api"];
   provider: AssistantMessage["provider"];
   id: string;
 };
-
-export type CompactDuringRun = (params: {
-  trigger: "mid-stream" | "post-tool";
-  state: ConversationViewState;
-  requestContext: Context;
-  budgetContext: Context;
-  statusText: string;
-  tools?: Context["tools"];
-  includeAbortedMessages?: boolean;
-  includeUploadedFilesMetadata?: boolean;
-}) => Promise<Context | null>;
 
 export type PersistConversationParams = {
   conversationId: string;
@@ -88,31 +73,17 @@ export type RunTextConversationTurnParams = {
   transcriptStore: LiveTranscriptStore;
   gatewayBridgeEvents: GatewayBridgeEventController;
   hookLifecycle: ConversationHookLifecycle;
-  conversationThrottleState: CompactionThrottleState;
   conversationDebugLogger: StreamDebugLogger;
   recoveryDebugLogger: StreamDebugLogger;
-  compactionDebugLogger: StreamDebugLogger;
   getNextConversationState: () => ConversationViewState;
   applyConversationState: (state: ConversationViewState) => void;
-  buildCompactionContext: (
-    state: ConversationViewState,
-    tools?: Context["tools"],
-    options?: { includeAbortedMessages?: boolean; includeUploadedFilesMetadata?: boolean },
-  ) => Context;
   buildPreparedContext: (
     state: ConversationViewState,
     tools?: Context["tools"],
     options?: { includeAbortedMessages?: boolean; includeUploadedFilesMetadata?: boolean },
   ) => Context;
-  maybeApplyPreCompaction: (params: {
-    requestContext: Context;
-    budgetContext: Context;
-    tools?: Context["tools"];
-    includeUploadedFilesMetadata?: boolean;
-  }) => Promise<boolean>;
-  compactDuringRun: CompactDuringRun;
-  getRequestController: () => AbortController;
-  renewRequestController: () => AbortController;
+  compaction: CompactionController;
+  cancellation: TurnCancellation;
   resetLiveTranscript: (store: LiveTranscriptStore) => void;
   appendDraftAssistantText: (delta: string, store: LiveTranscriptStore) => void;
   batchLiveRoundsUpdate: (
@@ -147,18 +118,13 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     transcriptStore,
     gatewayBridgeEvents,
     hookLifecycle,
-    conversationThrottleState,
     conversationDebugLogger,
     recoveryDebugLogger,
-    compactionDebugLogger,
     getNextConversationState,
     applyConversationState,
-    buildCompactionContext,
     buildPreparedContext,
-    maybeApplyPreCompaction,
-    compactDuringRun,
-    getRequestController,
-    renewRequestController,
+    compaction,
+    cancellation,
     resetLiveTranscript,
     appendDraftAssistantText,
     batchLiveRoundsUpdate,
@@ -254,10 +220,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     );
   }
 
-  await maybeApplyPreCompaction({
-    requestContext: buildCompactionContext(getNextConversationState(), undefined, {
-      includeUploadedFilesMetadata: true,
-    }),
+  await compaction.maybeCompactPreSend({
     budgetContext: buildPreparedContext(getNextConversationState(), undefined, {
       includeUploadedFilesMetadata: true,
     }),
@@ -272,13 +235,13 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
         includeUploadedFilesMetadata: true,
       });
     pendingTextContext = null;
+    compaction.beginRequest(contextWithSkills, getNextConversationState());
     hookLifecycle.startTurn(textRound);
     textModeUsesLiveRounds = false;
 
     let streamedAssistantText = "";
     let protectionCheckChars = 0;
     let compactionRequested = false;
-    let protectionCompactionStatusText: string | null = null;
     let streamAttempt = 0;
     const nativeWebSearchEnabled = runtime.nativeWebSearchEnabled !== false;
     const nativeWebSearchStatus = resolveProviderNativeWebSearchStatus({
@@ -290,6 +253,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     });
 
     while (!finalAssistant) {
+      const scope = cancellation.deriveScope();
       const nativeWebSearchStatusController = createDeferredProviderNativeWebSearchStatus({
         status: nativeWebSearchStatus,
         onStatus: (status) => updateGatewayBridgeToolStatus(status),
@@ -323,32 +287,9 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
               return;
             }
             protectionCheckChars = 0;
-            const partialAssistant = buildPartialAssistantMessage({
-              model: runtimeModel,
-              text: streamedAssistantText,
-              stopReason: "aborted",
-            });
-            if (!partialAssistant) return;
-            const tempState = appendMessagesToConversation(getNextConversationState(), [
-              partialAssistant,
-            ]);
-            const tempContext = buildPreparedContext(tempState, undefined, {
-              includeAbortedMessages: true,
-              includeUploadedFilesMetadata: true,
-            });
-            const decision = shouldProtectionCompactConversation({
-              providerId,
-              state: tempState,
-              requestContext: tempContext,
-              modelConfig: runtime.modelConfig,
-              throttleState: conversationThrottleState,
-              debugLogger: compactionDebugLogger,
-            });
-            if (!decision.shouldCompact) return;
+            if (!compaction.shouldProtectMidStream(streamedAssistantText.length)) return;
             compactionRequested = true;
-            protectionCompactionStatusText = buildProtectionCompactionStatus(decision);
-            updateGatewayBridgeToolStatus(protectionCompactionStatusText, true);
-            getRequestController().abort();
+            scope.controller.abort();
           },
           onHostedSearch: (hostedSearch) => {
             if (hostedSearch.status === "searching") {
@@ -358,7 +299,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
             }
             updateHostedSearch(hostedSearch, textRound, streamedAssistantText);
           },
-          signal: getRequestController().signal,
+          signal: scope.controller.signal,
           debugLogger: streamAttempt === 0 ? conversationDebugLogger : recoveryDebugLogger,
         });
         nativeWebSearchStatusController.finish();
@@ -380,40 +321,28 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
               appendMessagesToConversation(getNextConversationState(), [partialAssistant]),
             );
           }
-          renewRequestController();
 
-          const compactedContext = await compactDuringRun({
+          const compactedContext = await compaction.compactDuringRun({
             trigger: "mid-stream",
             state: getNextConversationState(),
-            requestContext: buildCompactionContext(getNextConversationState(), undefined, {
-              includeAbortedMessages: true,
-              includeUploadedFilesMetadata: true,
-            }),
-            budgetContext: buildPreparedContext(getNextConversationState(), undefined, {
-              includeAbortedMessages: true,
-              includeUploadedFilesMetadata: true,
-            }),
-            statusText: protectionCompactionStatusText ?? "正在压缩上下文...",
             includeAbortedMessages: true,
             includeUploadedFilesMetadata: true,
           });
 
           if (compactedContext) {
             pendingTextContext = compactedContext;
-            textRound += 1;
-            continue textResponseLoop;
+          } else {
+            protectionCompactionDisabled = true;
+            pendingTextContext = buildPreparedContext(getNextConversationState(), undefined, {
+              includeAbortedMessages: true,
+              includeUploadedFilesMetadata: true,
+            });
           }
-
-          protectionCompactionDisabled = true;
-          pendingTextContext = buildPreparedContext(getNextConversationState(), undefined, {
-            includeAbortedMessages: true,
-            includeUploadedFilesMetadata: true,
-          });
           textRound += 1;
           continue textResponseLoop;
         }
 
-        if (getRequestController().signal.aborted || isAbortLikeError(streamErr)) {
+        if (cancellation.userStop.signal.aborted || isAbortLikeError(streamErr)) {
           if (commitVisibleAbortedConversation()) {
             return;
           }
@@ -426,11 +355,12 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
           protectionCheckChars = 0;
           resetLiveTranscript(transcriptStore);
           textModeUsesLiveRounds = false;
-          renewRequestController();
           continue;
         }
 
         throw streamErr;
+      } finally {
+        scope.release();
       }
     }
 
@@ -443,7 +373,6 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     gatewayBridgeEvents.queueToken(gatewayAssistantText, { round: textRound });
   }
   const finalState = appendMessagesToConversation(getNextConversationState(), [finalAssistant]);
-  noteCompactionRound(conversationThrottleState);
   const shouldRunMemoryExtraction =
     finalAssistant.stopReason !== "error" && finalAssistant.stopReason !== "aborted";
   commitAssistantRoundMeta(finalAssistant, textRound);

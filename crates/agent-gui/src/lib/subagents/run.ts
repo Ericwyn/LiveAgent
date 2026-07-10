@@ -1,18 +1,13 @@
 import type { Tool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 
-import {
-  createCompactionThrottleState,
-  noteCompactionApplied,
-  noteCompactionRound,
-  runMidTurnCompaction,
-  runPreCompactConversation,
-} from "../chat/compaction/contextCompaction";
+import { CompactionController } from "../chat/compaction/controller";
 import {
   appendMessagesToConversation,
   buildRequestContext,
   type ConversationViewState,
   createConversationStateFromContext,
 } from "../chat/conversation/conversationState";
+import { createTurnCancellationFromSignal } from "../chat/conversation/turnCancellation";
 import { runAssistantWithTools } from "../chat/runner/agentRunner";
 import type { RuntimePlatform } from "../runtimePlatform";
 import type {
@@ -487,7 +482,42 @@ export async function executeSubagentRun(
       agentTotal: request.total,
       messageBusEnabled: env.messageBusEnabled,
     });
-    const compactionThrottleState = createCompactionThrottleState();
+    // 子代理复用同一压缩状态机：sinks 只捕获结果状态与触发运行期持久化。
+    const compaction = new CompactionController();
+    const compactionCancellation = createTurnCancellationFromSignal(signal);
+    let compactionAppliedState: ConversationViewState | null = null;
+    const bindCompactionTurn = (presend?: {
+      baseState: ConversationViewState;
+      pendingUserText: string;
+      composeAppliedState: (state: ConversationViewState) => ConversationViewState;
+    }) => {
+      compaction.bindTurn({
+        providerId: env.providerId,
+        model: env.model,
+        runtime: env.runtime,
+        cancellation: compactionCancellation,
+        sinks: {
+          applyState: (state) => {
+            compactionAppliedState = state;
+          },
+          applyStateMidRun: (state) => {
+            compactionAppliedState = state;
+          },
+          persist: async (state) => {
+            schedulePersist("running", state);
+          },
+        },
+        buildPreparedContext: (state) => buildRequestContext(state),
+        buildResumeContext: (state, resumeMessage) => {
+          const context = buildRequestContext(state);
+          return resumeMessage
+            ? { ...context, messages: [...context.messages, resumeMessage] }
+            : context;
+        },
+        presend,
+      });
+    };
+    bindCompactionTurn();
 
     let restoredState: ConversationViewState | null = null;
     if (existingRunSummary) {
@@ -498,27 +528,20 @@ export async function executeSubagentRun(
       });
       if (restored) {
         let resumedState = restored;
-        try {
-          const requestContext = buildRequestContext(resumedState);
-          const compacted = await runPreCompactConversation({
-            state: resumedState,
-            requestContext,
-            budgetContext: requestContext,
-            incomingUserText: spec.prompt,
-            providerId: env.providerId,
-            model: env.model,
-            runtime: env.runtime,
-            signal,
-            throttleState: compactionThrottleState,
-          });
-          if (compacted.applied) {
-            resumedState = compacted.state;
-            compactions += 1;
-            noteCompactionApplied(compactionThrottleState);
-          }
-        } catch (error) {
-          console.warn("Subagent pre-compaction failed; resuming uncompacted", error);
+        bindCompactionTurn({
+          baseState: resumedState,
+          pendingUserText: spec.prompt,
+          composeAppliedState: (state) => state,
+        });
+        compactionAppliedState = null;
+        const applied = await compaction.maybeCompactPreSend({
+          budgetContext: buildRequestContext(resumedState),
+        });
+        if (applied && compactionAppliedState) {
+          resumedState = compactionAppliedState;
         }
+        compactions = compaction.stats.compactionsApplied;
+        bindCompactionTurn();
         restoredState = appendMessagesToConversation(resumedState, [
           buildSubagentContinuationMessage({
             spec,
@@ -581,56 +604,39 @@ export async function executeSubagentRun(
       onToolExecutionStart: () => {
         toolCalls += 1;
       },
-      onBeforeNextTurn: async ({ emittedMessages, signal: childSignal }) => {
-        noteCompactionRound(compactionThrottleState);
+      onBeforeNextTurn: async ({ emittedMessages }) => {
         const view = appendMessagesToConversation(baseState, emittedMessages);
         lastView = view;
-        const requestContext = buildRequestContext(view);
         const busUpdateMessage = buildMessageBusUpdateMessage(await renderBusSnapshot());
         const appendBus = (context: ReturnType<typeof buildRequestContext>) =>
           busUpdateMessage
             ? { ...context, messages: [...context.messages, busUpdateMessage] }
             : context;
 
-        let compacted: Awaited<ReturnType<typeof runMidTurnCompaction>>;
-        try {
-          compacted = await runMidTurnCompaction({
-            state: view,
-            requestContext,
-            budgetContext: requestContext,
-            providerId: env.providerId,
-            model: env.model,
-            runtime: env.runtime,
-            signal: childSignal ?? signal,
-            throttleState: compactionThrottleState,
-          });
-        } catch (error) {
-          console.warn("Subagent mid-turn compaction failed", error);
-          schedulePersist("running", view);
-          return null;
-        }
+        // controller 内部消化非中止失败（含 prune 降级）；用户中止会原样抛出。
+        compactionAppliedState = null;
+        const compactedContext = await compaction.compactDuringRun({
+          trigger: "post-tool",
+          state: view,
+        });
 
-        if (!compacted.applied) {
+        if (!compactedContext) {
           schedulePersist("running", view);
           return busUpdateMessage
             ? {
-                context: appendBus(requestContext),
+                context: appendBus(buildRequestContext(view)),
                 emittedMessages: [...emittedMessages, busUpdateMessage],
               }
             : null;
         }
 
-        compactions += 1;
-        noteCompactionApplied(compactionThrottleState);
-        baseState = compacted.state;
-        lastView = compacted.state;
-        schedulePersist("running", compacted.state);
-        const nextContext = buildRequestContext(compacted.state);
-        const resumedContext = compacted.resumeMessage
-          ? { ...nextContext, messages: [...nextContext.messages, compacted.resumeMessage] }
-          : nextContext;
+        const nextState: ConversationViewState = compactionAppliedState ?? view;
+        compactions = compaction.stats.compactionsApplied;
+        baseState = nextState;
+        lastView = nextState;
+        schedulePersist("running", nextState);
         return {
-          context: appendBus(resumedContext),
+          context: appendBus(compactedContext),
           emittedMessages: busUpdateMessage ? [busUpdateMessage] : [],
         };
       },

@@ -5,12 +5,8 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import {
-  type CompactionThrottleState,
-  noteCompactionRound,
-  type ProviderRuntimeConfig,
-  shouldProtectionCompactConversation,
-} from "../../../lib/chat/compaction/contextCompaction";
+import type { CompactionController } from "../../../lib/chat/compaction/controller";
+import type { ProviderRuntimeConfig } from "../../../lib/chat/compaction/types";
 import { isAbortedAssistantMessage } from "../../../lib/chat/conversation/chatAbort";
 import {
   appendMessagesToConversation,
@@ -22,6 +18,7 @@ import type {
   ConversationHookLifecycle,
   GatewayBridgeEventController,
 } from "../../../lib/chat/conversation/run";
+import type { TurnCancellation } from "../../../lib/chat/conversation/turnCancellation";
 import { memoryExtraction } from "../../../lib/chat/memory/extractionController";
 import type {
   MemoryExtractionModelConfig,
@@ -74,7 +71,6 @@ import {
   buildPartialAssistantMessage,
   type ConversationRuntimeEntry,
 } from "../runtime/chatPageRuntime";
-import { buildProtectionCompactionStatus } from "../runtime/compactionStatusText";
 import { buildGatewayToolCallPreviewArguments } from "./gatewayToolPreview";
 
 export type RuntimeModel = {
@@ -82,17 +78,6 @@ export type RuntimeModel = {
   provider: AssistantMessage["provider"];
   id: string;
 };
-
-export type CompactDuringRun = (params: {
-  trigger: "mid-stream" | "post-tool";
-  state: ConversationViewState;
-  requestContext: Context;
-  budgetContext: Context;
-  statusText: string;
-  tools?: Context["tools"];
-  includeAbortedMessages?: boolean;
-  includeUploadedFilesMetadata?: boolean;
-}) => Promise<Context | null>;
 
 export type PersistConversationParams = {
   conversationId: string;
@@ -251,31 +236,17 @@ export type RunAgentConversationTurnParams = {
   transcriptStore: LiveTranscriptStore;
   gatewayBridgeEvents: GatewayBridgeEventController;
   hookLifecycle: ConversationHookLifecycle;
-  conversationThrottleState: CompactionThrottleState;
   conversationDebugLogger: StreamDebugLogger;
-  compactionDebugLogger: StreamDebugLogger;
   subagentStore?: SubagentConversationStore;
   getNextConversationState: () => ConversationViewState;
   applyConversationState: (state: ConversationViewState) => void;
-  buildCompactionContext: (
-    state: ConversationViewState,
-    tools?: Context["tools"],
-    options?: { includeAbortedMessages?: boolean; includeUploadedFilesMetadata?: boolean },
-  ) => Context;
   buildPreparedContext: (
     state: ConversationViewState,
     tools?: Context["tools"],
     options?: { includeAbortedMessages?: boolean; includeUploadedFilesMetadata?: boolean },
   ) => Context;
-  maybeApplyPreCompaction: (params: {
-    requestContext: Context;
-    budgetContext: Context;
-    tools?: Context["tools"];
-    includeUploadedFilesMetadata?: boolean;
-  }) => Promise<boolean>;
-  compactDuringRun: CompactDuringRun;
-  getRequestController: () => AbortController;
-  renewRequestController: () => AbortController;
+  compaction: CompactionController;
+  cancellation: TurnCancellation;
   resetLiveTranscript: (store: LiveTranscriptStore) => void;
   updateLiveRounds: (
     updater: (prev: LiveRound[]) => LiveRound[],
@@ -286,7 +257,6 @@ export type RunAgentConversationTurnParams = {
     store: LiveTranscriptStore,
   ) => void;
   updateToolStatus: (status: string | null, store: LiveTranscriptStore) => void;
-  updateGatewayBridgeToolStatus: (status: string | null, isCompaction?: boolean) => void;
   commitVisibleAbortedConversation: () => boolean;
   updateConversationRuntimeEntry: (
     conversationId: string,
@@ -331,23 +301,17 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     transcriptStore,
     gatewayBridgeEvents,
     hookLifecycle,
-    conversationThrottleState,
     conversationDebugLogger,
-    compactionDebugLogger,
     subagentStore,
     getNextConversationState,
     applyConversationState,
-    buildCompactionContext,
     buildPreparedContext,
-    maybeApplyPreCompaction,
-    compactDuringRun,
-    getRequestController,
-    renewRequestController,
+    compaction,
+    cancellation,
     resetLiveTranscript,
     updateLiveRounds,
     batchLiveRoundsUpdate,
     updateToolStatus,
-    updateGatewayBridgeToolStatus,
     commitVisibleAbortedConversation,
     updateConversationRuntimeEntry,
     persistConversationWithHistorySync,
@@ -470,10 +434,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   const combinedTools = builtinRegistry.tools;
 
   const preCompactionStartedAt = perfNowMs();
-  await maybeApplyPreCompaction({
-    requestContext: buildCompactionContext(getNextConversationState(), combinedTools, {
-      includeUploadedFilesMetadata: true,
-    }),
+  await compaction.maybeCompactPreSend({
     budgetContext: withSubagentRuntimeContext(
       buildPreparedContext(getNextConversationState(), combinedTools, {
         includeUploadedFilesMetadata: true,
@@ -626,11 +587,11 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     }
   }
 
+  let midStreamProtectionDisabled = false;
   while (!result) {
     let streamedAgentText = "";
     let protectionCheckChars = 0;
     let midStreamCompactionRequested = false;
-    let midStreamCompactionStatusText: string | null = null;
     let sawToolCallInRound = false;
     const nativeWebSearchEnabled = runtime.nativeWebSearchEnabled !== false;
     const agentContext = withSubagentRuntimeContext(
@@ -640,6 +601,10 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
         }),
     );
     pendingAgentContext = null;
+    // 主请求跑在派生 scope 上：mid-stream 压缩只 abort 该 scope，用户停止
+    // （userStop）随时链式传导，不存在换代窗口。
+    const scope = cancellation.deriveScope();
+    compaction.beginRequest(agentContext, getNextConversationState());
 
     try {
       const assistantRunStartedAt = perfNowMs();
@@ -688,42 +653,20 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
           );
 
           protectionCheckChars += delta.length;
-          if (midStreamCompactionRequested || sawToolCallInRound || protectionCheckChars < 160) {
+          if (
+            midStreamCompactionRequested ||
+            midStreamProtectionDisabled ||
+            sawToolCallInRound ||
+            protectionCheckChars < 160
+          ) {
             return;
           }
 
           protectionCheckChars = 0;
-          const partialAssistant = buildPartialAssistantMessage({
-            model: runtimeModel,
-            text: streamedAgentText,
-            stopReason: "aborted",
-          });
-          if (!partialAssistant) return;
-
-          const tempState = appendMessagesToConversation(getNextConversationState(), [
-            ...latestAgentEmittedMessages,
-            partialAssistant,
-          ]);
-          const tempContext = withSubagentRuntimeContext(
-            buildPreparedContext(tempState, combinedTools, {
-              includeAbortedMessages: true,
-              includeUploadedFilesMetadata: true,
-            }),
-          );
-          const decision = shouldProtectionCompactConversation({
-            providerId,
-            state: tempState,
-            requestContext: tempContext,
-            modelConfig: runtime.modelConfig,
-            throttleState: conversationThrottleState,
-            debugLogger: compactionDebugLogger,
-          });
-          if (!decision.shouldCompact) return;
-
+          // O(1) 账本判定，触发时才 abort 本地 scope 并在 catch 中构建压缩输入。
+          if (!compaction.shouldProtectMidStream(streamedAgentText.length)) return;
           midStreamCompactionRequested = true;
-          midStreamCompactionStatusText = buildProtectionCompactionStatus(decision);
-          updateGatewayBridgeToolStatus(midStreamCompactionStatusText, true);
-          getRequestController().abort();
+          scope.controller.abort();
         },
         onThinkingDelta: (delta, round) => {
           gatewayBridgeEvents.queueEvent({
@@ -847,7 +790,6 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
         },
         onBeforeNextTurn: async ({ emittedMessages }) => {
           latestAgentEmittedMessages = emittedMessages.slice();
-          noteCompactionRound(conversationThrottleState);
           await refreshParentMessageBusSnapshot();
           const tempState = appendMessagesToConversation(
             getNextConversationState(),
@@ -858,15 +800,14 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
               includeUploadedFilesMetadata: true,
             }),
           );
-          const decision = shouldProtectionCompactConversation({
-            providerId,
+          const compactedContext = await compaction.compactDuringRun({
+            trigger: "post-tool",
             state: tempState,
-            requestContext: tempContext,
-            modelConfig: runtime.modelConfig,
-            throttleState: conversationThrottleState,
-            debugLogger: compactionDebugLogger,
+            budgetContext: tempContext,
+            tools: combinedTools,
+            includeUploadedFilesMetadata: true,
           });
-          if (!decision.shouldCompact) {
+          if (!compactedContext) {
             return parentMessageBusSnapshot
               ? {
                   context: tempContext,
@@ -874,29 +815,13 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
                 }
               : null;
           }
-
-          const statusText = buildProtectionCompactionStatus(decision);
-          const compactedContext = await compactDuringRun({
-            trigger: "post-tool",
-            state: tempState,
-            requestContext: buildCompactionContext(tempState, combinedTools, {
-              includeUploadedFilesMetadata: true,
-            }),
-            budgetContext: tempContext,
-            statusText,
-            tools: combinedTools,
-            includeUploadedFilesMetadata: true,
-          });
-          if (!compactedContext) {
-            return null;
-          }
           latestAgentEmittedMessages = [];
           return {
             context: withSubagentRuntimeContext(compactedContext),
             emittedMessages: [],
           };
         },
-        signal: getRequestController().signal,
+        signal: scope.controller.signal,
         debugLogger: conversationDebugLogger,
       });
       finishAgentPerfSpan(
@@ -930,32 +855,34 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
       ]);
       latestAgentEmittedMessages = [];
       applyConversationState(tempState);
-      renewRequestController();
 
-      const compactedContext = await compactDuringRun({
+      const compactedContext = await compaction.compactDuringRun({
         trigger: "mid-stream",
         state: tempState,
-        requestContext: buildCompactionContext(tempState, combinedTools, {
-          includeAbortedMessages: true,
-          includeUploadedFilesMetadata: true,
-        }),
         budgetContext: withSubagentRuntimeContext(
           buildPreparedContext(tempState, combinedTools, {
             includeAbortedMessages: true,
             includeUploadedFilesMetadata: true,
           }),
         ),
-        statusText: midStreamCompactionStatusText ?? "正在压缩上下文...",
         tools: combinedTools,
         includeAbortedMessages: true,
         includeUploadedFilesMetadata: true,
       });
 
-      if (!compactedContext) {
-        throw new Error("Context compaction failed and the tool session could not be restored");
+      if (compactedContext) {
+        pendingAgentContext = compactedContext;
+      } else {
+        // 压缩与 prune 均不可用：本轮禁用 mid-stream 保护，带原上下文续跑，
+        // 让真正的溢出错误由 provider 显式暴露，而不是让整轮失败。
+        midStreamProtectionDisabled = true;
+        pendingAgentContext = buildPreparedContext(tempState, combinedTools, {
+          includeAbortedMessages: true,
+          includeUploadedFilesMetadata: true,
+        });
       }
-
-      pendingAgentContext = compactedContext;
+    } finally {
+      scope.release();
     }
   }
 
@@ -981,7 +908,6 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
       round: activeAgentRound || 1,
     });
   }
-  noteCompactionRound(conversationThrottleState);
   const shouldRunMemoryExtraction =
     assistantStopReason !== "error" && assistantStopReason !== "aborted";
   const memoryRoundOffset = Math.max(

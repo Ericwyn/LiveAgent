@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { HOOK_EVENT_TRANSLATION_KEYS } from "../../../lib/automation";
 import type { HookRunWarning } from "../../../lib/automation/hookRunner";
-import type { CompactionStatus } from "../../../lib/chat/compaction/contextCompaction";
+import type { CompactionStatus } from "../../../lib/chat/compaction/types";
 import type { ConversationViewState } from "../../../lib/chat/conversation/conversationState";
 import { normalizeErrorMessage } from "../../../lib/providers/llm";
 import type { AppSettings } from "../../../lib/settings";

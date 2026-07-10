@@ -399,10 +399,11 @@ export function useConversationHistoryActions(params: UseConversationHistoryActi
         createdAt,
         updatedAt,
         state,
-        previousState: persistedConversationStateRef.current.get(conversationId) ?? null,
+        getPreviousState: () => persistedConversationStateRef.current.get(conversationId) ?? null,
+        commitPersistedState: (persisted) =>
+          persistedConversationStateRef.current.set(conversationId, persisted),
       });
       markLocalHistorySnapshotSynced(conversationId, summary.updatedAt);
-      persistedConversationStateRef.current.set(conversationId, state);
       updateConversationRuntimeEntry(conversationId, (prev) => ({
         ...prev,
         errorMessage: null,

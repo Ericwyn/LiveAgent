@@ -14,7 +14,7 @@ import {
   stripUploadedFilesMessageMetadata,
 } from "../messages/uploadedFiles";
 
-const INTERNAL_RESUME_MESSAGE_TEXT =
+export const INTERNAL_RESUME_MESSAGE_TEXT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
 const SILENT_MEMORY_EXTRACTION_FINAL_TEXTS = new Set(["记忆整理完成。", "本轮无需更新记忆。"]);
 
@@ -38,7 +38,22 @@ export type StoredSummaryMessage = {
       sourceMessageCount: number;
       estimatedInputTokens?: number;
       outputTokens?: number;
+      summarizer?: {
+        inputTokens?: number;
+        outputTokens?: number;
+      };
     };
+  };
+};
+
+// 压缩引擎在 checkpoint assistant 消息上附带的统计扩展：
+// conversationTokens 是被压缩会话的规模；summarizer 是压缩请求自身的用量。
+// 两者必须分开——checkpoint 消息本身的 usage 恒为零，避免污染 token 观测。
+export type CompactionCheckpointStats = {
+  conversationTokens?: number;
+  summarizer?: {
+    inputTokens?: number;
+    outputTokens?: number;
   };
 };
 
@@ -129,7 +144,7 @@ function createEmptySegment(index: number, timestamp = Date.now()): StoredContex
   };
 }
 
-function isCompactionAssistantMessage(message: Message): message is AssistantMessage {
+export function isCompactionAssistantMessage(message: Message): message is AssistantMessage {
   return (
     message.role === "assistant" &&
     (message.api === "liveagent-compaction" ||
@@ -419,6 +434,29 @@ function appendCompactionCheckpointToSegments(
   };
 }
 
+function buildSummaryStats(
+  assistant: AssistantMessage,
+  sourceMessageCount: number,
+): NonNullable<StoredSummaryMessage["summaryMeta"]["stats"]> {
+  const checkpointStats = (
+    assistant as AssistantMessage & { compactionStats?: CompactionCheckpointStats }
+  ).compactionStats;
+  if (checkpointStats) {
+    return {
+      sourceMessageCount,
+      estimatedInputTokens: checkpointStats.conversationTokens,
+      outputTokens: checkpointStats.summarizer?.outputTokens,
+      summarizer: checkpointStats.summarizer,
+    };
+  }
+  return {
+    sourceMessageCount,
+    estimatedInputTokens:
+      typeof assistant.usage?.input === "number" ? assistant.usage.input : undefined,
+    outputTokens: typeof assistant.usage?.output === "number" ? assistant.usage.output : undefined,
+  };
+}
+
 function createSummaryFromAssistant(
   assistant: AssistantMessage,
   params: {
@@ -456,13 +494,7 @@ function createSummaryFromAssistant(
             : "summary",
         promptVersion: getAssistantPromptVersion(assistant),
       },
-      stats: {
-        sourceMessageCount: params.sourceMessageCount,
-        estimatedInputTokens:
-          typeof assistant.usage?.input === "number" ? assistant.usage.input : undefined,
-        outputTokens:
-          typeof assistant.usage?.output === "number" ? assistant.usage.output : undefined,
-      },
+      stats: buildSummaryStats(assistant, params.sourceMessageCount),
     },
   };
 }

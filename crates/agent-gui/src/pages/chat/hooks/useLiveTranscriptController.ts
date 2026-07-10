@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { createCompactionThrottleState } from "../../../lib/chat/compaction/contextCompaction";
+import { createCompactionControllerRegistry } from "../../../lib/chat/compaction/controller";
 import {
   cloneLiveRoundSnapshots,
   type LiveRoundSnapshot,
@@ -107,9 +107,7 @@ export function useLiveTranscriptController(params: UseLiveTranscriptControllerP
   const liveTranscriptArtifactsByStoreRef = useRef(
     new WeakMap<LiveTranscriptStore, LiveTranscriptArtifacts>(),
   );
-  const compactionThrottleByConversationRef = useRef(
-    new Map<string, ReturnType<typeof createCompactionThrottleState>>(),
-  );
+  const compactionControllersRef = useRef(createCompactionControllerRegistry());
 
   const ensureConversationLiveTranscriptArtifacts = useCallback((conversationId: string) => {
     const key = conversationId.trim();
@@ -126,21 +124,10 @@ export function useLiveTranscriptController(params: UseLiveTranscriptControllerP
     [ensureConversationLiveTranscriptArtifacts],
   );
 
-  const getCompactionThrottleState = useCallback((conversationId: string) => {
-    const key = conversationId.trim();
-    const existing = compactionThrottleByConversationRef.current.get(key);
-    if (existing) return existing;
-    const created = createCompactionThrottleState();
-    compactionThrottleByConversationRef.current.set(key, created);
-    return created;
-  }, []);
-
-  const resetCompactionThrottleState = useCallback((conversationId: string) => {
-    compactionThrottleByConversationRef.current.set(
-      conversationId.trim(),
-      createCompactionThrottleState(),
-    );
-  }, []);
+  const getCompactionController = useCallback(
+    (conversationId: string) => compactionControllersRef.current.get(conversationId),
+    [],
+  );
 
   const liveTranscriptStore = useMemo(
     () => getConversationLiveTranscriptStore(currentConversationId),
@@ -200,7 +187,7 @@ export function useLiveTranscriptController(params: UseLiveTranscriptControllerP
       const artifacts = liveTranscriptArtifactsRef.current.get(key);
       cancelPendingLiveUpdates(artifacts ?? null);
       liveTranscriptArtifactsRef.current.delete(key);
-      compactionThrottleByConversationRef.current.delete(key);
+      compactionControllersRef.current.dispose(key);
     },
     [cancelPendingLiveUpdates],
   );
@@ -354,8 +341,7 @@ export function useLiveTranscriptController(params: UseLiveTranscriptControllerP
   return {
     liveTranscriptStore,
     getConversationLiveTranscriptStore,
-    getCompactionThrottleState,
-    resetCompactionThrottleState,
+    getCompactionController,
     deleteConversationArtifacts,
     clearAbortSnapshot,
     captureAbortSnapshot,

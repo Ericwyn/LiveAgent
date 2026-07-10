@@ -25,12 +25,7 @@ export {
   pruneIdleConversationRuntimeCaches,
   setConversationRuntimeCacheEntry,
 } from "./runtime/chatPageRuntime";
-export { buildPreCompactionStatus } from "./runtime/compactionStatusText";
-export {
-  buildCompactionContext,
-  buildPreparedContext,
-  buildResumeContext,
-} from "./runtime/conversationContextBuilders";
+export { buildPreparedContext, buildResumeContext } from "./runtime/conversationContextBuilders";
 export { startConversationTitleJob } from "./runtime/conversationTitleJob";
 export {
   type EffectiveChatModelSelection,
