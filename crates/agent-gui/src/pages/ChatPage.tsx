@@ -97,7 +97,11 @@ import {
   preparePreferredMonacoNlsLocale,
   setPreferredMonacoNlsLocale,
 } from "../lib/monacoNls";
-import { createModelFromConfig, isThinkingAlwaysOnForModel, toModelValue } from "../lib/providers/llm";
+import {
+  createModelFromConfig,
+  isThinkingAlwaysOnForModel,
+  toModelValue,
+} from "../lib/providers/llm";
 import {
   type AppSettings,
   applyMcpOpsToAppSettings,
@@ -4858,7 +4862,11 @@ export function ChatPage(props: ChatPageProps) {
     ],
   );
   const chatRuntimeControlsForCurrentProvider = useMemo(
-    () => normalizeChatRuntimeControlsForProvider(settings.chatRuntimeControls, chatRuntimeReasoningParams),
+    () =>
+      normalizeChatRuntimeControlsForProvider(
+        settings.chatRuntimeControls,
+        chatRuntimeReasoningParams,
+      ),
     [chatRuntimeReasoningParams, settings.chatRuntimeControls],
   );
   const handleChatRuntimeControlsChange = useCallback(

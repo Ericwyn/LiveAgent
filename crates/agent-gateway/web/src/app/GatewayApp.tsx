@@ -3111,15 +3111,14 @@ export default function GatewayApp() {
         requestFormat: currentChatProvider?.requestFormat,
         modelId: settings.selectedModel?.model,
       }),
-    [
-      currentChatProvider?.requestFormat,
-      currentChatProvider?.type,
-      settings.selectedModel?.model,
-    ],
+    [currentChatProvider?.requestFormat, currentChatProvider?.type, settings.selectedModel?.model],
   );
   const chatRuntimeThinkingAlwaysOn = useMemo(
     () =>
-      isThinkingAlwaysOnForModel(currentChatProvider?.type ?? "claude_code", settings.selectedModel?.model),
+      isThinkingAlwaysOnForModel(
+        currentChatProvider?.type ?? "claude_code",
+        settings.selectedModel?.model,
+      ),
     [currentChatProvider?.type, settings.selectedModel?.model],
   );
   const chatRuntimeControlsForCurrentProvider = useMemo(
