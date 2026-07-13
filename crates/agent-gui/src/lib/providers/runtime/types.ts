@@ -5,6 +5,7 @@ import type {
   ProviderModelConfig,
   ReasoningLevel,
 } from "../../settings";
+import type { StreamRetryConfig } from "./streamRetry";
 
 export type ModelOption = {
   value: string; // encodes customProviderId::model
@@ -46,4 +47,6 @@ export type StreamOptionsEx = SimpleStreamOptions & {
   deepSeekDsmlToolCallRepair?: boolean;
   deepSeekProviderAdapter?: boolean;
   deepSeekAnthropicPayloadToolBlockFlattening?: boolean;
+  /** Escape hatch for the unified provider stream retry in streamByApi.ts. */
+  streamRetry?: StreamRetryConfig;
 };

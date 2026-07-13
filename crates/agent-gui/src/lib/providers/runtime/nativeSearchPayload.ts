@@ -1,6 +1,12 @@
 import type { Model } from "@earendil-works/pi-ai";
 import type { ProviderId } from "../../settings";
-import { providerSupportsNativeWebSearch } from "../nativeWebSearch";
+import {
+  hasAnthropicWebSearchTool,
+  hasGeminiGoogleSearchTool,
+  hasOpenAIResponsesWebSearchTool,
+  providerSupportsNativeWebSearch,
+  resolveAnthropicWebSearchToolType,
+} from "../nativeWebSearch";
 import { isRecord } from "./common";
 import type { StreamOptionsEx } from "./types";
 
@@ -14,31 +20,8 @@ function isOfficialOpenAIBaseUrl(baseUrl: string | undefined) {
   }
 }
 
-function hasOpenAIResponsesWebSearchTool(tool: unknown) {
-  if (!isRecord(tool)) return false;
-  const type = tool.type;
-  return (
-    type === "web_search" ||
-    type === "web_search_2025_08_26" ||
-    type === "web_search_preview" ||
-    type === "web_search_preview_2025_03_11"
-  );
-}
-
 function hasOpenAIChatCompletionsWebSearchOptions(payload: Record<string, unknown>) {
   return isRecord(payload.web_search_options);
-}
-
-function hasAnthropicWebSearchTool(tool: unknown) {
-  if (!isRecord(tool)) return false;
-  const type = tool.type;
-  const name = tool.name;
-  return name === "web_search" || type === "web_search_20260209" || type === "web_search_20250305";
-}
-
-function hasGeminiGoogleSearchTool(tool: unknown) {
-  if (!isRecord(tool)) return false;
-  return Boolean(tool.googleSearch || tool.google_search || tool.googleSearchRetrieval);
 }
 
 function appendUniqueTool(
@@ -214,7 +197,7 @@ export function attachProviderNativeWebSearch(
       if (providerId === "claude_code") {
         return appendUniqueTool(
           nextPayload,
-          { type: "web_search_20250305", name: "web_search" },
+          { type: resolveAnthropicWebSearchToolType(model), name: "web_search" },
           hasAnthropicWebSearchTool,
         );
       }

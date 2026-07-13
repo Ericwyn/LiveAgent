@@ -333,14 +333,14 @@ test("official OpenAI Chat Completions models behind proxy keep native compat", 
   assert.equal(model.compat, undefined);
 });
 
-test("Codex Chat Completions streams forward reasoning effort", () => {
+test("Codex Chat Completions streams forward reasoning effort", async () => {
   let captured;
   const localLoader = createTsModuleLoader({
     mocks: {
       "@earendil-works/pi-ai/api/openai-completions": {
         stream(model, context, options) {
           captured = { model, context, options };
-          return { mocked: true };
+          return createMockAssistantStream();
         },
       },
     },
@@ -359,7 +359,8 @@ test("Codex Chat Completions streams forward reasoning effort", () => {
     { reasoning: "high", toolChoice: "auto" },
   );
 
-  assert.deepEqual(result, { mocked: true });
+  assert.equal(typeof result.result, "function");
+  await result.result();
   assert.equal(captured.options.reasoningEffort, "high");
   assert.equal(captured.options.toolChoice, "auto");
 });
@@ -389,7 +390,7 @@ test("DeepSeek OpenAI payload adapter injects thinking and reasoning_content", a
       "@earendil-works/pi-ai/api/openai-completions": {
         stream(model, context, options) {
           captured = { model, context, options };
-          return { mocked: true };
+          return createMockAssistantStream();
         },
       },
     },
@@ -407,7 +408,7 @@ test("DeepSeek OpenAI payload adapter injects thinking and reasoning_content", a
     { messages: [] },
     { reasoning: "minimal", toolChoice: "auto" },
   );
-  assert.deepEqual(result, { mocked: true });
+  assert.equal(typeof result.result, "function");
   assert.equal(typeof captured.options.onPayload, "function");
 
   const adapted = await captured.options.onPayload(

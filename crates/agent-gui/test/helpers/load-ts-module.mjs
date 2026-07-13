@@ -31,6 +31,9 @@ const piAiEventStream = await import(
     import.meta.url,
   ).href
 );
+const piAiRetry = await import(
+  new URL("../../node_modules/@earendil-works/pi-ai/dist/utils/retry.js", import.meta.url).href
+);
 const piAiProvidersAll = await import(
   new URL(
     "../../node_modules/@earendil-works/pi-ai/dist/providers/all.js",
@@ -106,6 +109,8 @@ function createDefaultMocks() {
       repairJson: piAiJsonParse.repairJson,
       getSupportedThinkingLevels: piAiModels.getSupportedThinkingLevels,
       clampThinkingLevel: piAiModels.clampThinkingLevel,
+      isRetryableAssistantError: piAiRetry.isRetryableAssistantError,
+      createAssistantMessageEventStream: piAiEventStream.createAssistantMessageEventStream,
       EventStream: class EventStream {
         constructor() {
           throw new Error("EventStream mock was not expected to be constructed");
@@ -209,10 +214,25 @@ export function createTsModuleLoader(options = {}) {
     : path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
   const requireFromRoot = createRequire(path.join(rootDir, "package.json"));
   const cache = new Map();
-  const mocks = new Map([
-    ...Object.entries(createDefaultMocks()),
-    ...Object.entries(options.mocks ?? {}),
-  ]);
+  const defaultMocks = createDefaultMocks();
+  const mocks = new Map(Object.entries(defaultMocks));
+  // Tests conventionally override a mocked module by supplying only the
+  // handful of exports they care about (e.g. { getModel() {...} } for
+  // "@earendil-works/pi-ai"), expecting every other default export — like
+  // the real isRetryableAssistantError/createAssistantMessageEventStream —
+  // to keep working underneath. Shallow-merge instead of replacing so those
+  // partial overrides don't silently drop unrelated default exports.
+  for (const [specifier, override] of Object.entries(options.mocks ?? {})) {
+    const base = defaultMocks[specifier];
+    const isPlainMerge =
+      base &&
+      typeof base === "object" &&
+      !Array.isArray(base) &&
+      override &&
+      typeof override === "object" &&
+      !Array.isArray(override);
+    mocks.set(specifier, isPlainMerge ? { ...base, ...override } : override);
+  }
 
   function resolveLocal(specifier, parentDir = rootDir) {
     const candidate = path.isAbsolute(specifier)

@@ -20,6 +20,7 @@ import {
   mapDeepSeekReasoningEffort,
 } from "../deepSeekProviderAdapter";
 import { resolveMaxTokens } from "./common";
+import { withStreamRetry } from "./streamRetry";
 import { normalizeStructuredToolCallHistoryForDeepSeek } from "./textModeToolRecovery";
 import {
   type AnthropicEffort,
@@ -106,27 +107,32 @@ export function streamSimpleByApi(model: Model<any>, context: Context, options: 
       const anthropicContext = isDeepSeekAnthropic
         ? normalizeStructuredToolCallHistoryForDeepSeek(context)
         : context;
-      const stream = streamAnthropic(model as any, anthropicContext, {
-        temperature: anthropicOptions.temperature,
-        maxTokens: anthropicThinking.maxTokens,
-        signal: anthropicOptions.signal,
-        apiKey: anthropicOptions.apiKey,
-        cacheRetention: anthropicOptions.cacheRetention,
-        sessionId: anthropicOptions.sessionId,
-        headers: anthropicOptions.headers,
-        onPayload: anthropicOptions.onPayload,
-        maxRetryDelayMs: anthropicOptions.maxRetryDelayMs,
-        metadata: anthropicOptions.metadata,
-        thinkingEnabled: anthropicThinking.thinkingEnabled,
-        ...(anthropicThinking.effort ? { effort: anthropicThinking.effort } : {}),
-        ...(anthropicThinking.thinkingBudgetTokens !== undefined
-          ? { thinkingBudgetTokens: anthropicThinking.thinkingBudgetTokens }
-          : {}),
-        toolChoice: anthropicOptions.toolChoice ?? "none",
-      });
-      return isDeepSeekAnthropic || anthropicOptions.deepSeekDsmlToolCallRepair
-        ? wrapDeepSeekDsmlToolCallStream(stream)
-        : stream;
+      return withStreamRetry(
+        () => {
+          const stream = streamAnthropic(model as any, anthropicContext, {
+            temperature: anthropicOptions.temperature,
+            maxTokens: anthropicThinking.maxTokens,
+            signal: anthropicOptions.signal,
+            apiKey: anthropicOptions.apiKey,
+            cacheRetention: anthropicOptions.cacheRetention,
+            sessionId: anthropicOptions.sessionId,
+            headers: anthropicOptions.headers,
+            onPayload: anthropicOptions.onPayload,
+            maxRetryDelayMs: anthropicOptions.maxRetryDelayMs,
+            metadata: anthropicOptions.metadata,
+            thinkingEnabled: anthropicThinking.thinkingEnabled,
+            ...(anthropicThinking.effort ? { effort: anthropicThinking.effort } : {}),
+            ...(anthropicThinking.thinkingBudgetTokens !== undefined
+              ? { thinkingBudgetTokens: anthropicThinking.thinkingBudgetTokens }
+              : {}),
+            toolChoice: anthropicOptions.toolChoice ?? "none",
+          });
+          return isDeepSeekAnthropic || anthropicOptions.deepSeekDsmlToolCallRepair
+            ? wrapDeepSeekDsmlToolCallStream(stream)
+            : stream;
+        },
+        { signal: anthropicOptions.signal, ...anthropicOptions.streamRetry },
+      );
     }
     case "openai-completions": {
       const openAICompletionsOptions = isDeepSeekTarget({
@@ -147,14 +153,20 @@ export function streamSimpleByApi(model: Model<any>, context: Context, options: 
         reasoningEffort: clampOpenAIReasoningEffort(model, openAICompletionsOptions.reasoning),
         toolChoice: mapToolChoiceToOpenAI(openAICompletionsOptions.toolChoice),
       };
-      return streamOpenAICompletions(model as any, openAICompletionsContext, openAIOptions);
+      return withStreamRetry(
+        () => streamOpenAICompletions(model as any, openAICompletionsContext, openAIOptions),
+        { signal: openAICompletionsOptions.signal, ...openAICompletionsOptions.streamRetry },
+      );
     }
     case "openai-responses": {
       const openAIOptions: OpenAIResponsesOptions = {
         ...buildOpenAIBaseOptions(model, options),
         reasoningEffort: clampOpenAIReasoningEffort(model, options.reasoning),
       };
-      return streamOpenAIResponses(model as any, context, openAIOptions);
+      return withStreamRetry(() => streamOpenAIResponses(model as any, context, openAIOptions), {
+        signal: options.signal,
+        ...options.streamRetry,
+      });
     }
     case "google-generative-ai": {
       const googleOptions: GoogleOptions = {
@@ -169,7 +181,10 @@ export function streamSimpleByApi(model: Model<any>, context: Context, options: 
         thinking: resolveGeminiThinkingRuntime(model, options.reasoning),
         toolChoice: mapToolChoiceToGoogle(options.toolChoice) ?? "none",
       };
-      return streamGoogle(model as any, context, googleOptions);
+      return withStreamRetry(() => streamGoogle(model as any, context, googleOptions), {
+        signal: options.signal,
+        ...options.streamRetry,
+      });
     }
     default:
       throw new Error(`Unsupported model API: ${model.api}`);

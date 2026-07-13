@@ -250,3 +250,133 @@ test("hosted search aggregation extracts structural Anthropic and Gemini search 
     "https://example.com/gemini",
   ]);
 });
+
+test("hosted search aggregation accumulates an Anthropic query streamed as partial_json fragments", () => {
+  const anthropic = hostedSearchEvents.createHostedSearchEventAggregator({
+    providerId: "claude_code",
+  });
+
+  // The real Anthropic wire format streams the tool-call JSON input across
+  // several content_block_delta events; no single fragment is valid JSON on
+  // its own, so the query can only be read once every fragment has arrived.
+  anthropic.accept({
+    type: "content_block_start",
+    index: 0,
+    content_block: { type: "server_tool_use", id: "toolu_incremental", name: "web_search" },
+  });
+  anthropic.accept({
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "input_json_delta", partial_json: '{"que' },
+  });
+  assert.deepEqual(anthropic.getBlocks(), []);
+
+  anthropic.accept({
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "input_json_delta", partial_json: 'ry": "LiveAg' },
+  });
+  assert.deepEqual(anthropic.getBlocks(), []);
+
+  anthropic.accept({
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "input_json_delta", partial_json: 'ent incremental search"}' },
+  });
+
+  assert.deepEqual(anthropic.getBlocks()[0].queries, ["LiveAgent incremental search"]);
+  assert.equal(anthropic.getBlocks()[0].status, "searching");
+
+  anthropic.accept({ type: "content_block_stop", index: 0 });
+});
+
+test("hosted search aggregation extracts Anthropic citations_delta into the active search block", () => {
+  const anthropic = hostedSearchEvents.createHostedSearchEventAggregator({
+    providerId: "claude_code",
+  });
+
+  anthropic.accept({
+    type: "content_block_start",
+    content_block: {
+      type: "server_tool_use",
+      id: "toolu_cited",
+      name: "web_search",
+      input: { query: "LiveAgent citation search" },
+    },
+  });
+  anthropic.accept({
+    type: "content_block_delta",
+    index: 1,
+    delta: {
+      type: "citations_delta",
+      citation: { url: "https://example.com/cited", title: "Cited Result" },
+    },
+  });
+
+  const block = anthropic.getBlocks()[0];
+  assert.deepEqual(block.queries, ["LiveAgent citation search"]);
+  assert.deepEqual(
+    block.sources.map((source) => ({ url: source.url, sourceType: source.sourceType })),
+    [{ url: "https://example.com/cited", sourceType: "citation" }],
+  );
+});
+
+test("hosted search aggregation marks Anthropic web_search_tool_result_error as failed", () => {
+  const anthropic = hostedSearchEvents.createHostedSearchEventAggregator({
+    providerId: "claude_code",
+  });
+
+  anthropic.accept({
+    type: "content_block_start",
+    content_block: {
+      type: "server_tool_use",
+      id: "toolu_failed",
+      name: "web_search",
+      input: { query: "LiveAgent failing search" },
+    },
+  });
+  anthropic.accept({
+    type: "content_block_start",
+    content_block: { type: "web_search_tool_result_error", tool_use_id: "toolu_failed" },
+  });
+
+  assert.equal(anthropic.getBlocks()[0].status, "failed");
+});
+
+test("hosted search aggregation extracts OpenAI url_citation annotations and marks call completion", () => {
+  const emitted = [];
+  const openai = hostedSearchEvents.createHostedSearchEventAggregator({
+    providerId: "codex",
+    onHostedSearch: (block) => emitted.push(block),
+  });
+
+  openai.accept({
+    type: "response.output_item.added",
+    item: {
+      type: "web_search_call",
+      id: "search-annotated",
+      status: "in_progress",
+      action: { query: "LiveAgent OpenAI search" },
+    },
+  });
+  openai.accept({
+    type: "response.output_item.done",
+    item: { type: "web_search_call", id: "search-annotated", status: "completed" },
+  });
+  openai.accept({
+    type: "response.output_text.annotation.added",
+    annotation: {
+      type: "url_citation",
+      url: "https://example.com/openai",
+      title: "OpenAI Result",
+    },
+  });
+
+  const block = openai.getBlocks()[0];
+  assert.equal(block.status, "completed");
+  assert.deepEqual(block.queries, ["LiveAgent OpenAI search"]);
+  assert.deepEqual(
+    block.sources.map((source) => ({ url: source.url, sourceType: source.sourceType })),
+    [{ url: "https://example.com/openai", sourceType: "citation" }],
+  );
+});

@@ -298,118 +298,6 @@ export function startHostedSearchFetchProbe(params: {
   };
 }
 
-function normalizedType(value: unknown) {
-  return readString(value).replace(/-/g, "_").toLowerCase();
-}
-
-function hasRecordMatching(
-  value: unknown,
-  matches: (record: Record<string, unknown>) => boolean,
-): boolean {
-  if (Array.isArray(value)) return value.some((item) => hasRecordMatching(item, matches));
-  if (!isRecord(value)) return false;
-  if (matches(value)) return true;
-  return Object.values(value).some((child) => hasRecordMatching(child, matches));
-}
-
-function isOpenAIWebSearchRecord(record: Record<string, unknown>) {
-  const type = normalizedType(record.type);
-  return type === "web_search_call" || type.startsWith("web_search_call_");
-}
-
-function isOpenAIUrlCitationRecord(record: Record<string, unknown>) {
-  return normalizedType(record.type) === "url_citation";
-}
-
-function hasOpenAISearchSignal(value: unknown) {
-  if (!isRecord(value)) return false;
-  const eventType = normalizedType(value.type);
-  if (eventType.includes("web_search_call")) return true;
-  if (eventType.includes("output_text.annotation")) {
-    const annotation = isRecord(value.annotation) ? value.annotation : {};
-    return isOpenAIUrlCitationRecord(annotation);
-  }
-  const item = isRecord(value.item) ? value.item : {};
-  if (isOpenAIWebSearchRecord(item)) return true;
-  return hasRecordMatching(
-    value,
-    (record) => isOpenAIWebSearchRecord(record) || isOpenAIUrlCitationRecord(record),
-  );
-}
-
-function isAnthropicWebSearchRecord(record: Record<string, unknown>) {
-  const type = normalizedType(record.type);
-  const name = readString(record.name).toLowerCase();
-  return (
-    (type === "server_tool_use" && name === "web_search") ||
-    type === "web_search_tool_result" ||
-    type === "web_search_result" ||
-    type === "webpage_location" ||
-    (name === "web_search" && type.includes("tool"))
-  );
-}
-
-function hasAnthropicSearchSignal(value: unknown) {
-  if (!isRecord(value)) return false;
-  const eventType = normalizedType(value.type);
-  if (eventType.includes("web_search")) return true;
-  const contentBlock = isRecord(value.content_block) ? value.content_block : {};
-  if (isAnthropicWebSearchRecord(contentBlock)) return true;
-  return hasRecordMatching(value, isAnthropicWebSearchRecord);
-}
-
-function hasGeminiGroundingSignal(value: unknown) {
-  return hasRecordMatching(value, (record) => {
-    if (isRecord(record.groundingMetadata)) return true;
-    if (Array.isArray(record.groundingChunks)) return true;
-    if (Array.isArray(record.webSearchQueries)) return true;
-    return false;
-  });
-}
-
-function hasSearchSignal(providerId: ProviderId, value: unknown): boolean {
-  if (providerId === "codex") return hasOpenAISearchSignal(value);
-  if (providerId === "claude_code") return hasAnthropicSearchSignal(value);
-  if (providerId === "gemini") return hasGeminiGroundingSignal(value);
-  return false;
-}
-
-function collectQueries(value: unknown, out: string[] = [], keyHint = ""): string[] {
-  if (typeof value === "string") {
-    const normalizedHint = keyHint.toLowerCase();
-    if (
-      normalizedHint === "query" ||
-      normalizedHint === "search_query" ||
-      normalizedHint === "searchquery" ||
-      normalizedHint === "websearchqueries"
-    ) {
-      const text = value.replace(/\s+/g, " ").trim();
-      if (text && text.length <= 500 && !out.includes(text)) out.push(text);
-    }
-    return out;
-  }
-
-  if (Array.isArray(value)) {
-    value.forEach((item) => {
-      collectQueries(item, out, keyHint);
-    });
-    return out;
-  }
-
-  if (!isRecord(value)) return out;
-  for (const [key, child] of Object.entries(value)) {
-    const normalizedKey = key.replace(/[-_]/g, "").toLowerCase();
-    if (Array.isArray(child) && normalizedKey === "websearchqueries") {
-      child.forEach((item) => {
-        collectQueries(item, out, "webSearchQueries");
-      });
-      continue;
-    }
-    collectQueries(child, out, key);
-  }
-  return out;
-}
-
 function isHttpUrl(value: string) {
   try {
     const url = new URL(value);
@@ -419,129 +307,284 @@ function isHttpUrl(value: string) {
   }
 }
 
-function collectSources(value: unknown, out = new Map<string, HostedSearchSource>()) {
-  if (Array.isArray(value)) {
-    value.forEach((item) => {
-      collectSources(item, out);
-    });
-    return out;
-  }
-  if (!isRecord(value)) return out;
-
-  const directUrl = readString(value.url ?? value.uri);
-  if (directUrl && isHttpUrl(directUrl)) {
-    const existing = out.get(directUrl);
-    const type = readString(value.type);
-    const sourceType =
-      type === "url_citation" ||
-      value.cited_text ||
-      value.citedText ||
-      existing?.sourceType === "citation"
-        ? "citation"
-        : "source";
-    const title = readString(value.title ?? value.name) || existing?.title;
-    const snippet = readString(value.snippet ?? value.description) || existing?.snippet;
-    const citedText = readString(value.cited_text ?? value.citedText) || existing?.citedText;
-    out.set(directUrl, {
-      url: directUrl,
-      ...(title ? { title } : {}),
-      ...(snippet ? { snippet } : {}),
-      ...(citedText ? { citedText } : {}),
-      sourceType,
-    });
-  }
-
-  for (const child of Object.values(value)) {
-    collectSources(child, out);
-  }
-  return out;
+/** Raw (untrimmed) string read, for accumulating JSON text fragments where whitespace is significant. */
+function readRawString(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
-function findFirstSearchRecordId(
-  value: unknown,
-  matches: (record: Record<string, unknown>) => boolean,
-): string {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const id = findFirstSearchRecordId(item, matches);
-      if (id) return id;
+type SearchEventParser = {
+  parse: (raw: unknown) => HostedSearchUpdate[];
+};
+
+// ---------------------------------------------------------------------------
+// OpenAI Responses: web_search_call lifecycle events + url_citation annotations.
+// Every event carries a complete, self-contained payload — no cross-event state.
+// ---------------------------------------------------------------------------
+
+function mapOpenAIWebSearchCallStatus(rawStatus: string, isDoneEvent: boolean): HostedSearchStatus {
+  const normalized = rawStatus.toLowerCase();
+  if (/fail|error|cancel/.test(normalized)) return "failed";
+  if (/complete|completed|done|succeeded|finished/.test(normalized)) return "completed";
+  return isDoneEvent ? "completed" : "searching";
+}
+
+function parseOpenAIResponsesSearchEvent(raw: unknown): HostedSearchUpdate[] {
+  if (!isRecord(raw)) return [];
+  const type = readString(raw.type);
+
+  if (type === "response.output_item.added" || type === "response.output_item.done") {
+    const item = isRecord(raw.item) ? raw.item : {};
+    if (readString(item.type) !== "web_search_call") return [];
+    const action = isRecord(item.action) ? item.action : {};
+    const query = readString(action.query);
+    const id = readString(item.id) || readString(item.call_id);
+    return [
+      {
+        ...(id ? { id } : {}),
+        provider: "codex",
+        status: mapOpenAIWebSearchCallStatus(readString(item.status), type.endsWith(".done")),
+        queries: query ? [query] : [],
+        sources: [],
+      },
+    ];
+  }
+
+  // Defensive coverage for the dedicated response.web_search_call.* lifecycle
+  // events (in_progress/searching/completed) some OpenAI-compatible gateways
+  // emit alongside (or instead of) output_item add/done.
+  if (type.startsWith("response.web_search_call.")) {
+    const suffix = type.slice("response.web_search_call.".length).toLowerCase();
+    const id = readString(raw.item_id) || readString(raw.output_item_id);
+    return [
+      {
+        ...(id ? { id } : {}),
+        provider: "codex",
+        status: /fail|error|cancel/.test(suffix)
+          ? "failed"
+          : /complete|completed|done/.test(suffix)
+            ? "completed"
+            : "searching",
+        queries: [],
+        sources: [],
+      },
+    ];
+  }
+
+  if (type === "response.output_text.annotation.added") {
+    const annotation = isRecord(raw.annotation) ? raw.annotation : {};
+    if (readString(annotation.type) !== "url_citation") return [];
+    const url = readString(annotation.url ?? annotation.uri);
+    if (!url || !isHttpUrl(url)) return [];
+    const title = readString(annotation.title);
+    return [
+      {
+        provider: "codex",
+        status: "completed",
+        queries: [],
+        sources: [{ url, ...(title ? { title } : {}), sourceType: "citation" }],
+      },
+    ];
+  }
+
+  return [];
+}
+
+function createOpenAIResponsesSearchEventParser(): SearchEventParser {
+  return { parse: parseOpenAIResponsesSearchEvent };
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic Messages: server_tool_use (web_search) content blocks are stateful —
+// the query is either given whole on content_block_start, or streamed in as
+// input_json_delta.partial_json fragments keyed by content_block.index that
+// only become valid JSON once fully accumulated. Web search results arrive
+// whole on content_block_start; citations arrive via citations_delta on text
+// blocks and are associated with the most recently active search by the
+// aggregator's own last-id fallback (they carry no search id of their own).
+// ---------------------------------------------------------------------------
+
+type AnthropicSearchBlockState = {
+  toolId: string;
+  jsonBuffer: string;
+  lastQuery: string;
+};
+
+function tryExtractAnthropicQuery(jsonBuffer: string): string {
+  const parsed = maybeParseJson(jsonBuffer);
+  return isRecord(parsed) ? readString(parsed.query) : "";
+}
+
+function extractAnthropicResultSources(content: unknown): HostedSearchSource[] {
+  if (!Array.isArray(content)) return [];
+  const sources: HostedSearchSource[] = [];
+  for (const item of content) {
+    if (!isRecord(item)) continue;
+    const url = readString(item.url);
+    if (!url || !isHttpUrl(url)) continue;
+    const title = readString(item.title);
+    sources.push({ url, ...(title ? { title } : {}), sourceType: "source" });
+  }
+  return sources;
+}
+
+function createAnthropicSearchEventParser(): SearchEventParser {
+  const searchBlocksByIndex = new Map<number, AnthropicSearchBlockState>();
+
+  function parseContentBlockStart(raw: Record<string, unknown>): HostedSearchUpdate[] {
+    const index = typeof raw.index === "number" ? raw.index : -1;
+    const block = isRecord(raw.content_block) ? raw.content_block : {};
+    const blockType = readString(block.type);
+    const name = readString(block.name).toLowerCase();
+
+    if (blockType === "server_tool_use" && name === "web_search") {
+      const toolId = readString(block.id);
+      const state: AnthropicSearchBlockState = { toolId, jsonBuffer: "", lastQuery: "" };
+      searchBlocksByIndex.set(index, state);
+
+      const query = isRecord(block.input) ? readString(block.input.query) : "";
+      if (!query) return [];
+      state.lastQuery = query;
+      return [
+        {
+          ...(toolId ? { id: toolId } : {}),
+          provider: "claude_code",
+          status: "searching",
+          queries: [query],
+          sources: [],
+        },
+      ];
     }
-    return "";
-  }
-  if (!isRecord(value)) return "";
-  if (matches(value)) {
-    const id = readString(value.id) || readString(value.call_id) || readString(value.tool_use_id);
-    if (id) return id;
-  }
-  for (const child of Object.values(value)) {
-    const id = findFirstSearchRecordId(child, matches);
-    if (id) return id;
-  }
-  return "";
-}
 
-function readExplicitSearchId(providerId: ProviderId, raw: unknown) {
-  if (!isRecord(raw)) return "";
-
-  if (providerId === "codex") {
-    const eventType = normalizedType(raw.type);
-    if (eventType.includes("output_text.annotation")) return "";
-    if (eventType.includes("web_search_call")) {
-      return readString(raw.item_id) || readString(raw.output_item_id);
+    if (blockType === "web_search_tool_result" || blockType === "web_search_tool_result_error") {
+      const toolUseId = readString(block.tool_use_id);
+      return [
+        {
+          ...(toolUseId ? { id: toolUseId } : {}),
+          provider: "claude_code",
+          status: blockType === "web_search_tool_result_error" ? "failed" : "completed",
+          queries: [],
+          sources: extractAnthropicResultSources(block.content),
+        },
+      ];
     }
-    return findFirstSearchRecordId(raw, isOpenAIWebSearchRecord);
+
+    return [];
   }
 
-  if (providerId === "claude_code") {
-    return findFirstSearchRecordId(raw, isAnthropicWebSearchRecord);
+  function parseContentBlockDelta(raw: Record<string, unknown>): HostedSearchUpdate[] {
+    const index = typeof raw.index === "number" ? raw.index : -1;
+    const delta = isRecord(raw.delta) ? raw.delta : {};
+    const deltaType = readString(delta.type);
+
+    if (deltaType === "input_json_delta") {
+      const state = searchBlocksByIndex.get(index);
+      if (!state) return [];
+      state.jsonBuffer += readRawString(delta.partial_json);
+      const query = tryExtractAnthropicQuery(state.jsonBuffer);
+      if (!query || query === state.lastQuery) return [];
+      state.lastQuery = query;
+      return [
+        {
+          ...(state.toolId ? { id: state.toolId } : {}),
+          provider: "claude_code",
+          status: "searching",
+          queries: [query],
+          sources: [],
+        },
+      ];
+    }
+
+    if (deltaType === "citations_delta") {
+      const citation = isRecord(delta.citation) ? delta.citation : {};
+      const url = readString(citation.url);
+      if (!url || !isHttpUrl(url)) return [];
+      const title = readString(citation.title);
+      return [
+        {
+          provider: "claude_code",
+          status: "completed",
+          queries: [],
+          sources: [{ url, ...(title ? { title } : {}), sourceType: "citation" }],
+        },
+      ];
+    }
+
+    return [];
   }
 
-  const item = isRecord(raw.item) ? raw.item : {};
-  const contentBlock = isRecord(raw.content_block) ? raw.content_block : {};
-  return (
-    readString(raw.item_id) ||
-    readString(raw.tool_use_id) ||
-    readString(item.id) ||
-    readString(item.call_id) ||
-    readString(contentBlock.id) ||
-    readString(contentBlock.tool_use_id)
-  );
+  function parse(raw: unknown): HostedSearchUpdate[] {
+    if (!isRecord(raw)) return [];
+    const type = readString(raw.type);
+
+    if (type === "content_block_start") return parseContentBlockStart(raw);
+    if (type === "content_block_delta") return parseContentBlockDelta(raw);
+    if (type === "content_block_stop") {
+      const index = typeof raw.index === "number" ? raw.index : -1;
+      searchBlocksByIndex.delete(index);
+      return [];
+    }
+
+    return [];
+  }
+
+  return { parse };
 }
 
-function readRawStatus(raw: unknown, sources: HostedSearchSource[]): HostedSearchStatus {
-  const record = isRecord(raw) ? raw : {};
-  const item = isRecord(record.item) ? record.item : {};
-  const statusText = [readString(record.type), readString(record.status), readString(item.status)]
-    .join(" ")
-    .toLowerCase();
+// ---------------------------------------------------------------------------
+// Gemini: grounding metadata arrives whole on each candidate — no lifecycle
+// events, no search id. A chunk means results are in; a query alone means the
+// search is still running.
+// ---------------------------------------------------------------------------
 
-  if (/fail|error|cancel/.test(statusText)) return "failed";
-  if (/complete|completed|done|succeeded|finished/.test(statusText)) return "completed";
-  if (/searching|in_progress|started|added/.test(statusText)) return "searching";
-  return sources.length > 0 ? "completed" : "searching";
-}
+function parseGeminiSearchEvent(raw: unknown): HostedSearchUpdate[] {
+  if (!isRecord(raw)) return [];
+  const candidates = Array.isArray(raw.candidates) ? raw.candidates : [];
+  const queries: string[] = [];
+  const sources: HostedSearchSource[] = [];
 
-function normalizeRawHostedSearchUpdate(
-  providerId: ProviderId,
-  raw: unknown,
-): HostedSearchUpdate | null {
-  if (!hasSearchSignal(providerId, raw)) return null;
-  const queries = collectQueries(raw);
-  const sources = [...collectSources(raw).values()];
-  const status = readRawStatus(raw, sources);
-  const id = readExplicitSearchId(providerId, raw);
+  for (const candidate of candidates) {
+    if (!isRecord(candidate)) continue;
+    const grounding = isRecord(candidate.groundingMetadata) ? candidate.groundingMetadata : {};
 
-  if (!id && queries.length === 0 && sources.length === 0 && status === "searching") {
-    return null;
+    if (Array.isArray(grounding.webSearchQueries)) {
+      for (const query of grounding.webSearchQueries) {
+        const text = readString(query);
+        if (text && !queries.includes(text)) queries.push(text);
+      }
+    }
+
+    if (Array.isArray(grounding.groundingChunks)) {
+      for (const chunk of grounding.groundingChunks) {
+        if (!isRecord(chunk)) continue;
+        const web = isRecord(chunk.web) ? chunk.web : {};
+        const url = readString(web.uri ?? web.url);
+        if (!url || !isHttpUrl(url)) continue;
+        const title = readString(web.title);
+        sources.push({ url, ...(title ? { title } : {}), sourceType: "source" });
+      }
+    }
   }
 
-  return {
-    ...(id ? { id } : {}),
-    provider: providerId,
-    status,
-    queries,
-    sources,
-  };
+  if (queries.length === 0 && sources.length === 0) return [];
+  return [
+    {
+      provider: "gemini",
+      status: sources.length > 0 ? "completed" : "searching",
+      queries,
+      sources,
+    },
+  ];
+}
+
+function createGeminiSearchEventParser(): SearchEventParser {
+  return { parse: parseGeminiSearchEvent };
+}
+
+function createHostedSearchEventParser(providerId: ProviderId): SearchEventParser {
+  if (providerId === "codex") return createOpenAIResponsesSearchEventParser();
+  if (providerId === "claude_code") return createAnthropicSearchEventParser();
+  if (providerId === "gemini") return createGeminiSearchEventParser();
+  return { parse: () => [] };
 }
 
 export function createHostedSearchEventAggregator(params: {
@@ -552,6 +595,7 @@ export function createHostedSearchEventAggregator(params: {
   const signaturesById = new Map<string, string>();
   const fallbackId = `hosted-search-${params.providerId}`;
   let lastId = fallbackId;
+  const parser = createHostedSearchEventParser(params.providerId);
 
   const blockSignature = (block: HostedSearchBlock) =>
     safeStringify({
@@ -611,9 +655,7 @@ export function createHostedSearchEventAggregator(params: {
 
   return {
     accept(rawEvent) {
-      const update = normalizeRawHostedSearchUpdate(params.providerId, rawEvent);
-      if (!update) return;
-      emit(update);
+      for (const update of parser.parse(rawEvent)) emit(update);
     },
     complete() {
       return finalize("completed", true);
