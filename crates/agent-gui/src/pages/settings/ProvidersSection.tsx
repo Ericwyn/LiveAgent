@@ -1,7 +1,9 @@
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ClaudeIcon,
+  Download,
   Eye,
   EyeOff,
   GeminiIcon,
@@ -59,6 +61,23 @@ type ModelSettingsModalProps = {
   model: ProviderModelConfig;
   onClose: () => void;
   onSave: (model: ProviderModelConfig) => void;
+};
+
+type CcsProviderImportItem = {
+  sourceId: string;
+  appType: string;
+  providerType: ProviderId;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  requestFormat: CodexRequestFormat;
+  models?: string[];
+};
+
+type CcsProvidersResponse = {
+  status: string;
+  message: string;
+  providers: CcsProviderImportItem[];
 };
 
 const PROVIDER_TABS: ProviderId[] = ["claude_code", "codex", "gemini"];
@@ -697,16 +716,90 @@ function CustomSettingsDrawer(props: SettingsSectionProps & { onClose: () => voi
   );
 }
 
+function ccsImportIdentity(provider: Pick<CustomProvider, "type" | "name" | "baseUrl">) {
+  const name = provider.name
+    .replace(/[（(]ccswitch[）)]/i, "")
+    .trim()
+    .toLowerCase();
+  const baseUrl = provider.baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+  return `${provider.type}\n${name}\n${baseUrl}`;
+}
+
+function providerFromCcs(item: CcsProviderImportItem, existingIds: Set<string>): CustomProvider {
+  const baseId =
+    `ccswitch-${item.sourceId}`
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "ccswitch-provider";
+  let id = baseId;
+  for (let index = 2; existingIds.has(id); index += 1) id = `${baseId}-${index}`;
+  existingIds.add(id);
+
+  const providerType = item.providerType;
+  const models = (item.models ?? []).map((model) => createDraftModelConfig(providerType, model));
+  return {
+    id,
+    name: `${item.name.replace(/[（(]ccswitch[）)]/i, "").trim()}（ccswitch）`,
+    type: providerType,
+    baseUrl: item.baseUrl,
+    apiKey: item.apiKey,
+    apiKeyConfigured: item.apiKey.trim().length > 0,
+    models,
+    activeModels: models.map((model) => model.id),
+    requestFormat:
+      providerType === "codex"
+        ? item.requestFormat === "openai-completions"
+          ? "openai-completions"
+          : "openai-responses"
+        : undefined,
+    reasoning: "off",
+    promptCachingEnabled: providerType === "claude_code",
+    nativeWebSearchEnabled: true,
+  };
+}
+
+function ccsProviderCanSyncModels(item: CcsProviderImportItem) {
+  return item.baseUrl.trim().length > 0 && item.apiKey.trim().length > 0;
+}
+
+function ccsProviderIsTransferable(item: CcsProviderImportItem) {
+  return ccsProviderCanSyncModels(item) || (item.models?.length ?? 0) > 0;
+}
+
 function ProviderList(props: {
   type: ProviderId;
   providers: CustomProvider[];
   onAdd: () => void;
   onEdit: (provider: CustomProvider) => void;
   onDelete: (id: string) => void;
+  ccsProviders: CcsProvidersResponse | null;
+  ccsLoading: boolean;
+  ccsImporting: boolean;
+  ccsMessage: string | null;
+  thirdPartyImportOpen: boolean;
+  onToggleThirdPartyImport: () => void;
+  onImportCcsProviders: () => void;
+  onRefreshCcsProviders: () => void;
 }) {
   const { t } = useLocale();
-  const { type, providers, onAdd, onEdit, onDelete } = props;
+  const {
+    type,
+    providers,
+    onAdd,
+    onEdit,
+    onDelete,
+    ccsProviders,
+    ccsLoading,
+    ccsImporting,
+    ccsMessage,
+    thirdPartyImportOpen,
+    onToggleThirdPartyImport,
+    onImportCcsProviders,
+    onRefreshCcsProviders,
+  } = props;
   const filtered = providers.filter((provider) => provider.type === type);
+  const ccsProvidersForType =
+    ccsProviders?.providers.filter((provider) => provider.providerType === type) ?? [];
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
@@ -716,10 +809,56 @@ function ProviderList(props: {
             ? t("settings.noProviders")
             : `${filtered.length} ${t("settings.navProviders")}`}
         </div>
-        <Button variant="outline" size="sm" className="gap-1.5" onClick={onAdd}>
-          <Plus className="h-3.5 w-3.5" />
-          {t("settings.addProvider")}
-        </Button>
+        <div className="relative flex items-center gap-2">
+          <Button variant="outline" size="sm" className="gap-1.5" onClick={onAdd}>
+            <Plus className="h-3.5 w-3.5" />
+            {t("settings.addProvider")}
+          </Button>
+          <div className="relative">
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={onToggleThirdPartyImport}
+              disabled={ccsImporting}
+            >
+              <Download className="h-3.5 w-3.5" />
+              从第三方同步
+            </Button>
+            {thirdPartyImportOpen ? (
+              <div className="absolute right-0 top-[calc(100%+0.5rem)] z-20 w-72 overflow-hidden rounded-xl border bg-popover p-2 text-popover-foreground shadow-xl">
+                <button
+                  type="button"
+                  className="flex w-full flex-col items-start rounded-lg px-3 py-2 text-left hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={ccsLoading || ccsImporting || !ccsProvidersForType.length}
+                  onClick={onImportCcsProviders}
+                >
+                  <strong className="text-sm">ccswitch</strong>
+                  <span className="mt-0.5 text-xs text-muted-foreground">
+                    {ccsImporting
+                      ? "正在导入供应商、获取并激活全部模型…"
+                      : ccsLoading
+                        ? "正在扫描…"
+                        : ccsProvidersForType.length
+                          ? `发现 ${ccsProvidersForType.length} 个 ${getProviderLabel(type)} 供应商`
+                          : ccsMessage || `未发现 ${getProviderLabel(type)} 供应商`}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-accent"
+                  onClick={onRefreshCcsProviders}
+                  disabled={ccsLoading || ccsImporting}
+                >
+                  <RefreshCw
+                    className={`h-4 w-4 ${ccsLoading || ccsImporting ? "animate-spin" : ""}`}
+                  />
+                  刷新列表
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto pr-1">
@@ -792,6 +931,141 @@ export function ProvidersSection(props: SettingsSectionProps) {
   const [modalOpen, setModalOpen] = useState(false);
   const [customSettingsOpen, setCustomSettingsOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<CustomProvider | null>(null);
+  const [thirdPartyImportTab, setThirdPartyImportTab] = useState<ProviderId | null>(null);
+  const [ccsProviders, setCcsProviders] = useState<CcsProvidersResponse | null>(null);
+  const [ccsLoading, setCcsLoading] = useState(false);
+  const [ccsImportingType, setCcsImportingType] = useState<ProviderId | null>(null);
+  const [ccsMessage, setCcsMessage] = useState<string | null>(null);
+
+  async function refreshCcsProviders() {
+    setCcsLoading(true);
+    try {
+      const result = await invoke<CcsProvidersResponse>("settings_list_ccswitch_providers");
+      setCcsProviders(result);
+      setCcsMessage(result.message);
+    } catch (err) {
+      setCcsMessage(err instanceof Error ? err.message : String(err));
+      setCcsProviders(null);
+    } finally {
+      setCcsLoading(false);
+    }
+  }
+
+  function toggleThirdPartyImport(type: ProviderId) {
+    setThirdPartyImportTab((openTab) => {
+      const next = openTab === type ? null : type;
+      if (next && !ccsProviders && !ccsLoading) void refreshCcsProviders();
+      return next;
+    });
+  }
+
+  function buildCcsImportedProviders(
+    existingProviders: CustomProvider[],
+    providerType: ProviderId,
+  ) {
+    const imports =
+      ccsProviders?.providers.filter(
+        (provider) => provider.providerType === providerType && ccsProviderIsTransferable(provider),
+      ) ?? [];
+    const existingIds = new Set(existingProviders.map((provider) => provider.id));
+    const existingIdentity = new Set(existingProviders.map(ccsImportIdentity));
+    const imported: CustomProvider[] = [];
+
+    for (const item of imports) {
+      const identity = ccsImportIdentity({
+        type: item.providerType,
+        name: item.name,
+        baseUrl: item.baseUrl,
+      });
+      if (existingIdentity.has(identity)) continue;
+      existingIdentity.add(identity);
+      imported.push(providerFromCcs(item, existingIds));
+    }
+
+    return imported;
+  }
+
+  async function importCcsProviders(providerType: ProviderId) {
+    const imports =
+      ccsProviders?.providers.filter((provider) => provider.providerType === providerType) ?? [];
+    if (!imports.length) return;
+
+    const transferable = imports.filter(ccsProviderIsTransferable);
+    const skippedCount = imports.length - transferable.length;
+    if (!transferable.length) {
+      setCcsMessage(`ccswitch 中的 ${getProviderLabel(providerType)} 供应商没有可导入的 API 配置`);
+      return;
+    }
+
+    setCcsImportingType(providerType);
+    setCcsMessage("正在导入供应商、获取并激活全部模型…");
+
+    try {
+      setSettings((prev) => {
+        const nextImported = buildCcsImportedProviders(prev.customProviders, providerType);
+        if (!nextImported.length) return prev;
+        return updateCustomProviders(prev, [...prev.customProviders, ...nextImported]);
+      });
+
+      const modelResults = await Promise.all(
+        transferable.map(async (item) => {
+          const identity = ccsImportIdentity({
+            type: item.providerType,
+            name: item.name,
+            baseUrl: item.baseUrl,
+          });
+          if (!ccsProviderCanSyncModels(item)) {
+            return { identity, models: [] as ProviderModelConfig[], fetched: false, failed: false };
+          }
+          try {
+            const models = await fetchModelsFromApi(item.providerType, item.baseUrl, item.apiKey);
+            return { identity, models, fetched: true, failed: false };
+          } catch {
+            return { identity, models: [] as ProviderModelConfig[], fetched: false, failed: true };
+          }
+        }),
+      );
+
+      const resultsByIdentity = new Map(
+        modelResults.map((result) => [result.identity, result] as const),
+      );
+      setSettings((prev) => {
+        let changed = false;
+        const providers = prev.customProviders.map((provider) => {
+          const result = resultsByIdentity.get(ccsImportIdentity(provider));
+          if (!result) return provider;
+          const models = result.fetched
+            ? mergeFetchedModels(result.models, provider.models)
+            : provider.models;
+          const activeModels = models.map((model) => model.id);
+          if (
+            models === provider.models &&
+            activeModels.length === provider.activeModels.length &&
+            activeModels.every((model, index) => model === provider.activeModels[index])
+          ) {
+            return provider;
+          }
+          changed = true;
+          return { ...provider, models, activeModels };
+        });
+        return changed ? updateCustomProviders(prev, providers) : prev;
+      });
+
+      const fetchedCount = modelResults.filter((result) => result.fetched).length;
+      const failedCount = modelResults.filter((result) => result.failed).length;
+      const totalModels = modelResults.reduce((total, result) => total + result.models.length, 0);
+      const details = [
+        `已同步 ${transferable.length} 个 ${getProviderLabel(providerType)} 供应商`,
+        fetchedCount > 0 ? `获取并激活 ${totalModels} 个模型` : "已激活供应商内的全部模型",
+        failedCount > 0 ? `${failedCount} 个供应商模型获取失败` : "",
+        skippedCount > 0 ? `${skippedCount} 个无 API 配置已跳过` : "",
+      ].filter(Boolean);
+      setCcsMessage(details.join("，"));
+      setThirdPartyImportTab(null);
+    } finally {
+      setCcsImportingType(null);
+    }
+  }
 
   function openAdd() {
     setEditingProvider(null);
@@ -845,7 +1119,10 @@ export function ProvidersSection(props: SettingsSectionProps) {
             <button
               key={tab}
               type="button"
-              onClick={() => setActiveTab(tab)}
+              onClick={() => {
+                setActiveTab(tab);
+                setThirdPartyImportTab(null);
+              }}
               className={`inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all ${
                 activeTab === tab
                   ? "bg-background text-foreground shadow"
@@ -888,6 +1165,14 @@ export function ProvidersSection(props: SettingsSectionProps) {
                 onAdd={openAdd}
                 onEdit={openEdit}
                 onDelete={handleDelete}
+                ccsProviders={ccsProviders}
+                ccsLoading={ccsLoading}
+                ccsImporting={ccsImportingType === tab}
+                ccsMessage={ccsMessage}
+                thirdPartyImportOpen={thirdPartyImportTab === tab}
+                onToggleThirdPartyImport={() => toggleThirdPartyImport(tab)}
+                onImportCcsProviders={() => void importCcsProviders(tab)}
+                onRefreshCcsProviders={() => void refreshCcsProviders()}
               />
             </div>
           ))}
