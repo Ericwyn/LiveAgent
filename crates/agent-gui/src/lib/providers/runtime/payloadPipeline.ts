@@ -10,6 +10,7 @@ import {
 } from "../nativeResponsesAttachments";
 import { attachAnthropicAutomaticCaching } from "./anthropicCache";
 import { attachCodexResponsesStorage } from "./codexStorage";
+import { attachGeminiThoughtSignatureGuard } from "./geminiToolPayload";
 import { attachProviderNativeWebSearch } from "./nativeSearchPayload";
 import type { StreamOptionsEx } from "./types";
 
@@ -117,6 +118,11 @@ const finalizePayloadMiddlewares = composePayloadMiddlewares([
       providerId: params.providerId,
       baseUrl: params.baseUrl,
       model: params.model,
+    }),
+  (options, params) =>
+    attachGeminiThoughtSignatureGuard(options, {
+      providerId: params.providerId,
+      baseUrl: params.baseUrl,
     }),
   (options, params) => attachPayloadDebugLogging(options, params.debugLogger, params.extra),
 ]);

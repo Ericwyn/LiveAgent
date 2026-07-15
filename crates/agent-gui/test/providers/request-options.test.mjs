@@ -727,12 +727,23 @@ test("provider native web search injection is opt-in", async () => {
   });
   assert.equal(anthropicOptions.onPayload, undefined);
 
+  // Gemini always carries the thought-signature guard, so the hook exists;
+  // opting out of native web search must leave the payload untouched.
   const geminiOptions = providers.finalizeProviderStreamOptions({
     providerId: "gemini",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta",
     options: {},
   });
-  assert.equal(geminiOptions.onPayload, undefined);
+  const geminiPayload = {
+    contents: [{ role: "user", parts: [{ text: "hello" }] }],
+    config: { tools: [{ functionDeclarations: [{ name: "Bash" }] }] },
+  };
+  const geminiResult = await geminiOptions.onPayload(geminiPayload, {
+    api: "google-generative-ai",
+    provider: "google",
+    id: "gemini-3-pro-preview",
+  });
+  assert.equal(geminiResult, geminiPayload);
 });
 
 test("provider payload finalization enables native web search for hosted search providers", async () => {

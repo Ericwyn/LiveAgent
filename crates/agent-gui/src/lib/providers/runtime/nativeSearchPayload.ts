@@ -2,12 +2,12 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { ProviderId } from "../../settings";
 import {
   hasAnthropicWebSearchTool,
-  hasGeminiGoogleSearchTool,
   hasOpenAIResponsesWebSearchTool,
   providerSupportsNativeWebSearch,
   resolveAnthropicWebSearchToolType,
 } from "../nativeWebSearch";
 import { isRecord } from "./common";
+import { appendGeminiGoogleSearchToolToPayload } from "./geminiToolPayload";
 import type { StreamOptionsEx } from "./types";
 
 function isOfficialOpenAIBaseUrl(baseUrl: string | undefined) {
@@ -34,20 +34,6 @@ function appendUniqueTool(
   return {
     ...payload,
     tools: [...tools, tool],
-  };
-}
-
-function appendGeminiGoogleSearchTool(payload: Record<string, unknown>) {
-  const config = isRecord(payload.config) ? payload.config : {};
-  const tools = Array.isArray(config.tools) ? config.tools : [];
-  if (tools.some(hasGeminiGoogleSearchTool)) return payload;
-
-  return {
-    ...payload,
-    config: {
-      ...config,
-      tools: [...tools, { googleSearch: {} }],
-    },
   };
 }
 
@@ -203,7 +189,10 @@ export function attachProviderNativeWebSearch(
       }
 
       if (providerId === "gemini") {
-        return appendGeminiGoogleSearchTool(nextPayload);
+        return appendGeminiGoogleSearchToolToPayload(nextPayload, {
+          modelId: model.id,
+          baseUrl: params?.baseUrl,
+        });
       }
 
       return nextPayload;

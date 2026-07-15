@@ -2,6 +2,13 @@ export { providerSupportsNativeWebSearch } from "./nativeWebSearch";
 export { attachAnthropicAutomaticCaching } from "./runtime/anthropicCache";
 export { attachCodexResponsesStorage } from "./runtime/codexStorage";
 export { normalizeErrorMessage } from "./runtime/errors";
+export {
+  appendGeminiGoogleSearchToolToPayload,
+  attachGeminiThoughtSignatureGuard,
+  isGemini3PlusModelId,
+  isOfficialGeminiApiBaseUrl,
+  normalizeGeminiThoughtSignatures,
+} from "./runtime/geminiToolPayload";
 export { assistantMessageToText, createStreamingTextReconciler } from "./runtime/messageUtils";
 export {
   createModelFromConfig,
