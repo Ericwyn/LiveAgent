@@ -31,6 +31,32 @@
 
 ---
 
+## 🌟 Special Thanks
+
+<p align="center">
+  <a href="https://linux.do">
+    <img src="docs/images/linuxdo.png" alt="LINUX DO" width="420" />
+  </a>
+</p>
+<p align="center"><b>学AI，上L站！祝小破站越来越好～</b></p>
+
+---
+
+## ❤️ Sponsor
+
+<table>
+<tr>
+<td width="200" align="center" valign="middle"><a href="https://www.packyapi.com/register"><img src="docs/images/partners/packycode.png" alt="PackyCode" width="160"></a></td>
+<td valign="middle">PackyCode is a reliable, efficient, and professional API relay service provider, offering relay services for Claude Code, Codex, Gemini, Chinese domestic models, and more — a long-established, top-tier relay. <b>The vast majority of the model resources used to develop this software were provided by PackyCode — thank you, Laonong!</b> Register <a href="https://www.packyapi.com/register">here</a> to get started!</td>
+</tr>
+<tr>
+<td width="200" align="center" valign="middle"><a href="https://www.right.codes/register"><img src="docs/images/partners/rightcode.jpg" alt="RightCode" width="160"></a></td>
+<td valign="middle">Right Code provides stable relay services for Claude Code, Codex, Gemini, Chinese domestic models, and more. Invoices are available upon top-up, and enterprise and team users receive dedicated one-on-one support. <b>The remaining model resources used to develop this software were provided by RightCode — thanks to the RC site owner and the support team!</b> Register <a href="https://www.right.codes/register">here</a> to get started!</td>
+</tr>
+</table>
+
+---
+
 ## Why LiveAgent?
 
 LiveAgent is a **local-first** AI agent desktop client. It deeply integrates large language model reasoning with local system tools, so the AI can genuinely operate your file system, run commands, and manage scheduled tasks — while the Gateway enables remote access and collaboration.
@@ -338,25 +364,6 @@ No. The desktop app persists the full history with Segment + Summary Checkpoints
 
 ---
 
-## Documentation
-
-| Document | Description |
-|---|---|
-| [Architecture Overview](docs/architecture/overview.md) | System layers, process boundaries, data flow |
-| [GUI Architecture](docs/architecture/gui.md) | Desktop client internal design |
-| [Gateway Architecture](docs/architecture/gateway.md) | Gateway service design |
-| [WebUI Architecture](docs/architecture/webui.md) | Browser-side design |
-| [Protocol Definitions](docs/architecture/protocols.md) | gRPC / WebSocket protocols |
-| [Chat Runtime](docs/features/chat-runtime.md) | Agent conversation loop mechanics |
-| [Tool System](docs/features/tools.md) | Built-in tool implementations |
-| [Skills & MCP](docs/features/skills-and-mcp.md) | Skill and protocol extensions |
-| [Memory System](docs/features/memory.md) | Persistent memory design |
-| [History Compaction](docs/features/history-compaction.md) | Long-conversation context management |
-| [Deployment & Operations](docs/operations/deployment.md) | Docker, self-hosting, desktop releases |
-| [Development Guide](docs/operations/development.md) | Local development environment setup |
-
----
-
 ## Contributing
 
 Issues and pull requests are welcome! See the [Development Guide](docs/operations/development.md) for setting up a dev environment.
@@ -380,6 +387,16 @@ Before submitting a PR, make sure all of the following checks pass (they match t
 
 - Mirrored files between GUI and WebUI must be byte-identical: `node scripts/check-mirror.mjs`
 - Keep the diff clean (no trailing whitespace): `git diff --check`
+
+---
+
+## 👥 Contributors
+
+Thanks to everyone who has contributed to LiveAgent!
+
+<a href="https://github.com/Stack-Cairn/LiveAgent/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=Stack-Cairn/LiveAgent" alt="Contributors" />
+</a>
 
 ---
 
