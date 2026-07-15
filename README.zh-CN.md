@@ -31,6 +31,32 @@
 
 ---
 
+## 🌟 特别鸣谢
+
+<p align="center">
+  <a href="https://linux.do">
+    <img src="docs/images/linuxdo.png" alt="LINUX DO" width="420" />
+  </a>
+</p>
+<p align="center"><b>学AI，上L站！祝小破站越来越好～</b></p>
+
+---
+
+## ❤️ 赞助商
+
+<table>
+<tr>
+<td width="200" align="center" valign="middle"><a href="https://www.packyapi.com/register"><img src="docs/images/partners/packycode.png" alt="PackyCode" width="160"></a></td>
+<td valign="middle">PackyCode 是一家稳定、高效、专业的API中转服务商，提供 Claude Code、Codex、Gemini，国模 等多种中转服务，老牌顶级中转，<b>开发本软件用的绝大多数模型资源都是PackyCode提供，感谢老农！</b>从 <a href="https://www.packyapi.com/register">此处</a> 注册并开始使用！ </td>
+</tr>
+<tr>
+<td width="200" align="center" valign="middle"><a href="https://www.right.codes/register"><img src="docs/images/partners/rightcode.jpg" alt="RightCode" width="160"></a></td>
+<td valign="middle">Right Code 提供稳定的 Claude Code、Codex、Gemini，国模 等模型的中转服务。充值即可开票，企业、团队用户一对一对接。<b>开发本软件用的另一部分模型资源都是RightCode提供，感谢RC站长，感谢小客服！</b> 从 <a href="https://www.right.codes/register">此处</a> 注册并开始使用！</td>
+</tr>
+</table>
+
+---
+
 ## 为什么是 LiveAgent?
 
 LiveAgent 是一个 **本地优先** 的 AI Agent 桌面客户端。它将大语言模型的推理能力与本地系统工具深度整合,让 AI 能够真正操作你的文件系统、执行命令、管理定时任务,同时通过 Gateway 实现远程访问与协作。
@@ -338,25 +364,6 @@ LiveAgent/
 
 ---
 
-## 文档
-
-| 文档列表 | 描述 |
-|---|---|
-| [架构总览](docs/architecture/overview.md) | 系统分层、进程边界、数据流 |
-| [GUI 架构](docs/architecture/gui.md) | 桌面客户端内部设计 |
-| [Gateway 架构](docs/architecture/gateway.md) | 网关服务设计 |
-| [WebUI 架构](docs/architecture/webui.md) | 浏览器端设计 |
-| [协议定义](docs/architecture/protocols.md) | gRPC / WebSocket 协议 |
-| [Chat 运行时](docs/features/chat-runtime.md) | Agent 对话循环机制 |
-| [工具系统](docs/features/tools.md) | 内建工具实现 |
-| [Skills & MCP](docs/features/skills-and-mcp.md) | 技能与协议扩展 |
-| [记忆系统](docs/features/memory.md) | 持久化记忆设计 |
-| [历史压缩](docs/features/history-compaction.md) | 长对话上下文管理 |
-| [部署运维](docs/operations/deployment.md) | Docker、自部署、桌面发布 |
-| [开发指南](docs/operations/development.md) | 本地开发环境搭建 |
-
----
-
 ## 贡献
 
 欢迎提交 Issue 与 Pull Request!开发环境搭建请参考 [开发指南](docs/operations/development.md)。
@@ -380,6 +387,16 @@ LiveAgent/
 
 - GUI 与 WebUI 的镜像文件必须逐字节一致:`node scripts/check-mirror.mjs`
 - 保持 diff 干净 (无行尾空白):`git diff --check`
+
+---
+
+## 👥 贡献者
+
+感谢所有为 LiveAgent 做出贡献的朋友们！
+
+<a href="https://github.com/Stack-Cairn/LiveAgent/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=Stack-Cairn/LiveAgent" alt="Contributors" />
+</a>
 
 ---
 
