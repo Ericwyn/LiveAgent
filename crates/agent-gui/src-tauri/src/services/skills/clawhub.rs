@@ -68,7 +68,11 @@ pub(crate) fn json_optional_u64(item: &serde_json::Map<String, Value>, key: &str
     })
 }
 
-pub(crate) fn clawhub_download_url_for_slug(slug: &str, tag: Option<&str>) -> Result<String, String> {
+pub(crate) fn clawhub_download_url_for_slug(
+    slug: &str,
+    owner_handle: Option<&str>,
+    tag: Option<&str>,
+) -> Result<String, String> {
     let slug = slug.trim();
     if slug.is_empty() {
         return Err("SkillsManager clawhub_install requires slug".to_string());
@@ -83,6 +87,10 @@ pub(crate) fn clawhub_download_url_for_slug(slug: &str, tag: Option<&str>) -> Re
     url.query_pairs_mut()
         .append_pair("slug", slug)
         .append_pair("tag", tag);
+    // ClawHub 对重名 slug 返回 409，必须带 ownerHandle 消歧。
+    if let Some(owner) = owner_handle.map(str::trim).filter(|value| !value.is_empty()) {
+        url.query_pairs_mut().append_pair("ownerHandle", owner);
+    }
     Ok(url.into())
 }
 
@@ -105,7 +113,7 @@ pub(crate) fn normalize_clawhub_skill_card(raw: &Value) -> Option<SystemClawHubS
             .and_then(json_object)
             .and_then(|value| json_string(value, "handle"))
     });
-    let download_url = clawhub_download_url_for_slug(&slug, None).ok()?;
+    let download_url = clawhub_download_url_for_slug(&slug, owner_handle.as_deref(), None).ok()?;
     let web_url = owner_handle
         .as_ref()
         .map(|owner| format!("{CLAWHUB_API_BASE}/{owner}/{slug}"));
@@ -211,8 +219,10 @@ pub(crate) fn install_clawhub_skill_from_payload(
     let slug = object_string(payload, "slug")
         .ok_or_else(|| "SkillsManager clawhub_install requires slug".to_string())?
         .to_string();
+    let owner_handle =
+        object_string(payload, "ownerHandle").or_else(|| object_string(payload, "owner"));
     let version = object_string(payload, "version");
-    let download_url = clawhub_download_url_for_slug(&slug, version)?;
+    let download_url = clawhub_download_url_for_slug(&slug, owner_handle, version)?;
     let mut install_payload = payload.clone();
     install_payload.insert("action".to_string(), Value::String("install".to_string()));
     install_payload.insert("source".to_string(), Value::String(download_url.clone()));

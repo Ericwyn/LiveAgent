@@ -137,6 +137,12 @@ const SKILL_MANAGER_PARAMETERS = Type.Object({
         "ClawHub skill slug for action=clawhub_install, as returned by action=clawhub_search.",
     }),
   ),
+  owner: Type.Optional(
+    Type.String({
+      description:
+        "ClawHub owner handle for action=clawhub_install, as returned by action=clawhub_search. Required to disambiguate when multiple publishers share the same slug (ClawHub rejects ambiguous downloads with HTTP 409).",
+    }),
+  ),
   version: Type.Optional(
     Type.String({
       description: "Optional ClawHub version/tag for action=clawhub_install. Defaults to latest.",
@@ -369,7 +375,7 @@ function normalizeSkillManagerPayload(
     const slug = optionalString(args, "slug");
     if (!slug) throw new Error("SkillsManager.slug is required for action=clawhub_install");
     payload.slug = slug;
-    for (const key of ["name", "conflict", "version"]) {
+    for (const key of ["name", "conflict", "version", "owner"]) {
       const value = optionalString(args, key);
       if (value) payload[key] = value;
     }
@@ -500,8 +506,9 @@ function formatManageSkillResultText(
       if (item.ownerHandle) lines.push(`  owner=${item.ownerHandle}`);
       if (item.downloadUrl) lines.push(`  downloadUrl=${item.downloadUrl}`);
       const versionArg = item.latestVersion ? `, version="${item.latestVersion}"` : "";
+      const ownerArg = item.ownerHandle ? `, owner="${item.ownerHandle}"` : "";
       lines.push(
-        `  install=SkillsManager(action="clawhub_install", slug="${item.slug}"${versionArg}, conflict="backup")`,
+        `  install=SkillsManager(action="clawhub_install", slug="${item.slug}"${ownerArg}${versionArg}, conflict="backup")`,
       );
     }
   } else if (result.action === "install" || result.action === "clawhub_install") {

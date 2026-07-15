@@ -744,9 +744,10 @@ export function SkillsHubPage(props: SkillsHubPageProps) {
     setStoreError(null);
     try {
       const job = await startSkillInstallJob({
-        source: buildClawHubDownloadUrl(skill.slug),
+        source: buildClawHubDownloadUrl(skill.slug, skill.ownerHandle),
         label: skill.displayName,
         slug: skill.slug,
+        ownerHandle: skill.ownerHandle,
         version: skill.latestVersion,
         conflict: "backup",
       });
@@ -1966,7 +1967,7 @@ function SkillsStoreView(props: {
     setPreviewError(null);
     setPreviewLoading(true);
 
-    void getClawHubSkillDetail(previewSkill.slug)
+    void getClawHubSkillDetail(previewSkill.slug, previewSkill.ownerHandle)
       .then((detail) => {
         if (!cancelled) {
           setPreviewDetail(detail);

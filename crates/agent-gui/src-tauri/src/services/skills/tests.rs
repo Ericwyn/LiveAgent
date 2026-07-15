@@ -349,7 +349,7 @@ fn install_source_from_local_skill_archive_installs_skill() {
 
 #[test]
 fn clawhub_download_url_preserves_slug_and_tag_params() {
-    let url = clawhub_download_url_for_slug("owner/example-skill", Some("v1.2.3"))
+    let url = clawhub_download_url_for_slug("owner/example-skill", None, Some("v1.2.3"))
         .expect("download url");
     let parsed = reqwest::Url::parse(&url).expect("parse url");
     let pairs = parsed
@@ -365,6 +365,26 @@ fn clawhub_download_url_preserves_slug_and_tag_params() {
         Some("owner/example-skill")
     );
     assert_eq!(pairs.get("tag").map(String::as_str), Some("v1.2.3"));
+    assert!(!pairs.contains_key("ownerHandle"));
+}
+
+#[test]
+fn clawhub_download_url_appends_owner_handle_for_disambiguation() {
+    let url = clawhub_download_url_for_slug("example-skill", Some("acme"), None)
+        .expect("download url");
+    let parsed = reqwest::Url::parse(&url).expect("parse url");
+    let pairs = parsed
+        .query_pairs()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<HashMap<_, _>>();
+
+    assert_eq!(pairs.get("slug").map(String::as_str), Some("example-skill"));
+    assert_eq!(pairs.get("tag").map(String::as_str), Some("latest"));
+    assert_eq!(pairs.get("ownerHandle").map(String::as_str), Some("acme"));
+
+    let blank_owner = clawhub_download_url_for_slug("example-skill", Some("  "), None)
+        .expect("download url");
+    assert!(!blank_owner.contains("ownerHandle"));
 }
 
 #[test]
@@ -393,6 +413,7 @@ fn normalize_clawhub_skill_card_supports_search_shape() {
     assert_eq!(card.installs_current, 3);
     assert_eq!(card.owner_handle.as_deref(), Some("owner"));
     assert!(card.download_url.contains("/api/v1/download"));
+    assert!(card.download_url.contains("ownerHandle=owner"));
 }
 
 #[test]

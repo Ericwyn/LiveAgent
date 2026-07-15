@@ -1714,6 +1714,59 @@ test("SkillsManager install resolves local relative sources against the workspac
   );
 });
 
+test("SkillsManager clawhub_install forwards owner handle for slug disambiguation", async () => {
+  const invocations = [];
+  const skillLoader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          invocations.push({ command, args });
+          assert.equal(command, "system_manage_skill");
+          return {
+            action: "clawhub_install",
+            rootDir: "/Users/me/.liveagent/skills",
+            clawhubSlug: "example-skill",
+            clawhubDownloadUrl:
+              "https://clawhub.ai/api/v1/download?slug=example-skill&tag=latest&ownerHandle=acme",
+            installed: [
+              {
+                name: "example-skill",
+                target: "/Users/me/.liveagent/skills/example-skill",
+                backup: null,
+                skillFile: "example-skill/SKILL.md",
+              },
+            ],
+          };
+        },
+      },
+    },
+  });
+  const skillTools = skillLoader.loadModule("src/lib/tools/skillTools.ts");
+  const bundle = skillTools.createSkillTools({
+    skillAccessPolicy: {
+      allowedSkillNames: ["skills-installer"],
+      allowedSkillBaseDirs: ["skills-installer"],
+      allowSkillManagement: true,
+    },
+  });
+
+  const result = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "clawhub-install-owner",
+    name: "SkillsManager",
+    arguments: {
+      action: "clawhub_install",
+      slug: "example-skill",
+      owner: "acme",
+      conflict: "backup",
+    },
+  });
+
+  assert.equal(result.isError, false);
+  assert.equal(invocations[0].args.payload.slug, "example-skill");
+  assert.equal(invocations[0].args.payload.owner, "acme");
+});
+
 test("SkillsManager blocks unread enabled-Skill policy violations before backend invoke", async () => {
   const invocations = [];
   const skillLoader = createTsModuleLoader({

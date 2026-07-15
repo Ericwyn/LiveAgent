@@ -293,6 +293,8 @@ fn build_skill_source_metadata(
     let metadata = serde_json::json!({
         "registry": "clawhub",
         "slug": slug,
+        "ownerHandle": object_string(payload, "ownerHandle")
+            .or_else(|| object_string(payload, "owner")),
         "version": object_string(payload, "version"),
         "publishedAt": payload.get("publishedAt").and_then(Value::as_u64),
     });

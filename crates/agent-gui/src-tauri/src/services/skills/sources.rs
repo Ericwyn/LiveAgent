@@ -111,7 +111,16 @@ where
         .map_err(|e| format!("Failed to download Skill source: {e}"))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("Skill source download failed with HTTP {status}"));
+        // 注册表错误响应体通常带修复指引（如 ClawHub 409 要求 ownerHandle），截断后回显。
+        let mut raw = Vec::new();
+        let _ = response.take(2048).read_to_end(&mut raw);
+        let body = String::from_utf8_lossy(&raw);
+        let snippet = body.trim();
+        return Err(if snippet.is_empty() {
+            format!("Skill source download failed with HTTP {status}")
+        } else {
+            format!("Skill source download failed with HTTP {status}: {snippet}")
+        });
     }
     let total_bytes = response.content_length();
     if total_bytes

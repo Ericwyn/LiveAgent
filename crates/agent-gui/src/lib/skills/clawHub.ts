@@ -84,7 +84,7 @@ function normalizeSkillCard(raw: unknown): ClawHubSkillCard | null {
     updatedAt: asNullableNumber(item.updatedAt),
     ownerHandle,
     webUrl: asString(item.webUrl) ?? buildClawHubWebUrl(ownerHandle, slug),
-    downloadUrl: asString(item.downloadUrl) ?? buildClawHubDownloadUrl(slug),
+    downloadUrl: asString(item.downloadUrl) ?? buildClawHubDownloadUrl(slug, ownerHandle),
   };
 }
 
@@ -166,8 +166,15 @@ export async function searchClawHubSkills(params: {
     : [];
 }
 
-export async function getClawHubSkillDetail(slug: string): Promise<ClawHubSkillDetail> {
+export async function getClawHubSkillDetail(
+  slug: string,
+  ownerHandle?: string | null,
+): Promise<ClawHubSkillDetail> {
   const url = new URL(`/api/v1/skills/${encodeURIComponent(slug)}`, CLAWHUB_API_BASE);
+  // ClawHub 对重名 slug 返回 409，须带 ownerHandle 消歧。
+  if (ownerHandle) {
+    url.searchParams.set("ownerHandle", ownerHandle);
+  }
   const detail = normalizeSkillDetail(await fetchClawHubJson(url));
   if (!detail) {
     throw new Error("ClawHub skill detail not found");
@@ -175,9 +182,12 @@ export async function getClawHubSkillDetail(slug: string): Promise<ClawHubSkillD
   return detail;
 }
 
-export function buildClawHubDownloadUrl(slug: string) {
+export function buildClawHubDownloadUrl(slug: string, ownerHandle?: string | null) {
   const url = new URL("/api/v1/download", CLAWHUB_API_BASE);
   url.searchParams.set("slug", slug);
   url.searchParams.set("tag", "latest");
+  if (ownerHandle) {
+    url.searchParams.set("ownerHandle", ownerHandle);
+  }
   return url.toString();
 }
