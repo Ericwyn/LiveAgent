@@ -2464,3 +2464,18 @@ body > div:not(#root) [data-streamdown="mermaid"] svg {
   animation: editorContextMenuIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
   transform-origin: top left;
 }
+
+.sidebar-project-name-fade {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 0,
+    #000 calc(100% - 1.25rem),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    #000 0,
+    #000 calc(100% - 1.25rem),
+    transparent 100%
+  );
+}

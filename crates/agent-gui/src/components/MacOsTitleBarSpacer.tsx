@@ -21,6 +21,8 @@ const MAC_OS_TRAFFIC_LIGHT_GROUP_WIDTH = 52;
 const MAC_OS_TRAFFIC_LIGHT_GROUP_HEIGHT = 12;
 const MAC_OS_TITLEBAR_TOGGLE_BUTTON_SIZE = 28;
 const MAC_OS_TITLEBAR_TOGGLE_GAP = 22;
+const MAC_OS_SIDEBAR_WIDTH = 272;
+const MAC_OS_SIDEBAR_TOGGLE_RIGHT_INSET = 8;
 
 function isValidMetrics(
   metrics: MacOsTrafficLightMetrics | null,
@@ -90,7 +92,8 @@ export function MacOsTitleBarSpacer({ className }: { className?: string }) {
 
 /**
  * Fixed-position sidebar toggle for macOS overlay titlebar.
- * Always appears at the same x position (right of traffic lights), regardless of sidebar state.
+ * When the sidebar is open it sits at the sidebar's far-right edge; when closed it
+ * returns to the titlebar controls next to the traffic lights.
  */
 export function MacOsTitleBarToggle({
   sidebarOpen,
@@ -111,10 +114,14 @@ export function MacOsTitleBarToggle({
   const trafficLightWidth = trafficLightMetrics?.width ?? MAC_OS_TRAFFIC_LIGHT_GROUP_WIDTH;
   const trafficLightHeight = trafficLightMetrics?.height ?? MAC_OS_TRAFFIC_LIGHT_GROUP_HEIGHT;
   const toggleTop = trafficLightTop - (MAC_OS_TITLEBAR_TOGGLE_BUTTON_SIZE - trafficLightHeight) / 2;
-  const toggleLeft = trafficLightLeft + trafficLightWidth + MAC_OS_TITLEBAR_TOGGLE_GAP;
+  const toggleLeft = sidebarOpen
+    ? MAC_OS_SIDEBAR_WIDTH -
+      MAC_OS_TITLEBAR_TOGGLE_BUTTON_SIZE -
+      MAC_OS_SIDEBAR_TOGGLE_RIGHT_INSET
+    : trafficLightLeft + trafficLightWidth + MAC_OS_TITLEBAR_TOGGLE_GAP;
   return (
     <div
-      className="fixed z-49 flex items-center gap-0.5 [-webkit-app-region:no-drag]"
+      className="fixed z-49 flex items-center gap-0.5 transition-[left] duration-200 ease-out [-webkit-app-region:no-drag]"
       style={{
         top: toggleTop,
         left: toggleLeft,
@@ -132,7 +139,7 @@ export function MacOsTitleBarToggle({
       >
         {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
       </button>
-      {onOpenSettings && (
+      {!sidebarOpen && onOpenSettings && (
         <button
           type="button"
           onClick={onOpenSettings}
@@ -145,7 +152,7 @@ export function MacOsTitleBarToggle({
           <Settings className="h-4 w-4" />
         </button>
       )}
-      {onOpenSettings && appUpdate ? (
+      {!sidebarOpen && onOpenSettings && appUpdate ? (
         <AppUpdateButton appUpdate={appUpdate} className="ml-1" />
       ) : null}
     </div>

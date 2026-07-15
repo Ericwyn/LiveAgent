@@ -121,6 +121,7 @@ export type GatewaySidebarContainerProps = {
   // migrates the selection when the displayed conversation vanished.
   onConversationsRemoved: (ids: readonly string[]) => void;
   onCloseSidebar: () => void;
+  onOpenSettings: () => void;
   onOpenSkillsHub: () => void;
   onOpenMcpHub: () => void;
 };
@@ -345,6 +346,7 @@ export function GatewaySidebarContainer(props: GatewaySidebarContainerProps) {
       onDeleteConversation={handleDeleteConversation}
       onLoadMore={handleLoadMore}
       onCloseSidebar={props.onCloseSidebar}
+      onOpenSettings={props.onOpenSettings}
       onOpenSkillsHub={props.onOpenSkillsHub}
       onOpenMcpHub={props.onOpenMcpHub}
     />

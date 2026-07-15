@@ -6,6 +6,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { ChatHistorySidebar } from "../../../components/chat/ChatHistorySidebar";
 import { useLocale } from "../../../i18n";
+import type { AppUpdateController } from "../../../lib/appUpdates";
 import { normalizeConversationTitle } from "../../../lib/chat/page/chatPageHelpers";
 import type { WorkspaceProject } from "../../../lib/settings";
 import {
@@ -59,6 +60,8 @@ type ChatSidebarContainerProps = {
   onShareConversation: (item: SidebarConversation) => void;
   onOpenSharedConversations: () => void;
   onCloseSidebar: () => void;
+  onOpenSettings: () => void;
+  appUpdate?: AppUpdateController;
   onOpenSkillsHub: () => void;
   onOpenMcpHub: () => void;
 };
@@ -222,6 +225,8 @@ export function ChatSidebarContainer(props: ChatSidebarContainerProps) {
       onDeleteConversation={handleDeleteConversation}
       onLoadMore={handleLoadMore}
       onCloseSidebar={props.onCloseSidebar}
+      onOpenSettings={props.onOpenSettings}
+      appUpdate={props.appUpdate}
       onOpenSkillsHub={props.onOpenSkillsHub}
       onOpenMcpHub={props.onOpenMcpHub}
     />

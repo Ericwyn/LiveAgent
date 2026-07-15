@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { GlassPanel, HubBackdrop, HubHeader } from "../../components/hub/HubChrome";
 import {
   AlertTriangle,
+  Blend,
   BookOpen,
   Check,
   Cloud,
@@ -839,7 +840,7 @@ export function SkillsHubPage(props: SkillsHubPageProps) {
 
       <div className="relative z-10 flex h-full min-h-0 flex-col overflow-hidden">
         <HubHeader
-          icon={<SkillIcon className="h-6 w-6" />}
+          icon={<Blend className="h-6 w-6" />}
           title={t("settings.skillsHubTitle")}
           subtitle={rootDir ? rootDir : t("settings.skillsHubSubtitle")}
           sidebarOpen={sidebarOpen}

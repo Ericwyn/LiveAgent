@@ -306,7 +306,7 @@ export const ChatHeader = memo(function ChatHeader(props: {
         >
           <ThemeToggleIcon theme={nextTheme} />
         </Button>
-        {!isMacOsTauri() && (
+        {!sidebarOpen && !isMacOsTauri() && (
           <Button
             variant="ghost"
             size="icon"

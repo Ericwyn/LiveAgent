@@ -259,15 +259,17 @@ export const ChatHeader = memo(function ChatHeader(props: {
         >
           <ThemeToggleIcon theme={nextTheme} />
         </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => onOpenSettings()}
-          title={t("tooltip.settings")}
-          className="h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
-        >
-          <Settings className="h-4.5 w-4.5" />
-        </Button>
+        {!sidebarOpen ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onOpenSettings()}
+            title={t("tooltip.settings")}
+            className="h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
+          >
+            <Settings className="h-4.5 w-4.5" />
+          </Button>
+        ) : null}
         {trailingActions}
       </div>
     </header>

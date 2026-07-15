@@ -1,3 +1,4 @@
+import { Tooltip } from "@base-ui/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   type CSSProperties,
@@ -21,21 +22,23 @@ import {
 import { cn } from "../../lib/shared/utils";
 import {
   AlertCircle,
+  Blend,
+  Cable,
   ChevronRight,
+  CirclePlus,
   Edit3,
-  Folder,
+  FolderClosed,
+  FolderOpen,
   FolderTree,
-  Link2,
-  McpLogo,
+  Loader2,
   MessageSquareText,
   MoreHorizontal,
   PanelLeftClose,
   Pin,
   PinOff,
   Plus,
+  Settings,
   Share2,
-  SkillIcon,
-  SquarePen,
   Trash2,
 } from "../icons";
 import { Button } from "../ui/button";
@@ -113,6 +116,7 @@ type ChatHistorySidebarProps = {
   onDeleteConversation: (id: string) => void;
   onLoadMore: () => void;
   onCloseSidebar: () => void;
+  onOpenSettings: () => void;
   onOpenSkillsHub?: () => void;
   onOpenMcpHub?: () => void;
 };
@@ -120,18 +124,14 @@ type ChatHistorySidebarProps = {
 const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 820px)";
 const MOBILE_MENU_LONG_PRESS_MS = 520;
 const MOBILE_MENU_MOVE_TOLERANCE_PX = 10;
-const HISTORY_ROW_ESTIMATED_HEIGHT = 44;
-const HISTORY_ROW_GAP = 6;
+const HISTORY_ROW_ESTIMATED_HEIGHT = 30;
+const HISTORY_ROW_GAP = 2;
 const HISTORY_ROW_OVERSCAN_COUNT = 8;
 const HISTORY_LOAD_MORE_THRESHOLD = 12;
-const PROJECT_HEADER_BUTTON_CLASS =
-  "transition-colors hover:!bg-foreground/[0.06] hover:text-foreground active:!bg-foreground/[0.1] focus-visible:!bg-foreground/[0.08] focus-visible:ring-2 focus-visible:ring-ring";
 const PROJECT_ICON_BUTTON_CLASS =
-  "h-7 w-7 rounded-lg text-muted-foreground transition-colors hover:!bg-foreground/[0.08] hover:text-foreground active:!bg-foreground/[0.1] focus-visible:!bg-foreground/[0.08] data-[state=open]:!bg-foreground/[0.08] data-[state=open]:text-foreground";
+  "h-7 w-7 rounded-lg !bg-transparent text-muted-foreground transition-colors hover:!bg-transparent hover:!text-foreground active:!bg-transparent focus-visible:!bg-transparent data-[state=open]:!bg-transparent data-[state=open]:text-foreground data-[popup-open]:!bg-transparent data-[popup-open]:text-foreground";
 const SIDEBAR_SECTION_ROWS_TRANSITION_CLASS =
   "transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none";
-const SIDEBAR_SECTION_CHEVRON_CLASS =
-  "h-3.5 w-3.5 shrink-0 transition-transform duration-300 ease-out motion-reduce:transition-none";
 const SIDEBAR_PROJECT_MIN_BODY_HEIGHT = 96;
 const SIDEBAR_RECENT_MIN_BODY_HEIGHT = 160;
 // Default share of the available height the workspace (projects) section claims
@@ -533,17 +533,15 @@ const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
   return (
     <div
       className={cn(
-        "chat-history-row group/item rounded-2xl border px-1 py-0.5 transition-all",
+        "chat-history-row group/item grid h-[30px] grid-cols-[minmax(0,1fr)_auto] items-center rounded-lg pl-1 transition-colors",
         isActive
-          ? "border-border/70 bg-background shadow-xs shadow-black/5"
-          : item.isPinned
-            ? "border-primary/20 bg-primary/[0.06] hover:border-primary/30 hover:bg-primary/[0.09]"
-            : "border-transparent bg-transparent hover:border-border/50 hover:bg-background/70",
-        shouldShowMobilePressFeedback && "border-border/60 bg-muted/70 shadow-xs shadow-black/5",
+          ? "bg-foreground/[0.07] text-foreground hover:bg-foreground/[0.09]"
+          : "text-foreground/85 hover:bg-foreground/[0.05] hover:text-foreground",
+        shouldShowMobilePressFeedback && "bg-foreground/[0.09] text-foreground",
       )}
     >
       {isRenaming ? (
-        <div className="px-1 py-0.5">
+        <div className="flex h-[30px] min-w-0 items-center px-2">
           <Input
             ref={inputRef}
             value={renameDraft}
@@ -568,7 +566,7 @@ const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
               }
             }}
             onClick={(e) => e.stopPropagation()}
-            className="h-9 rounded-xl border-border/70 bg-background text-sm shadow-none"
+            className="h-7 min-w-0 flex-1 rounded-none border-0 bg-transparent p-0 text-[calc(14px*var(--zone-font-scale,1))] font-normal shadow-none outline-none focus-visible:border-0 focus-visible:bg-transparent"
             disabled={isInteractionDisabled || isBusy}
           />
         </div>
@@ -578,7 +576,7 @@ const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
           onOpenChange={handleMenuOpenChange}
           modal={false}
         >
-          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1">
+          <>
             <div className="relative min-w-0">
               {isMobileMenuLayout ? (
                 <DropdownMenuTrigger asChild>
@@ -594,6 +592,12 @@ const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
               <button
                 type="button"
                 onClick={handleTitleClick}
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  if (!isMobileMenuLayout && !isRunning && !isBusy) {
+                    handleStartRenaming();
+                  }
+                }}
                 onContextMenu={handleTitleContextMenu}
                 onKeyDown={handleTitleKeyDown}
                 onPointerDown={handleTitlePointerDown}
@@ -602,76 +606,87 @@ const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
                 onPointerCancel={handleTitlePointerCancel}
                 onPointerLeave={handleTitlePointerCancel}
                 disabled={isInteractionDisabled}
-                className={cn(
-                  "chat-history-row-title-button w-full min-w-0 rounded-[1rem] px-1 py-1 text-left outline-hidden transition-colors",
-                  "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                  isActive ? "text-foreground" : "text-foreground/90 hover:text-foreground",
-                )}
+                className="chat-history-row-title-button flex h-[30px] w-full min-w-0 items-center rounded-md px-2 text-left outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring"
                 title={item.title}
               >
-                <span className="block truncate text-sm font-medium leading-5">{item.title}</span>
+                <span className="sidebar-project-name-fade min-w-0 flex-1 overflow-hidden whitespace-nowrap text-[calc(14px*var(--zone-font-scale,1))] font-normal leading-5">
+                  {item.title}
+                </span>
               </button>
             </div>
 
-            <div className="flex items-center gap-1.5">
-              {item.isPinned ? (
-                <span
-                  role="img"
-                  className="flex h-8 w-3.5 shrink-0 items-center justify-center text-primary/75"
-                  aria-label={t("chat.statusPinned")}
-                  title={t("chat.statusPinned")}
-                >
-                  <Pin className="h-3.5 w-3.5" />
-                </span>
-              ) : null}
-
-              {item.isShared ? (
-                <span
-                  role="img"
-                  className="flex h-8 w-3.5 shrink-0 items-center justify-center text-sky-500/80"
-                  aria-label={t("chat.statusShared")}
-                  title={t("chat.statusShared")}
-                >
-                  <Link2 className="h-3.5 w-3.5" />
-                </span>
-              ) : null}
-
+            <div
+              className={cn(
+                "relative flex items-center justify-end overflow-hidden transition-[max-width,opacity] duration-200 ease-out",
+                isRunning
+                  ? "max-w-7 opacity-100 group-hover/item:max-w-16 group-focus-within/item:max-w-16"
+                  : "max-w-0 opacity-0 group-hover/item:max-w-16 group-hover/item:opacity-100 group-focus-within/item:max-w-16 group-focus-within/item:opacity-100",
+                menuOpen && "max-w-16 opacity-100",
+              )}
+            >
               {isRunning ? (
                 <span
                   role="img"
-                  className="relative flex h-8 w-3.5 shrink-0 items-center justify-center"
                   aria-label={t("chat.statusRunningReply")}
                   title={t("chat.statusRunningReply")}
+                  className={cn(
+                    "pointer-events-none absolute right-1.5 flex h-4 w-4 items-center justify-center text-muted-foreground transition-opacity duration-200",
+                    "opacity-100 group-hover/item:opacity-0 group-focus-within/item:opacity-0",
+                    menuOpen && "opacity-0",
+                  )}
                 >
-                  <span className="absolute h-2 w-2 rounded-full bg-emerald-400/45 animate-ping" />
-                  <span className="relative h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.14)]" />
+                  <Loader2 className="h-4 w-4 animate-spin" />
                 </span>
               ) : null}
-
-              {!isMobileMenuLayout ? (
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    disabled={isInteractionDisabled || isBusy}
-                    title={t("chat.conversationMore")}
-                    aria-label={t("chat.conversationMore")}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => e.stopPropagation()}
-                    className={cn(
-                      "chat-history-row-menu-button h-8 w-8 shrink-0 rounded-xl text-muted-foreground opacity-0 pointer-events-none transition-[opacity,colors]",
-                      "hover:bg-muted/70 hover:text-foreground",
-                      "group-hover/item:opacity-100 group-hover/item:pointer-events-auto",
-                      "group-focus-within/item:opacity-100 group-focus-within/item:pointer-events-auto",
-                      menuOpen && "bg-muted/70 text-foreground",
-                      menuOpen && "opacity-100 pointer-events-auto",
-                    )}
-                  >
-                    <MoreHorizontal className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-              ) : null}
+              <div
+                className={cn(
+                  "flex items-center gap-0.5 transition-opacity duration-200",
+                  isRunning
+                    ? "opacity-0 group-hover/item:opacity-100 group-focus-within/item:opacity-100"
+                    : "opacity-100",
+                  menuOpen && "opacity-100",
+                )}
+              >
+                {!isMobileMenuLayout ? (
+                  <>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className={PROJECT_ICON_BUTTON_CLASS}
+                      title={
+                        item.isPinned ? t("chat.conversationUnpin") : t("chat.conversationPin")
+                      }
+                      aria-label={
+                        item.isPinned ? t("chat.conversationUnpin") : t("chat.conversationPin")
+                      }
+                      onClick={handleTogglePinned}
+                      disabled={isInteractionDisabled || isBusy || item.isPending}
+                    >
+                      {item.isPinned ? (
+                        <PinOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Pin className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className={PROJECT_ICON_BUTTON_CLASS}
+                        disabled={isInteractionDisabled || isBusy}
+                        title={t("chat.conversationMore")}
+                        aria-label={t("chat.conversationMore")}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <MoreHorizontal className="h-3.5 w-3.5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                  </>
+                ) : null}
+              </div>
             </div>
 
             <DropdownMenuContent
@@ -681,7 +696,7 @@ const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
               collisionPadding={12}
               className="sidebar-context-menu min-w-[10rem] rounded-xl border-border/60 bg-background/95 backdrop-blur-xl"
             >
-              {!item.isPending ? (
+              {isMobileMenuLayout && !item.isPending ? (
                 <DropdownMenuItem
                   disabled={isInteractionDisabled}
                   onSelect={handleTogglePinned}
@@ -722,7 +737,7 @@ const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
                 {t("chat.conversationDelete")}
               </DropdownMenuItem>
             </DropdownMenuContent>
-          </div>
+          </>
         </DropdownMenu>
       )}
     </div>
@@ -739,7 +754,6 @@ const ProjectRow = memo(function ProjectRow(props: {
   isInteractionDisabled: boolean;
   renameDraft: string;
   onSelectProject: (project: WorkspaceProject) => void;
-  onNewConversationForProject: (project: WorkspaceProject) => void;
   onBrowseProjectInFileTree?: (project: WorkspaceProject) => void;
   onStartRenamingProject: (project: WorkspaceProject) => void;
   onProjectRenameDraftChange: (value: string) => void;
@@ -761,7 +775,6 @@ const ProjectRow = memo(function ProjectRow(props: {
     isInteractionDisabled,
     renameDraft,
     onSelectProject,
-    onNewConversationForProject,
     onBrowseProjectInFileTree,
     onStartRenamingProject,
     onProjectRenameDraftChange,
@@ -774,10 +787,12 @@ const ProjectRow = memo(function ProjectRow(props: {
     onMenuOpenChange,
   } = props;
   const { t } = useLocale();
+  const rowRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const skipNextBlurCommitRef = useRef(false);
   const isDefaultProject = project.id === DEFAULT_WORKSPACE_PROJECT_ID;
   const isPinned = project.isPinned === true;
+  const ProjectFolderIcon = isActive ? FolderOpen : FolderClosed;
 
   useEffect(() => {
     if (!isRenaming) return;
@@ -865,8 +880,9 @@ const ProjectRow = memo(function ProjectRow(props: {
 
   return (
     <div
+      ref={rowRef}
       className={cn(
-        "group/project grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 rounded-lg px-1 py-0.5 transition-colors",
+        "group/project grid h-[30px] grid-cols-[minmax(0,1fr)_auto] items-center rounded-lg pl-1 transition-colors",
         isMissing
           ? "text-destructive hover:bg-destructive/10"
           : isActive
@@ -875,233 +891,230 @@ const ProjectRow = memo(function ProjectRow(props: {
       )}
     >
       {isRenaming ? (
-        <div className="flex min-w-0 items-start gap-2 rounded-md px-2 py-1.5 text-left">
-          <Folder
+        <div className="flex h-[30px] min-w-0 items-center gap-3 rounded-md px-2 text-left">
+          <ProjectFolderIcon
             className={cn(
-              "mt-2 h-3.5 w-3.5 shrink-0 transition-colors",
+              "h-4 w-4 shrink-0 transition-colors",
               isMissing ? "text-destructive" : isActive ? "text-amber-500" : "text-foreground/65",
             )}
           />
-          <span className="min-w-0 flex-1">
-            <Input
-              ref={inputRef}
-              value={renameDraft}
-              onChange={(e) => onProjectRenameDraftChange(e.currentTarget.value)}
-              onBlur={() => {
-                if (skipNextBlurCommitRef.current) {
-                  skipNextBlurCommitRef.current = false;
-                  return;
-                }
+          <Input
+            ref={inputRef}
+            value={renameDraft}
+            onChange={(e) => onProjectRenameDraftChange(e.currentTarget.value)}
+            onBlur={() => {
+              if (skipNextBlurCommitRef.current) {
+                skipNextBlurCommitRef.current = false;
+                return;
+              }
+              onCommitProjectRename();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                skipNextBlurCommitRef.current = true;
                 onCommitProjectRename();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  skipNextBlurCommitRef.current = true;
-                  onCommitProjectRename();
-                }
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  skipNextBlurCommitRef.current = true;
-                  onCancelProjectRename();
-                }
-              }}
-              onClick={(e) => e.stopPropagation()}
-              className="h-9 rounded-xl border-border/70 bg-background text-sm shadow-none"
-              disabled={isInteractionDisabled}
-            />
-            <span
-              className={cn(
-                "mt-0.5 block truncate text-[calc(10.5px*var(--zone-font-scale,1))] font-normal leading-4 transition-colors",
-                isMissing
-                  ? "text-destructive/75"
-                  : isActive
-                    ? "text-muted-foreground/80"
-                    : "text-muted-foreground/65",
-              )}
-              title={project.path}
-            >
-              {project.path}
-            </span>
-          </span>
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                skipNextBlurCommitRef.current = true;
+                onCancelProjectRename();
+              }
+            }}
+            onClick={(e) => e.stopPropagation()}
+            className="h-7 min-w-0 flex-1 rounded-none border-0 bg-transparent p-0 text-[calc(14px*var(--zone-font-scale,1))] font-normal shadow-none outline-none focus-visible:border-0 focus-visible:bg-transparent"
+            disabled={isInteractionDisabled}
+          />
         </div>
       ) : (
-        <button
-          type="button"
-          className={cn(
-            "flex min-w-0 items-start gap-2 rounded-md px-2 py-1.5 text-left outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring",
-            isMissing
-              ? "hover:text-destructive focus-visible:bg-destructive/10"
-              : "hover:text-foreground focus-visible:bg-foreground/[0.06]",
-          )}
-          title={project.path}
-          onClick={() => onSelectProject(project)}
-          disabled={isInteractionDisabled}
-        >
-          <Folder
-            className={cn(
-              "mt-0.5 h-3.5 w-3.5 shrink-0 transition-colors",
-              isMissing
-                ? "text-destructive"
-                : isActive
-                  ? "text-amber-500"
-                  : "text-foreground/65 group-hover/project:text-amber-500/80",
-            )}
+        <Tooltip.Root disabled={isInteractionDisabled}>
+          <Tooltip.Trigger
+            delay={0}
+            closeOnClick
+            render={
+              <button
+                type="button"
+                className={cn(
+                  "flex h-[30px] min-w-0 items-center gap-3 rounded-md px-2 text-left outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+                  isMissing
+                    ? "hover:text-destructive focus-visible:bg-destructive/10"
+                    : "hover:text-foreground focus-visible:bg-foreground/[0.06]",
+                )}
+                onClick={() => onSelectProject(project)}
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  if (!isDefaultProject && !isInteractionDisabled) {
+                    onStartRenamingProject(project);
+                  }
+                }}
+                disabled={isInteractionDisabled}
+              >
+                <ProjectFolderIcon
+                  className={cn(
+                    "h-4 w-4 shrink-0 transition-colors",
+                    isMissing
+                      ? "text-destructive"
+                      : isActive
+                        ? "text-amber-500"
+                        : "text-foreground/65",
+                  )}
+                />
+                <span
+                  className={cn(
+                    "sidebar-project-name-fade min-w-0 flex-1 overflow-hidden whitespace-nowrap text-[calc(14px*var(--zone-font-scale,1))] font-normal leading-5",
+                    isMissing ? "text-destructive" : undefined,
+                  )}
+                >
+                  {project.name}
+                </span>
+              </button>
+            }
           />
-          <span className="min-w-0 flex-1">
-            <span
-              className={cn(
-                "flex min-w-0 items-center gap-1.5 text-[calc(13px*var(--zone-font-scale,1))] font-medium leading-5",
-                isMissing ? "text-destructive" : undefined,
-              )}
+          <Tooltip.Portal>
+            <Tooltip.Positioner
+              anchor={rowRef}
+              side="right"
+              align="center"
+              sideOffset={10}
+              collisionPadding={8}
+              className="z-[9999]"
             >
-              <span className="min-w-0 truncate">{project.name}</span>
-              {isRunning ? (
-                <span
-                  role="img"
-                  className="relative flex h-2 w-2 shrink-0 items-center justify-center"
-                  aria-label={t("chat.statusRunningReply")}
-                  title={t("chat.statusRunningReply")}
-                >
-                  <span className="absolute h-2 w-2 rounded-full bg-emerald-400/45 animate-ping" />
-                  <span className="relative h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.14)]" />
-                </span>
-              ) : null}
-              {isPinned ? (
-                <span
-                  role="img"
-                  className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-primary/75"
-                  aria-label={t("chat.statusPinned")}
-                  title={t("chat.statusPinned")}
-                >
-                  <Pin className="h-3 w-3" />
-                </span>
-              ) : null}
-            </span>
-            <span
-              className={cn(
-                "block truncate text-[calc(10.5px*var(--zone-font-scale,1))] font-normal leading-4 transition-colors",
-                isMissing
-                  ? "text-destructive/75"
-                  : isActive
-                    ? "text-muted-foreground/80"
-                    : "text-muted-foreground/65 group-hover/project:text-muted-foreground/85",
-              )}
-            >
-              {project.path}
-            </span>
-          </span>
-        </button>
+              <Tooltip.Popup className="w-64 rounded-xl border border-border/60 bg-popover px-3 py-2.5 text-popover-foreground shadow-lg outline-hidden data-[open]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[open]:fade-in-0 data-[closed]:zoom-out-95 data-[open]:zoom-in-95">
+                <p className="truncate text-sm font-semibold leading-5">{project.name}</p>
+                <p className="mt-1 break-all text-xs leading-4 text-muted-foreground">
+                  {project.path}
+                </p>
+              </Tooltip.Popup>
+            </Tooltip.Positioner>
+          </Tooltip.Portal>
+        </Tooltip.Root>
       )}
       {!isRenaming ? (
         <div
           className={cn(
-            "flex items-center gap-0.5 transition-opacity group-hover/project:opacity-100 group-focus-within/project:opacity-100",
-            isMissing ? "opacity-100" : "opacity-0",
+            "relative flex items-center justify-end overflow-hidden transition-[max-width,opacity] duration-200 ease-out",
+            isMissing
+              ? "max-w-8 opacity-100"
+              : isRunning
+                ? "max-w-7 opacity-100 group-hover/project:max-w-16 group-focus-within/project:max-w-16"
+                : "max-w-0 opacity-0 group-hover/project:max-w-16 group-hover/project:opacity-100 group-focus-within/project:max-w-16 group-focus-within/project:opacity-100",
+            menuOpen && "max-w-16 opacity-100",
           )}
         >
-          {isMissing ? (
-            !isDefaultProject ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className={cn(
-                  PROJECT_ICON_BUTTON_CLASS,
-                  "text-destructive hover:!bg-destructive/10 hover:text-destructive",
-                )}
-                title={t("chat.workspaceRemove")}
-                aria-label={t("chat.workspaceRemove")}
-                onClick={handleRequestRemove}
-                disabled={isInteractionDisabled}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </Button>
-            ) : null
-          ) : (
-            <>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className={PROJECT_ICON_BUTTON_CLASS}
-                title={t("chat.workspaceNewConversation")}
-                aria-label={t("chat.workspaceNewConversation")}
-                onClick={() => onNewConversationForProject(project)}
-                disabled={isInteractionDisabled}
-              >
-                <SquarePen className="h-3.5 w-3.5" />
-              </Button>
-              <DropdownMenu
-                open={!isInteractionDisabled && menuOpen}
-                onOpenChange={handleMenuOpenChange}
-                modal={false}
-              >
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className={PROJECT_ICON_BUTTON_CLASS}
-                    title={t("chat.workspaceMore")}
-                    aria-label={t("chat.workspaceMore")}
-                    disabled={isInteractionDisabled}
-                  >
-                    <MoreHorizontal className="h-3.5 w-3.5" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  side="right"
-                  align="start"
-                  sideOffset={6}
-                  className="sidebar-context-menu"
+          {isRunning && !isMissing ? (
+            <span
+              role="img"
+              aria-label={t("chat.statusRunningReply")}
+              title={t("chat.statusRunningReply")}
+              className={cn(
+                "pointer-events-none absolute right-1.5 flex h-4 w-4 items-center justify-center text-muted-foreground transition-opacity duration-200",
+                "opacity-100 group-hover/project:opacity-0 group-focus-within/project:opacity-0",
+                menuOpen && "opacity-0",
+              )}
+            >
+              <Loader2 className="h-4 w-4 animate-spin" />
+            </span>
+          ) : null}
+          <div
+            className={cn(
+              "flex items-center gap-0.5 transition-opacity duration-200",
+              isRunning && !isMissing
+                ? "opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100"
+                : "opacity-100",
+              menuOpen && "opacity-100",
+            )}
+          >
+            {isMissing ? (
+              !isDefaultProject ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    PROJECT_ICON_BUTTON_CLASS,
+                    "text-destructive hover:!bg-transparent hover:text-destructive",
+                  )}
+                  title={t("chat.workspaceRemove")}
+                  aria-label={t("chat.workspaceRemove")}
+                  onClick={handleRequestRemove}
+                  disabled={isInteractionDisabled}
                 >
-                  <DropdownMenuItem
-                    disabled={isInteractionDisabled}
-                    onSelect={handleTogglePinned}
-                    className="gap-2"
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              ) : null
+            ) : (
+              <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className={PROJECT_ICON_BUTTON_CLASS}
+                  title={isPinned ? t("chat.workspaceUnpin") : t("chat.workspacePin")}
+                  aria-label={isPinned ? t("chat.workspaceUnpin") : t("chat.workspacePin")}
+                  onClick={handleTogglePinned}
+                  disabled={isInteractionDisabled}
+                >
+                  {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+                </Button>
+                <DropdownMenu
+                  open={!isInteractionDisabled && menuOpen}
+                  onOpenChange={handleMenuOpenChange}
+                  modal={false}
+                >
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className={PROJECT_ICON_BUTTON_CLASS}
+                      title={t("chat.workspaceMore")}
+                      aria-label={t("chat.workspaceMore")}
+                      disabled={isInteractionDisabled}
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    side="right"
+                    align="start"
+                    sideOffset={6}
+                    className="sidebar-context-menu"
                   >
-                    {isPinned ? (
-                      <PinOff className="h-3.5 w-3.5" />
-                    ) : (
-                      <Pin className="h-3.5 w-3.5" />
-                    )}
-                    {isPinned ? t("chat.workspaceUnpin") : t("chat.workspacePin")}
-                  </DropdownMenuItem>
-                  {!isDefaultProject ? (
-                    <>
+                    {!isDefaultProject ? (
+                      <>
+                        <DropdownMenuItem
+                          disabled={isInteractionDisabled}
+                          onSelect={() => onStartRenamingProject(project)}
+                          className="gap-2"
+                        >
+                          <Edit3 className="h-3.5 w-3.5" />
+                          {t("chat.workspaceRename")}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={isInteractionDisabled}
+                          onSelect={handleRequestRemove}
+                          className="gap-2 text-destructive focus:bg-destructive/10 focus:text-destructive"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          {t("chat.workspaceRemove")}
+                        </DropdownMenuItem>
+                      </>
+                    ) : null}
+                    {onBrowseProjectInFileTree ? (
                       <DropdownMenuItem
                         disabled={isInteractionDisabled}
-                        onSelect={() => onStartRenamingProject(project)}
+                        onSelect={handleBrowseInFileTree}
                         className="gap-2"
                       >
-                        <Edit3 className="h-3.5 w-3.5" />
-                        {t("chat.workspaceRename")}
+                        <FolderTree className="h-3.5 w-3.5" />
+                        {t("chat.workspaceBrowseInFileTree")}
                       </DropdownMenuItem>
-                      <DropdownMenuItem
-                        disabled={isInteractionDisabled}
-                        onSelect={handleRequestRemove}
-                        className="gap-2 text-destructive focus:bg-destructive/10 focus:text-destructive"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        {t("chat.workspaceRemove")}
-                      </DropdownMenuItem>
-                    </>
-                  ) : null}
-                  {onBrowseProjectInFileTree ? (
-                    <DropdownMenuItem
-                      disabled={isInteractionDisabled}
-                      onSelect={handleBrowseInFileTree}
-                      className="gap-2"
-                    >
-                      <FolderTree className="h-3.5 w-3.5" />
-                      {t("chat.workspaceBrowseInFileTree")}
-                    </DropdownMenuItem>
-                  ) : null}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </>
-          )}
+                    ) : null}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </>
+            )}
+          </div>
         </div>
       ) : null}
     </div>
@@ -1172,7 +1185,6 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     onRecentCollapsedChange,
     onCreateProject,
     onSelectProject,
-    onNewConversationForProject,
     onBrowseProjectInFileTree,
     onStartRenamingProject,
     onProjectRenameDraftChange,
@@ -1194,6 +1206,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     onDeleteConversation,
     onLoadMore,
     onCloseSidebar,
+    onOpenSettings,
     onOpenSkillsHub,
     onOpenMcpHub,
   } = props;
@@ -1204,7 +1217,6 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
   const [showAllProjects, setShowAllProjects] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
-  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [isMobileMenuLayout, setIsMobileMenuLayout] = useState(isMobileSidebarLayout);
   const [projectSectionHeight, setProjectSectionHeight] = useState<number | null>(null);
   const [isProjectSectionResizing, setIsProjectSectionResizing] = useState(false);
@@ -1306,11 +1318,6 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
   const handleSelectProject = useStableEvent((project: WorkspaceProject) => {
     if (!sectionsDisabled) {
       onSelectProject?.(project);
-    }
-  });
-  const handleNewConversationForProject = useStableEvent((project: WorkspaceProject) => {
-    if (!sectionsDisabled) {
-      onNewConversationForProject?.(project);
     }
   });
   const handleBrowseProjectInFileTree = useStableEvent((project: WorkspaceProject) => {
@@ -1458,13 +1465,6 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
       return current === projectId ? null : current;
     });
   });
-  const handleWorkspaceMenuOpenChange = useStableEvent((open: boolean) => {
-    if (open && sectionsDisabled) {
-      return;
-    }
-    setWorkspaceMenuOpen(open);
-  });
-
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
@@ -1799,18 +1799,18 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
       style={{ "--zone-font-scale": fontScale } as CSSProperties}
     >
       <div className="chat-history-sidebar-inner flex w-[272px] min-w-[272px] min-h-0 flex-1 flex-col">
-        <div className="shrink-0 border-b border-border/50 px-3 pb-3 pt-3">
+        <div className="shrink-0 border-b border-border/50 px-2 pb-3 pt-3">
           <div className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2.5">
+            <div className="flex min-w-0 -translate-y-0.5 items-center gap-2">
               <img
                 src="/icon-simple.png"
                 alt=""
                 aria-hidden="true"
                 draggable={false}
-                className="h-9 w-9 shrink-0 select-none rounded-2xl object-contain"
+                className="h-8 w-8 shrink-0 select-none rounded-xl object-contain"
               />
               <div className="min-w-0">
-                <div className="truncate text-sm font-semibold tracking-tight">LiveAgent</div>
+                <div className="truncate font-semibold tracking-tight">Live Agent</div>
               </div>
             </div>
 
@@ -1826,22 +1826,38 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
             </Button>
           </div>
 
-          <div className="mt-3 flex flex-col gap-1">
+          <div className="mt-3 flex flex-col gap-0.5">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={onNewConversation}
+              className={cn(
+                "chat-history-new-conversation-button h-[30px] w-full justify-start gap-3 rounded-lg px-3 text-[calc(14px*var(--zone-font-scale,1))] font-normal leading-5 shadow-none transition-colors",
+                activeView === "chat"
+                  ? "text-foreground/90 hover:bg-foreground/[0.08] hover:text-foreground active:bg-foreground/[0.1] active:text-foreground focus-visible:bg-foreground/[0.08]"
+                  : "text-foreground/80 hover:bg-foreground/[0.08] hover:text-foreground focus-visible:bg-foreground/[0.08]",
+              )}
+            >
+              <CirclePlus className="h-4 w-4 shrink-0 text-foreground/85" />
+              <span className="chat-history-new-conversation-label">
+                {t("chat.newConversation")}
+              </span>
+            </Button>
             <Button
               type="button"
               variant="ghost"
               onClick={() => onOpenSkillsHub?.()}
               className={cn(
-                "sidebar-hub-menu-item h-9 w-full justify-start gap-3 rounded-lg px-3 text-[calc(14px*var(--zone-font-scale,1))] font-normal leading-5 shadow-none transition-colors",
+                "sidebar-hub-menu-item h-[30px] w-full justify-start gap-3 rounded-lg px-3 text-[calc(14px*var(--zone-font-scale,1))] font-normal leading-5 shadow-none transition-colors",
                 activeView === "skills-hub"
                   ? "bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.08] hover:text-foreground focus-visible:bg-foreground/[0.08]"
                   : "text-foreground/80 hover:bg-foreground/[0.08] hover:text-foreground focus-visible:bg-foreground/[0.08]",
               )}
               title="Skills Hub"
             >
-              <SkillIcon
+              <Blend
                 className={cn(
-                  "h-[17px] w-[17px] shrink-0",
+                  "h-4 w-4 shrink-0",
                   activeView === "skills-hub" ? "text-amber-500" : "text-foreground/85",
                 )}
               />
@@ -1852,36 +1868,20 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
               variant="ghost"
               onClick={() => onOpenMcpHub?.()}
               className={cn(
-                "sidebar-hub-menu-item h-9 w-full justify-start gap-3 rounded-lg px-3 text-[calc(14px*var(--zone-font-scale,1))] font-normal leading-5 shadow-none transition-colors",
+                "sidebar-hub-menu-item h-[30px] w-full justify-start gap-3 rounded-lg px-3 text-[calc(14px*var(--zone-font-scale,1))] font-normal leading-5 shadow-none transition-colors",
                 activeView === "mcp-hub"
                   ? "bg-foreground/[0.06] text-foreground hover:bg-foreground/[0.08] hover:text-foreground focus-visible:bg-foreground/[0.08]"
                   : "text-foreground/80 hover:bg-foreground/[0.08] hover:text-foreground focus-visible:bg-foreground/[0.08]",
               )}
               title="MCP Hub"
             >
-              <McpLogo
+              <Cable
                 className={cn(
                   "h-4 w-4 shrink-0",
                   activeView === "mcp-hub" ? "text-violet-500" : "text-foreground/85",
                 )}
               />
               <span className="truncate">MCP</span>
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={onNewConversation}
-              className={cn(
-                "chat-history-new-conversation-button h-9 w-full justify-start gap-3 rounded-lg px-3 text-[calc(14px*var(--zone-font-scale,1))] font-normal leading-5 shadow-none transition-colors",
-                activeView === "chat"
-                  ? "text-foreground/90 hover:bg-foreground/[0.08] hover:text-foreground active:bg-foreground/[0.1] active:text-foreground focus-visible:bg-foreground/[0.08]"
-                  : "text-foreground/80 hover:bg-foreground/[0.08] hover:text-foreground focus-visible:bg-foreground/[0.08]",
-              )}
-            >
-              <SquarePen className="h-4 w-4 shrink-0 text-foreground/85" />
-              <span className="chat-history-new-conversation-label">
-                {t("chat.newConversation")}
-              </span>
             </Button>
           </div>
         </div>
@@ -1901,59 +1901,37 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
             <>
               <div
                 ref={projectsHeaderRef}
-                className="flex items-center justify-between px-3 pb-1 pt-2"
+                className="group/workspace-header flex items-center justify-between px-2 pb-1 pt-2"
               >
                 <button
                   type="button"
                   aria-expanded={!projectsCollapsed}
-                  className={cn(
-                    "flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[calc(11px*var(--zone-font-scale,1))] font-semibold uppercase tracking-[0.14em] text-muted-foreground outline-hidden",
-                    PROJECT_HEADER_BUTTON_CLASS,
-                  )}
+                  className="group flex min-w-0 items-center gap-1 rounded-md px-3 py-1 text-xs font-semibold text-muted-foreground outline-hidden"
                   onClick={handleProjectsCollapsedChange}
                   disabled={sectionsDisabled}
                 >
+                  <span>{t("chat.workspaceSection")}</span>
                   <ChevronRight
-                    className={cn(SIDEBAR_SECTION_CHEVRON_CLASS, !projectsCollapsed && "rotate-90")}
+                    aria-hidden="true"
+                    className="h-3.5 w-3.5 shrink-0 opacity-0 transition-[opacity,transform] duration-300 ease-in-out group-hover:opacity-100"
+                    style={{ transform: `rotate(${projectsCollapsed ? 0 : 90}deg)` }}
                   />
-                  {t("chat.workspaceSection")}
                 </button>
-                <DropdownMenu
-                  open={!sectionsDisabled && workspaceMenuOpen}
-                  onOpenChange={handleWorkspaceMenuOpenChange}
-                  modal={false}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    PROJECT_ICON_BUTTON_CLASS,
+                    "pointer-events-none opacity-0 transition-opacity hover:!bg-transparent group-hover/workspace-header:pointer-events-auto group-hover/workspace-header:opacity-100 focus-visible:opacity-100",
+                  )}
+                  title={t("chat.workspaceCreate")}
+                  aria-label={t("chat.workspaceCreate")}
+                  onClick={handleCreateProject}
+                  disabled={sectionsDisabled || !onCreateProject}
                 >
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className={PROJECT_ICON_BUTTON_CLASS}
-                      title={t("chat.workspaceCreate")}
-                      aria-label={t("chat.workspaceCreate")}
-                      disabled={sectionsDisabled}
-                    >
-                      <MoreHorizontal className="h-3.5 w-3.5" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    side="right"
-                    align="start"
-                    sideOffset={6}
-                    className="sidebar-context-menu"
-                  >
-                    {onCreateProject ? (
-                      <DropdownMenuItem
-                        disabled={sectionsDisabled}
-                        onSelect={handleCreateProject}
-                        className="gap-2"
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                        {t("chat.workspaceCreate")}
-                      </DropdownMenuItem>
-                    ) : null}
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
               </div>
               <div
                 aria-hidden={projectsCollapsed}
@@ -1963,7 +1941,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
                   projectsCollapsed ? "opacity-0" : "opacity-100",
                 )}
               >
-                <div ref={projectsBodyRef} className="space-y-1 px-2 pb-0.5 pr-1">
+                <div ref={projectsBodyRef} className="space-y-0.5 px-2 pb-0.5">
                   {renderedProjects.map((project) => {
                     const pathKey = workspaceProjectPathKey(project.path);
                     return (
@@ -1978,7 +1956,6 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
                         isInteractionDisabled={sectionsDisabled}
                         renameDraft={projectRenameDraft}
                         onSelectProject={handleSelectProject}
-                        onNewConversationForProject={handleNewConversationForProject}
                         onBrowseProjectInFileTree={
                           onBrowseProjectInFileTree ? handleBrowseProjectInFileTree : undefined
                         }
@@ -1997,10 +1974,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
                   {hasCappedProjects ? (
                     <button
                       type="button"
-                      className={cn(
-                        "flex w-full items-center justify-center gap-1 rounded-md px-2 py-1.5 text-[calc(11.5px*var(--zone-font-scale,1))] font-medium text-muted-foreground outline-hidden",
-                        PROJECT_HEADER_BUTTON_CLASS,
-                      )}
+                      className="flex w-full items-center justify-center gap-1 rounded-md px-2 py-1.5 text-[calc(11.5px*var(--zone-font-scale,1))] font-medium text-muted-foreground outline-hidden transition-colors hover:!bg-foreground/[0.06] hover:text-foreground active:!bg-foreground/[0.1] focus-visible:!bg-foreground/[0.08] focus-visible:ring-2 focus-visible:ring-ring"
                       onClick={handleShowAllProjects}
                       disabled={sectionsDisabled}
                     >
@@ -2049,22 +2023,23 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
           <div
             ref={recentHeaderRef}
             className={cn(
-              "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 pb-2",
+              "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-2 pb-2",
               showProjects ? "border-t border-border/35 pt-0.5" : "pt-3",
             )}
           >
             <button
               type="button"
               aria-expanded={!recentCollapsed}
-              className="flex min-w-0 items-center gap-1.5 rounded-md px-1 py-1 text-[calc(11px*var(--zone-font-scale,1))] font-semibold uppercase tracking-[0.14em] text-muted-foreground outline-hidden hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              className="group flex min-w-0 items-center gap-1 rounded-md px-3 py-1 text-xs font-semibold text-muted-foreground outline-hidden"
               onClick={handleRecentCollapsedChange}
               disabled={sectionsDisabled}
             >
-              <ChevronRight
-                className={cn(SIDEBAR_SECTION_CHEVRON_CLASS, !recentCollapsed && "rotate-90")}
-              />
-              <MessageSquareText className="h-3.5 w-3.5" />
               <span className="min-w-0 truncate">{t("chat.recentConversation")}</span>
+              <ChevronRight
+                aria-hidden="true"
+                className="h-3.5 w-3.5 shrink-0 opacity-0 transition-[opacity,transform] duration-300 ease-in-out group-hover:opacity-100"
+                style={{ transform: `rotate(${recentCollapsed ? 0 : 90}deg)` }}
+              />
             </button>
             <div className="flex items-center gap-1.5">
               {listStatus === "syncing" ? (
@@ -2080,14 +2055,16 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
                   {t("chat.history.syncing")}
                 </span>
               ) : null}
-              <div
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled
                 role={errorMessage ? "status" : undefined}
                 title={errorMessage ? `${t("chat.historyReadFailed")}: ${errorMessage}` : undefined}
                 className={cn(
-                  "flex items-center gap-1 rounded-full border px-2 py-0.5 text-[calc(11px*var(--zone-font-scale,1))] font-medium",
-                  errorMessage
-                    ? "border-destructive/40 bg-destructive/10 text-destructive"
-                    : "border-border/60 bg-background/80 text-muted-foreground",
+                  "h-6 min-w-6 gap-1 rounded-md !bg-muted px-2 py-0 text-[calc(11px*var(--zone-font-scale,1))] font-medium text-muted-foreground disabled:opacity-100",
+                  errorMessage && "text-destructive",
                 )}
               >
                 {errorMessage ? (
@@ -2097,7 +2074,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
                   />
                 ) : null}
                 {Math.max(totalItems, items.length)}
-              </div>
+              </Button>
               {canShareConversations ? (
                 <Button
                   type="button"
@@ -2135,7 +2112,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
                 header. Mutation/project errors keep their own message surface
                 and never replace or relabel the successfully loaded rows. */}
             {actionErrorMessage ? (
-              <div className="shrink-0 px-3 pb-2">
+              <div className="shrink-0 px-2 pb-2">
                 <div
                   role="alert"
                   title={actionErrorMessage}
@@ -2166,7 +2143,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
                         key={virtualRow.key}
                         data-index={virtualRow.index}
                         ref={historyVirtualizer.measureElement}
-                        className="absolute left-0 right-1 top-0 pb-1.5"
+                            className="absolute inset-x-0 top-0 pb-0.5"
                         style={{ transform: `translateY(${virtualRow.start}px)` }}
                       >
                         {renderHistoryRow(item)}
@@ -2198,6 +2175,18 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
               ) : null}
             </div>
           </div>
+        </div>
+        <div className="shrink-0 border-t border-border/50 bg-[hsl(var(--sidebar-bg))] px-2 py-1.5">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onOpenSettings}
+            className="h-8 w-full justify-start gap-2.5 rounded-lg px-2.5 text-[calc(13px*var(--zone-font-scale,1))] font-normal text-foreground/85 shadow-none hover:bg-foreground/[0.08] hover:text-foreground"
+            title={t("tooltip.settings")}
+          >
+            <Settings className="h-4 w-4 shrink-0 text-foreground/75" />
+            <span className="truncate">{t("tooltip.settings")}</span>
+          </Button>
         </div>
       </div>
     </aside>

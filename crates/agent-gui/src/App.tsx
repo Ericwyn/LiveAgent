@@ -6,7 +6,7 @@ import { CronPromptRunner } from "./components/cron/CronPromptRunner";
 import { MemoryOrganizerHost } from "./components/memory/useMemoryOrganizer";
 import { WindowsTitleBar } from "./components/WindowsTitleBar";
 import { LocaleContext, t as translate } from "./i18n";
-import { type AppUpdateController, useAppUpdateController } from "./lib/appUpdates";
+import { useAppUpdateController } from "./lib/appUpdates";
 import { initAutomation } from "./lib/automation";
 import {
   type AppSettings,
@@ -46,7 +46,7 @@ function asErrorMessage(error: unknown, fallback: string) {
 
 const GATEWAY_SETTINGS_SYNC_EVENT = "gateway:settings-sync";
 
-function AppChrome(props: { children: ReactNode; appUpdate?: AppUpdateController }) {
+function AppChrome(props: { children: ReactNode }) {
   return (
     <div
       className="relative flex h-full w-full flex-col overflow-hidden bg-background"
@@ -54,7 +54,7 @@ function AppChrome(props: { children: ReactNode; appUpdate?: AppUpdateController
         event.preventDefault();
       }}
     >
-      <WindowsTitleBar appUpdate={props.appUpdate} />
+      <WindowsTitleBar />
       <div className="relative min-h-0 flex-1 overflow-hidden bg-background">{props.children}</div>
     </div>
   );
@@ -387,7 +387,7 @@ export default function App() {
   if (!settingsReady) {
     return (
       <LocaleContext.Provider value={localeContextValue}>
-        <AppChrome appUpdate={appUpdate}>
+        <AppChrome>
           <div className="flex h-full w-full items-center justify-center bg-background text-sm text-muted-foreground">
             {translate("chat.loading", settings.locale)}
           </div>
@@ -401,7 +401,7 @@ export default function App() {
 
   return (
     <LocaleContext.Provider value={localeContextValue}>
-      <AppChrome appUpdate={appUpdate}>
+      <AppChrome>
         <CronPromptRunner settings={settings} />
         <MemoryOrganizerHost settings={settings} setSettings={setSettings} />
         <AppErrorBoundary>

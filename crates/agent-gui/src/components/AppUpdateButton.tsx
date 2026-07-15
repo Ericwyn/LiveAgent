@@ -7,6 +7,8 @@ import { Button } from "./ui/button";
 type AppUpdateButtonProps = {
   appUpdate: AppUpdateController;
   className?: string;
+  iconOnly?: boolean;
+  iconClassName?: string;
 };
 
 function interpolate(template: string, values: Record<string, string>) {
@@ -16,7 +18,12 @@ function interpolate(template: string, values: Record<string, string>) {
   );
 }
 
-export function AppUpdateButton({ appUpdate, className }: AppUpdateButtonProps) {
+export function AppUpdateButton({
+  appUpdate,
+  className,
+  iconOnly = false,
+  iconClassName,
+}: AppUpdateButtonProps) {
   const { t } = useLocale();
   if (!appUpdate.showUpdateButton) {
     return null;
@@ -46,11 +53,13 @@ export function AppUpdateButton({ appUpdate, className }: AppUpdateButtonProps) 
       onClick={() => void appUpdate.installAndRestart().catch(() => undefined)}
     >
       {busy ? (
-        <Loader2 className="h-[13px] w-[13px] animate-spin" />
+        <Loader2
+          className={cn(iconOnly ? "h-4 w-4" : "h-[13px] w-[13px]", iconClassName, "animate-spin")}
+        />
       ) : (
-        <Download className="h-[13px] w-[13px]" />
+        <Download className={cn(iconOnly ? "h-4 w-4" : "h-[13px] w-[13px]", iconClassName)} />
       )}
-      {t("appUpdate.update")}
+      {iconOnly ? null : t("appUpdate.update")}
     </Button>
   );
 }
