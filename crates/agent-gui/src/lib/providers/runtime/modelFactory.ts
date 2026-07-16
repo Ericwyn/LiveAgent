@@ -28,6 +28,93 @@ function resolveKnownModel(
   return known?.api ? ({ ...known, baseUrl } as Model<any>) : undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Anthropic 目录回查与自定义模型思考能力推断
+// ---------------------------------------------------------------------------
+
+// 中转/网关常给官方 Anthropic 模型 id 加装饰（日期后缀、@版本、大小写变化），逐字
+// 匹配会漏检；漏检后模型丢失 compat.forceAdaptiveThinking，思考配置退化成 4.7+/
+// Fable 世代已删除的 budget_tokens（官方端点 400、中转剥字段后档位彻底失效）。
+// 先精确查，再按规范化候选回查目录；命中则继承完整目录元数据，但保留用户配置的
+// 原始 id——请求体里的 model 字段必须是端点认识的字符串。
+function normalizeAnthropicModelIdCandidates(modelId: string): string[] {
+  const candidates: string[] = [];
+  const push = (value: string) => {
+    if (value && !candidates.includes(value)) candidates.push(value);
+  };
+  push(modelId);
+  const lower = modelId.toLowerCase();
+  push(lower);
+  const withoutAtVersion = lower.split("@")[0];
+  push(withoutAtVersion);
+  push(withoutAtVersion.replace(/-20\d{6}$/, ""));
+  return candidates;
+}
+
+function resolveKnownAnthropicModel(modelId: string, baseUrl: string): Model<any> | undefined {
+  for (const candidate of normalizeAnthropicModelIdCandidates(modelId)) {
+    const known = resolveKnownModel("anthropic", candidate, baseUrl);
+    if (known) {
+      return { ...known, id: modelId, name: modelId } as Model<any>;
+    }
+  }
+  return undefined;
+}
+
+function isAnthropicMythosPreview(normalizedModelId: string) {
+  return normalizedModelId.includes("mythos-preview");
+}
+
+function isClaudeFamilyVersionAtLeast(
+  normalizedModelId: string,
+  family: "opus" | "sonnet",
+  minimumMinor: number,
+) {
+  // minor 限定 1-2 位数字，避免把日期后缀（如 claude-sonnet-4-20250514）误读成小版本号；
+  // 同时接受三方中转的倒序命名（claude-4.6-sonnet）。
+  const match = normalizedModelId.match(
+    new RegExp(`(?:${family}[-.]4[-.](\\d{1,2})(?!\\d)|4[-.](\\d{1,2})(?!\\d)[-.]${family})`),
+  );
+  if (!match) return false;
+  const minor = Number(match[1] ?? match[2]);
+  return Number.isFinite(minor) && minor >= minimumMinor;
+}
+
+// Claude 5 起（sonnet-5 / fable-5 / mythos-5 等）整个家族都是 adaptive thinking 且支持 xhigh。
+// 倒序写法（claude-5-sonnet）用负向后行断言排除 3-5-sonnet 这类旧世代小版本号。
+function isClaudeFamilyMajorVersionAtLeast(normalizedModelId: string, minimumMajor: number) {
+  const match = normalizedModelId.match(
+    /(?:(?:opus|sonnet|haiku|fable|mythos)[-.](\d{1,2})(?!\d)|(?<!\d[-.])(\d{1,2})[-.](?:opus|sonnet|haiku|fable|mythos))/,
+  );
+  if (!match) return false;
+  const major = Number(match[1] ?? match[2]);
+  return Number.isFinite(major) && major >= minimumMajor;
+}
+
+// 目录彻底未命中的三方改名 id（如 claude-4.6-sonnet）退回 ee8dba1 之前的 id 启发式：
+// 能识别为 adaptive 家族的补上 compat.forceAdaptiveThinking 与 xhigh/max 档位声明，
+// pi-ai stream() 与本地 thinkingLevels.ts 都以模型对象上的这两个字段为准。
+export function deriveAnthropicThinkingOverridesForCustomModel(modelId: string): {
+  compat?: Model<"anthropic-messages">["compat"];
+  thinkingLevelMap?: Model<"anthropic-messages">["thinkingLevelMap"];
+} {
+  const id = modelId.trim().toLowerCase();
+  const adaptive =
+    isAnthropicMythosPreview(id) ||
+    isClaudeFamilyVersionAtLeast(id, "opus", 6) ||
+    isClaudeFamilyVersionAtLeast(id, "sonnet", 6) ||
+    isClaudeFamilyMajorVersionAtLeast(id, 5);
+  if (!adaptive) return {};
+
+  // xhigh：Opus 4.7+ 与 Claude 5 家族；Mythos Preview / Opus 4.6 / Sonnet 4.6 只到 max。
+  const supportsXHigh =
+    isClaudeFamilyVersionAtLeast(id, "opus", 7) || isClaudeFamilyMajorVersionAtLeast(id, 5);
+  return {
+    compat: { forceAdaptiveThinking: true },
+    thinkingLevelMap: supportsXHigh ? { xhigh: "xhigh", max: "max" } : { max: "max" },
+  };
+}
+
 function maybeAppendGeminiApiVersion(baseUrl: string) {
   try {
     const url = new URL(baseUrl);
@@ -325,7 +412,7 @@ export function createModelFromConfig(
     return custom;
   }
 
-  const known = resolveKnownModel("anthropic", modelId, baseUrl);
+  const known = resolveKnownAnthropicModel(modelId, baseUrl);
   if (known) {
     return applyDeepSeekModelDefaults(
       {
@@ -342,6 +429,7 @@ export function createModelFromConfig(
     );
   }
 
+  const thinkingOverrides = deriveAnthropicThinkingOverridesForCustomModel(modelId);
   const custom: Model<"anthropic-messages"> = {
     id: modelId,
     name: modelId,
@@ -353,6 +441,10 @@ export function createModelFromConfig(
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow,
     maxTokens,
+    ...(thinkingOverrides.compat ? { compat: thinkingOverrides.compat } : {}),
+    ...(thinkingOverrides.thinkingLevelMap
+      ? { thinkingLevelMap: thinkingOverrides.thinkingLevelMap }
+      : {}),
   };
   return applyDeepSeekModelDefaults(custom, {
     providerId,

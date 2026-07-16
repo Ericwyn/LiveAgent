@@ -927,6 +927,81 @@ function findKnownModel(providerId: ProviderId, modelId: string | undefined) {
   return getBuiltinModels(toKnownProvider(providerId)).find((model) => model.id === trimmedId);
 }
 
+// —— 以下 Anthropic id 规范化与启发式与桌面端 modelFactory.ts 手动保持同步 ——
+// 中转/网关常给官方 Anthropic 模型 id 加装饰（日期后缀、@版本、大小写变化），
+// 逐字匹配漏检后档位列表会塌缩、丢掉 xhigh/max，与桌面端实际发送的档位脱节。
+function normalizeAnthropicModelIdCandidates(modelId: string): string[] {
+  const candidates: string[] = [];
+  const push = (value: string) => {
+    if (value && !candidates.includes(value)) candidates.push(value);
+  };
+  push(modelId);
+  const lower = modelId.toLowerCase();
+  push(lower);
+  const withoutAtVersion = lower.split("@")[0];
+  push(withoutAtVersion);
+  push(withoutAtVersion.replace(/-20\d{6}$/, ""));
+  return candidates;
+}
+
+function findKnownAnthropicModel(modelId: string) {
+  const models = getBuiltinModels("anthropic");
+  for (const candidate of normalizeAnthropicModelIdCandidates(modelId)) {
+    const known = models.find((model) => model.id === candidate);
+    if (known) return known;
+  }
+  return undefined;
+}
+
+function findKnownModelForThinking(providerId: ProviderId, modelId: string) {
+  return toKnownProvider(providerId) === "anthropic"
+    ? findKnownAnthropicModel(modelId)
+    : findKnownModel(providerId, modelId);
+}
+
+function isClaudeFamilyVersionAtLeast(
+  normalizedModelId: string,
+  family: "opus" | "sonnet",
+  minimumMinor: number,
+) {
+  // minor 限定 1-2 位数字，避免把日期后缀（如 claude-sonnet-4-20250514）误读成小版本号；
+  // 同时接受三方中转的倒序命名（claude-4.6-sonnet）。
+  const match = normalizedModelId.match(
+    new RegExp(`(?:${family}[-.]4[-.](\\d{1,2})(?!\\d)|4[-.](\\d{1,2})(?!\\d)[-.]${family})`),
+  );
+  if (!match) return false;
+  const minor = Number(match[1] ?? match[2]);
+  return Number.isFinite(minor) && minor >= minimumMinor;
+}
+
+// Claude 5 起（sonnet-5 / fable-5 / mythos-5 等）整个家族都是 adaptive thinking 且支持 xhigh。
+// 倒序写法（claude-5-sonnet）用负向后行断言排除 3-5-sonnet 这类旧世代小版本号。
+function isClaudeFamilyMajorVersionAtLeast(normalizedModelId: string, minimumMajor: number) {
+  const match = normalizedModelId.match(
+    /(?:(?:opus|sonnet|haiku|fable|mythos)[-.](\d{1,2})(?!\d)|(?<!\d[-.])(\d{1,2})[-.](?:opus|sonnet|haiku|fable|mythos))/,
+  );
+  if (!match) return false;
+  const major = Number(match[1] ?? match[2]);
+  return Number.isFinite(major) && major >= minimumMajor;
+}
+
+// 目录彻底未命中的三方改名 id（如 claude-4.6-sonnet）退回 id 启发式，推断
+// xhigh/max 档位声明；与桌面端 deriveAnthropicThinkingOverridesForCustomModel 同步。
+function deriveAnthropicThinkingLevelMapForCustomModel(
+  modelId: string,
+): Record<string, string> | undefined {
+  const id = modelId.trim().toLowerCase();
+  const adaptive =
+    id.includes("mythos-preview") ||
+    isClaudeFamilyVersionAtLeast(id, "opus", 6) ||
+    isClaudeFamilyVersionAtLeast(id, "sonnet", 6) ||
+    isClaudeFamilyMajorVersionAtLeast(id, 5);
+  if (!adaptive) return undefined;
+  const supportsXHigh =
+    isClaudeFamilyVersionAtLeast(id, "opus", 7) || isClaudeFamilyMajorVersionAtLeast(id, 5);
+  return supportsXHigh ? { xhigh: "xhigh", max: "max" } : { max: "max" };
+}
+
 function getKnownModelLimits(
   providerId: ProviderId,
   modelId: string | undefined,
@@ -942,17 +1017,22 @@ export function getKnownModelThinkingLevels(
 ): ReasoningLevel[] {
   const trimmedId = modelId?.trim();
   if (!trimmedId) return [];
-  const known = findKnownModel(providerId, trimmedId);
+  const known = findKnownModelForThinking(providerId, trimmedId);
   // 目录之外的自定义模型（deepseek/glm 等三方聚合）无法从 id 判断推理能力，
   // 与桌面端 modelFactory 自定义分支一致按可推理处理：标准档位，xhigh/max
-  // 仍需目录 opt-in；deepseek 走 codex 时镜像桌面端 DeepSeek 适配层的 xhigh 档。
+  // 仍需目录 opt-in；deepseek 走 codex 时镜像桌面端 DeepSeek 适配层的 xhigh 档，
+  // claude_code 走桌面端同款 id 启发式补 xhigh/max。
+  const customThinkingLevelMap =
+    providerId === "codex" && trimmedId.toLowerCase().includes("deepseek")
+      ? { xhigh: "max" }
+      : toKnownProvider(providerId) === "anthropic"
+        ? deriveAnthropicThinkingLevelMapForCustomModel(trimmedId)
+        : undefined;
   const model =
     known ??
     ({
       reasoning: true,
-      ...(providerId === "codex" && trimmedId.toLowerCase().includes("deepseek")
-        ? { thinkingLevelMap: { xhigh: "max" } }
-        : {}),
+      ...(customThinkingLevelMap ? { thinkingLevelMap: customThinkingLevelMap } : {}),
     } as Parameters<typeof getSupportedThinkingLevels>[0]);
   return getSupportedThinkingLevels(model).filter((level) => level !== "off");
 }
@@ -961,7 +1041,9 @@ export function isThinkingAlwaysOnForModel(
   providerId: ProviderId,
   modelId: string | undefined,
 ): boolean {
-  const known = findKnownModel(providerId, modelId);
+  const trimmedId = modelId?.trim();
+  if (!trimmedId) return false;
+  const known = findKnownModelForThinking(providerId, trimmedId);
   return known ? !getSupportedThinkingLevels(known).includes("off") : false;
 }
 

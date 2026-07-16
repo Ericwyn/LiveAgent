@@ -205,6 +205,47 @@ test("web chat runtime controls default and follow model-aware reasoning support
   assert.equal(settings.isThinkingAlwaysOnForModel("claude_code", "claude-opus-4-8"), false);
   assert.equal(settings.isThinkingAlwaysOnForModel("claude_code", undefined), false);
 
+  // 中转装饰过的 Anthropic id（日期后缀/大小写/@版本）按规范化后的目录条目解析，
+  // xhigh/max 档位与"思考不可关"语义不丢失；与桌面端 modelFactory 同步。
+  assert.deepEqual(
+    settings.getChatRuntimeReasoningLevelsForProvider({
+      providerId: "claude_code",
+      modelId: "claude-opus-4-8-20260213",
+    }),
+    ["minimal", "low", "medium", "high", "xhigh", "max"],
+  );
+  assert.deepEqual(
+    settings.getChatRuntimeReasoningLevelsForProvider({
+      providerId: "claude_code",
+      modelId: "claude-sonnet-4-6-20251114",
+    }),
+    ["minimal", "low", "medium", "high", "max"],
+  );
+  assert.equal(settings.isThinkingAlwaysOnForModel("claude_code", "Claude-Fable-5"), true);
+  // 目录彻底未命中的三方改名 id 走 id 启发式补 xhigh/max。
+  assert.deepEqual(
+    settings.getChatRuntimeReasoningLevelsForProvider({
+      providerId: "claude_code",
+      modelId: "claude-4.6-sonnet",
+    }),
+    ["minimal", "low", "medium", "high", "max"],
+  );
+  assert.deepEqual(
+    settings.getChatRuntimeReasoningLevelsForProvider({
+      providerId: "claude_code",
+      modelId: "claude-5-sonnet",
+    }),
+    ["minimal", "low", "medium", "high", "xhigh", "max"],
+  );
+  // 旧世代 id 不误判。
+  assert.deepEqual(
+    settings.getChatRuntimeReasoningLevelsForProvider({
+      providerId: "claude_code",
+      modelId: "claude-3-5-sonnet-20241022",
+    }),
+    ["minimal", "low", "medium", "high"],
+  );
+
   assert.deepEqual(
     settings.normalizeChatRuntimeControlsForProvider(
       {
