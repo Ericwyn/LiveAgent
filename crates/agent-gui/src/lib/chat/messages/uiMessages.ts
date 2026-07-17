@@ -1159,7 +1159,10 @@ function buildUiRoundBlocks(
   return blocks;
 }
 
-export function buildUiMessages(messages: Message[]): UiMessage[] {
+// `indexOffset` lets callers build UI messages for a suffix of a larger list
+// (incremental timeline appends) while keeping keys and messageIndex values
+// identical to a full build: pass `messages.slice(offset)` plus the offset.
+export function buildUiMessages(messages: Message[], indexOffset = 0): UiMessage[] {
   const out: UiMessage[] = [];
   let i = 0;
 
@@ -1168,11 +1171,11 @@ export function buildUiMessages(messages: Message[]): UiMessage[] {
 
     if (message.role === "user") {
       out.push({
-        key: `user-${i}-${message.timestamp}`,
+        key: `user-${indexOffset + i}-${message.timestamp}`,
         role: "user",
         text: getMessageText(message),
         attachments: getUserMessageAttachments(message as Message & Record<string, unknown>),
-        messageIndex: i,
+        messageIndex: indexOffset + i,
       });
       i += 1;
       continue;
@@ -1228,7 +1231,7 @@ export function buildUiMessages(messages: Message[]): UiMessage[] {
     if (rounds.length > 0) {
       const lastText = getRoundText(rounds[rounds.length - 1]);
       out.push({
-        key: `assistant-${groupStartIndex}-${i}-${lastAssistantTimestamp}`,
+        key: `assistant-${indexOffset + groupStartIndex}-${indexOffset + i}-${lastAssistantTimestamp}`,
         role: "assistant",
         text: lastText,
         rounds,
