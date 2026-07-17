@@ -18,6 +18,7 @@ import {
   toolResultMessageToText,
 } from "../../../../lib/chat/messages/uiMessages";
 import { cn } from "../../../../lib/shared/utils";
+import { isSubagentCardToolCall } from "../../../../lib/subagents/card";
 import {
   areStableValuesEqual,
   displayString,
@@ -25,7 +26,6 @@ import {
   getSubagentInlineSummary,
   getToolDisplayTitle,
   getToolMeta,
-  isSubagentCardToolCall,
   type MetaTag,
 } from "./assistantBubbleUtils";
 import { FileToolArgsDisplay } from "./FileToolArgs";

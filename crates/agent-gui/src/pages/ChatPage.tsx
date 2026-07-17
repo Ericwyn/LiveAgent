@@ -42,7 +42,10 @@ import type { AppUpdateController } from "../lib/appUpdates";
 import { getAutomationState } from "../lib/automation";
 import { createHookRunScope } from "../lib/automation/hookRunner";
 import type { CompactionStatus } from "../lib/chat/compaction/types";
-import { buildPersistableMessagesFromSnapshot } from "../lib/chat/conversation/chatAbort";
+import {
+  buildPersistableMessagesFromSnapshot,
+  type SuppressedToolTraceSnapshot,
+} from "../lib/chat/conversation/chatAbort";
 import {
   appendMessagesToConversation,
   buildRequestContext,
@@ -4390,6 +4393,13 @@ export function ChatPage(props: ChatPageProps) {
     });
 
     let abortedConversationCommitted = false;
+    let persistableAgentProgress: {
+      completedThroughRound: number;
+      suppressedToolTrace: SuppressedToolTraceSnapshot[];
+    } = {
+      completedThroughRound: 0,
+      suppressedToolTrace: [],
+    };
     const commitVisibleAbortedConversation = () => {
       if (abortedConversationCommitted) return true;
 
@@ -4399,6 +4409,8 @@ export function ChatPage(props: ChatPageProps) {
         model: runtimeModel,
         draftAssistantText: snapshot.draftAssistantText,
         liveRounds: snapshot.liveRounds,
+        completedThroughRound: persistableAgentProgress.completedThroughRound,
+        suppressedToolTrace: persistableAgentProgress.suppressedToolTrace,
       });
 
       if (partialMessages.length === 0) return false;
@@ -4432,6 +4444,8 @@ export function ChatPage(props: ChatPageProps) {
         model: runtimeModel,
         draftAssistantText: snapshot.draftAssistantText,
         liveRounds: snapshot.liveRounds,
+        completedThroughRound: persistableAgentProgress.completedThroughRound,
+        suppressedToolTrace: persistableAgentProgress.suppressedToolTrace,
       });
       const errorAssistant = buildErrorAssistantMessage({
         model: runtimeModel,
@@ -4549,6 +4563,9 @@ export function ChatPage(props: ChatPageProps) {
             resetLiveTranscript,
             batchLiveRoundsUpdate,
             updateToolStatus,
+            updatePersistableAgentProgress: (progress) => {
+              persistableAgentProgress = progress;
+            },
             commitVisibleAbortedConversation,
             updateConversationRuntimeEntry,
             persistConversationWithHistorySync,

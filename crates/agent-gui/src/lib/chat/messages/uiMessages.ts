@@ -7,9 +7,9 @@ import type {
 } from "@earendil-works/pi-ai";
 import { assistantMessageToText } from "../../providers/llm";
 import { isProviderNativeWebSearchToolName } from "../../providers/nativeWebSearch";
+import { isSubagentCardToolCall } from "../../subagents/card";
 import {
   buildSubagentCardToolCallId,
-  isSubagentCardArguments,
   type SubagentBatchDetails,
   type SubagentCardDetails,
 } from "../../subagents/protocol";
@@ -655,10 +655,6 @@ function rebalanceHostedSearchTextBoundaries(blocks: UiRoundContentBlock[]): UiR
     out.push(current);
   }
   return out;
-}
-
-function isSubagentCardToolCall(toolCall: ToolCall) {
-  return toolCall.name === "Agent" && isSubagentCardArguments(toolCall.arguments);
 }
 
 function isParentAgentToolCall(toolCall: ToolCall) {
