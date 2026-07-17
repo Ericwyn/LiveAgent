@@ -502,22 +502,9 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
       </section>
 
       <section className="space-y-3 rounded-2xl border border-border/60 bg-card p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-            <ScanText className="h-4 w-4 text-muted-foreground" />
-            {t("settings.fontSize")}
-          </div>
-          <button
-            type="button"
-            onClick={() =>
-              setSettings((prev) =>
-                updateCustomSettings(prev, { fontScale: { sidebar: 1, chat: 1, rightDock: 1 } }),
-              )
-            }
-            className="shrink-0 rounded-lg border border-border/60 bg-background/80 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-muted/35 hover:text-foreground"
-          >
-            {t("settings.fontSizeReset")}
-          </button>
+        <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <ScanText className="h-4 w-4 text-muted-foreground" />
+          {t("settings.fontSize")}
         </div>
 
         <div className="space-y-2">
