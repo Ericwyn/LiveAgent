@@ -95,6 +95,7 @@ import {
   type WorkspaceProject,
   workspaceProjectPathKey,
 } from "@/lib/settings";
+import { createUuid } from "@/lib/shared/id";
 import { mergeAlwaysEnabledSkillNames } from "@/lib/skills";
 import { terminalSessionBelongsToProject } from "@/lib/terminal/sessionStore";
 import type { TerminalSession } from "@/lib/terminal/types";
@@ -110,7 +111,7 @@ import { SkillsHubPage } from "@/pages/skills-hub/SkillsHubPage";
 
 const LOCAL_DRAFT_PREFIX = "__local_draft__:";
 function createLocalDraftConversationId() {
-  return `${LOCAL_DRAFT_PREFIX}${crypto.randomUUID()}`;
+  return `${LOCAL_DRAFT_PREFIX}${createUuid()}`;
 }
 function isLocalDraftConversationId(id: string) {
   return id.trim().startsWith(LOCAL_DRAFT_PREFIX);
@@ -1867,7 +1868,7 @@ export default function GatewayApp() {
     }
     clearCachedComposerDraft(activeConversationId);
 
-    const clientRequestId = options?.clientRequestId?.trim() || crypto.randomUUID();
+    const clientRequestId = options?.clientRequestId?.trim() || createUuid();
     const startedAt = Date.now();
     const persistedConversationWorkdir = sidebarStore.peek(activeConversationId)?.cwd?.trim() || "";
     const runtimeConversationWorkdir =
@@ -2084,7 +2085,7 @@ export default function GatewayApp() {
           ),
           systemSettings: buildGatewaySystemSettings(settings, workdirForTurn),
           uploadedFiles: materialized.uploadedFiles,
-          clientRequestId: crypto.randomUUID(),
+          clientRequestId: createUuid(),
           runtimeControls: chatRuntimeControlsForCurrentProvider,
           queuePolicy,
         });

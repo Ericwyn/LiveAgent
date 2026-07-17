@@ -5,6 +5,7 @@ import {
   normalizeConversationState,
 } from "../chat/conversation/conversationState";
 import { persistConversationState } from "../chat/history/chatHistory";
+import { createUuid } from "../shared/id";
 
 // Dev-only transcript stress fixture: builds a large conversation with the
 // content shapes that dominate real rendering cost (long prose, big code
@@ -209,7 +210,7 @@ export type SeedLongConversationOptions = {
 
 export async function seedLongConversation(options: SeedLongConversationOptions = {}) {
   const turns = Math.max(1, options.turns ?? 240);
-  const conversationId = crypto.randomUUID();
+  const conversationId = createUuid();
   const startedAt = Date.now() - turns * 60_000;
 
   let state = normalizeConversationState({ meta: {}, segments: [] });

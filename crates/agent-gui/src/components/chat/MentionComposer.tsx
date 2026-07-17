@@ -27,6 +27,7 @@ import {
   formatFileMentionToken,
   formatMarkdownReferenceDestination,
 } from "../../lib/chat/messages/mentionReferences";
+import { createUuid } from "../../lib/shared/id";
 import { cn } from "../../lib/shared/utils";
 import { invokeFs } from "../../lib/tools/fsBackend";
 import { Blend, ClipboardPaste, Copy, ScanText, Scissors, SKILL_ICON_SVG_MARKUP } from "../icons";
@@ -2143,7 +2144,7 @@ export const MentionComposer = memo(
       const index = largePasteCounterRef.current + 1;
       largePasteCounterRef.current = index;
       return {
-        id: `large-paste-${Date.now()}-${crypto.randomUUID()}`,
+        id: `large-paste-${Date.now()}-${createUuid()}`,
         label: `Pasted text ${index}`,
         text,
         charCount: text.length,

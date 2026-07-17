@@ -1,6 +1,7 @@
 import type { AssistantMessage, Context, Message } from "@earendil-works/pi-ai";
 
 import { assistantMessageToText } from "../../providers/llm";
+import { createUuid } from "../../shared/id";
 import {
   type FileLedger,
   formatFileLedgerBlock,
@@ -144,7 +145,7 @@ export type ConversationViewState = {
 function createEmptySegment(index: number, timestamp = Date.now()): StoredContextSegment {
   return {
     segmentIndex: index,
-    segmentId: crypto.randomUUID(),
+    segmentId: createUuid(),
     messages: [],
     messageCount: 0,
     createdAt: timestamp,
@@ -548,7 +549,7 @@ function normalizeSegment(
 
   return {
     segmentIndex,
-    segmentId: segment.segmentId || crypto.randomUUID(),
+    segmentId: segment.segmentId || createUuid(),
     summary: segment.summary,
     messages,
     messageCount,

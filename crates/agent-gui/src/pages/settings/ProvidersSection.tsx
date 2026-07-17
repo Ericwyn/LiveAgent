@@ -54,6 +54,7 @@ import {
   updateCustomProviders,
   updateCustomSettings,
 } from "../../lib/settings";
+import { createUuid } from "../../lib/shared/id";
 import { cn } from "../../lib/shared/utils";
 import {
   type CherryProviderImportItem,
@@ -1852,7 +1853,7 @@ export function ProvidersSection(props: SettingsSectionProps) {
       }
 
       const newProvider: CustomProvider = {
-        id: crypto.randomUUID(),
+        id: createUuid(),
         ...data,
       };
       return updateCustomProviders(prev, [...prev.customProviders, newProvider]);

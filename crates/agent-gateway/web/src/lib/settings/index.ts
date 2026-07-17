@@ -2,6 +2,7 @@ import type { KnownProvider, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { DEFAULT_LOCALE, type Locale, normalizeLocale } from "../../i18n/config";
+import { createUuid } from "../shared/id";
 import { mergeAlwaysEnabledSkillNames } from "../skills/builtin";
 import { SYSTEM_TOOL_OPTIONS, type SystemToolId } from "../tools/systemToolOptions";
 import { normalizeApiKey, normalizeBaseUrl, normalizeModels } from "./normalize";
@@ -497,7 +498,7 @@ function normalizeWorkspaceProject(input: unknown): WorkspaceProject | null {
   const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const path = normalizeWorkspaceProjectPath(obj.path);
   if (!path) return null;
-  const id = typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : crypto.randomUUID();
+  const id = typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : createUuid();
   const name =
     typeof obj.name === "string" && obj.name.trim()
       ? obj.name.trim()
@@ -549,7 +550,7 @@ function normalizeWorkspaceProjects(input: unknown): WorkspaceProject[] {
     seenPaths.add(pathKey);
     let id = project.id;
     if (seenIds.has(id)) {
-      id = crypto.randomUUID();
+      id = createUuid();
     }
     seenIds.add(id);
     out.push({ ...project, id });
@@ -635,7 +636,7 @@ export function resolveWorkspaceProjects(
     seenPaths.add(pathKey);
     let id = project.id;
     if (!id || id === DEFAULT_WORKSPACE_PROJECT_ID || seenIds.has(id)) {
-      id = crypto.randomUUID();
+      id = createUuid();
     }
     seenIds.add(id);
     projects.push({
@@ -1298,7 +1299,7 @@ export function normalizeCustomProvider(input: unknown): CustomProvider {
   const models = normalizeProviderModelConfigs(obj.models, type);
   const validModelIds = new Set(models.map((model) => model.id));
   const apiKey = normalizeApiKey(typeof obj.apiKey === "string" ? obj.apiKey : "");
-  const id = typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : crypto.randomUUID();
+  const id = typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : createUuid();
 
   return {
     id,
@@ -1324,7 +1325,7 @@ export function normalizeAgentPromptTemplate(input: unknown): AgentPromptTemplat
   const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
 
   return {
-    id: typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : crypto.randomUUID(),
+    id: typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : createUuid(),
     name: typeof obj.name === "string" && obj.name.trim() ? obj.name.trim() : "未命名模板",
     description: normalizeOptionalText(obj.description),
     prompt: normalizeOptionalText(obj.prompt),
@@ -1396,7 +1397,7 @@ export function normalizeSshHostConfig(input: unknown): SshHostConfig {
     (privateKeyPassphrase.length > 0 || obj.privateKeyPassphraseConfigured === true);
 
   return {
-    id: typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : crypto.randomUUID(),
+    id: typeof obj.id === "string" && obj.id.trim() ? obj.id.trim() : createUuid(),
     name,
     description: normalizeOptionalText(obj.description),
     host,
@@ -1424,7 +1425,7 @@ export function normalizeSshSettings(input: unknown): SshSettings {
       seenIds.add(normalized.id);
       return normalized;
     }
-    const id = crypto.randomUUID();
+    const id = createUuid();
     seenIds.add(id);
     return { ...normalized, id };
   });

@@ -38,6 +38,7 @@ import {
   updateCustomProviders,
   updateCustomSettings,
 } from "../../lib/settings";
+import { createUuid } from "../../lib/shared/id";
 import { useModalMotion } from "../../lib/shared/modalMotion";
 import {
   createDraftModelConfig,
@@ -874,7 +875,7 @@ export function ProvidersSection(props: SettingsSectionProps) {
       }
 
       const newProvider: CustomProvider = {
-        id: crypto.randomUUID(),
+        id: createUuid(),
         ...data,
       };
       return updateCustomProviders(prev, [...prev.customProviders, newProvider]);
