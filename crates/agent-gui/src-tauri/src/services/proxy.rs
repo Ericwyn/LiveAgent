@@ -365,7 +365,7 @@ async fn handle_proxy(
             Err(error) => {
                 return error_response(
                     StatusCode::BAD_GATEWAY,
-                    &format!("System proxy unavailable: {error}"),
+                    &format!("App proxy unavailable: {error}"),
                     &headers,
                 );
             }

@@ -32,7 +32,7 @@ pub async fn fetch_provider_models(
     // fail fast，绝不静默降级；未勾选一律直连（忽略环境代理）。
     let client = if use_system_proxy {
         crate::services::system_proxy::cached_client()
-            .map_err(|error| format!("System proxy unavailable: {error}"))?
+            .map_err(|error| format!("App proxy unavailable: {error}"))?
     } else {
         direct_client()?
     };

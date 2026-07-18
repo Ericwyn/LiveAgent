@@ -995,12 +995,13 @@ export const translations: Record<Locale, Record<string, string>> = {
     /* ── Settings System ── */
     "settings.appearance": "外观主题",
     "settings.appearanceDesc": "选择应用的颜色主题，偏好会自动保存。",
-    "settings.systemProxy": "系统代理",
-    "settings.systemProxyEnable": "启用系统代理",
+    "settings.systemProxy": "应用代理",
+    "settings.systemProxyEnable": "启用应用代理",
     "settings.systemProxyDesc":
-      "生效范围：桌面端本地命令环境变量（Bash / 后台任务 / 自动化脚本）、勾选“应用系统代理”的供应商请求、更新检查与技能下载。",
+      "生效范围：桌面端本地命令环境变量（Bash / 后台任务 / 自动化脚本）、勾选“使用应用代理”的供应商请求、更新检查与技能下载。",
     "settings.systemProxyInvalid":
       "代理已启用，请填写有效的代理地址和端口；配置有效前相关请求将直接报错。",
+    "settings.systemProxyEnableHint": "请先填写有效的代理地址和端口后再启用代理。",
     "settings.systemProxyType": "代理类型",
     "settings.systemProxyHost": "代理地址",
     "settings.systemProxyPort": "端口",
@@ -1008,9 +1009,9 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.systemProxyPassword": "密码（可选）",
     "settings.systemProxyPasswordConfigured": "代理密码已保存",
     "settings.systemProxyPasswordClear": "清除",
-    "settings.providerUseSystemProxy": "应用系统代理",
+    "settings.providerUseSystemProxy": "使用应用代理",
     "settings.providerUseSystemProxyDesc":
-      "该供应商的模型请求经系统设置中配置的系统代理出网；系统代理未启用时保持直连。",
+      "该供应商的模型请求经应用代理出网；应用代理未启用时保持直连。",
     "settings.light": "浅色",
     "settings.lightDesc": "明亮清爽的浅色界面",
     "settings.dark": "深色",
@@ -2780,12 +2781,14 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.appearance": "Appearance",
     "settings.appearanceDesc":
       "Choose the color theme for the application. Your preference will be saved automatically.",
-    "settings.systemProxy": "System Proxy",
-    "settings.systemProxyEnable": "Enable system proxy",
+    "settings.systemProxy": "App Proxy",
+    "settings.systemProxyEnable": "Enable app proxy",
     "settings.systemProxyDesc":
-      "Applies to: local command environment on the desktop (Bash / background tasks / automation scripts), providers with “Use system proxy” checked, update checks and skill downloads.",
+      "Applies to: local command environment on the desktop (Bash / background tasks / automation scripts), providers with “Use app proxy” checked, update checks and skill downloads.",
     "settings.systemProxyInvalid":
       "The proxy is enabled. Enter a valid host and port; affected requests fail until the configuration is valid.",
+    "settings.systemProxyEnableHint":
+      "Enter a valid proxy host and port before enabling the proxy.",
     "settings.systemProxyType": "Proxy type",
     "settings.systemProxyHost": "Proxy host",
     "settings.systemProxyPort": "Port",
@@ -2793,9 +2796,9 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.systemProxyPassword": "Password (optional)",
     "settings.systemProxyPasswordConfigured": "Proxy password saved",
     "settings.systemProxyPasswordClear": "Clear",
-    "settings.providerUseSystemProxy": "Use system proxy",
+    "settings.providerUseSystemProxy": "Use app proxy",
     "settings.providerUseSystemProxyDesc":
-      "Route this provider's model requests through the system proxy configured in System settings. Falls back to a direct connection while the system proxy is disabled.",
+      "Route this provider's model requests through the app proxy. Falls back to a direct connection while the app proxy is disabled.",
     "settings.light": "Light",
     "settings.lightDesc": "Bright and clean light interface",
     "settings.dark": "Dark",

@@ -13,6 +13,13 @@ import {
 } from "../../components/icons";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../components/ui/select";
 import { SUPPORTED_LOCALES, useLocale } from "../../i18n";
 import {
   type ExecutionMode,
@@ -81,15 +88,26 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
   }
 
   const systemProxy = settings.system.systemProxy;
-  const systemProxyInvalid =
-    systemProxy.enabled &&
-    (!isValidSystemProxyHost(systemProxy.host) ||
-      !Number.isInteger(systemProxy.port) ||
-      systemProxy.port < 1 ||
-      systemProxy.port > 65535);
-  // 密码走"本地草稿 + blur 提交"：WebUI 的设置 state 持久前会被脱敏（密码置空），
-  // 直接绑定 state 会导致输入即被清空；草稿只在提交时进入 settings。
+  // host/port/username/password 走"本地草稿 + blur 提交"：失焦才写入 settings，
+  // 避免逐字符触发同步；且 WebUI 设置 state 持久前会脱敏密码，草稿避免输入即被清空。
+  const [proxyHostDraft, setProxyHostDraft] = useState<string | null>(null);
+  const [proxyPortDraft, setProxyPortDraft] = useState<string | null>(null);
+  const [proxyUsernameDraft, setProxyUsernameDraft] = useState<string | null>(null);
   const [proxyPasswordDraft, setProxyPasswordDraft] = useState<string | null>(null);
+  // 护栏 A：host + port 有效才算配置可用（端口在启用时必填有效）。
+  // 用"草稿优先"的生效值计算：blur 提交前开关若仍禁用，点击开关触发的 blur
+  // 会先把按钮变回可用，但落在禁用按钮上的这次 click 已被浏览器吞掉，需点两次。
+  const effectiveProxyHost = (proxyHostDraft ?? systemProxy.host).trim();
+  const effectiveProxyPort =
+    proxyPortDraft !== null ? Number.parseInt(proxyPortDraft, 10) : systemProxy.port;
+  const proxyConfigValid =
+    isValidSystemProxyHost(effectiveProxyHost) &&
+    Number.isInteger(effectiveProxyPort) &&
+    effectiveProxyPort >= 1 &&
+    effectiveProxyPort <= 65535;
+  const systemProxyInvalid = systemProxy.enabled && !proxyConfigValid;
+  // 配置无效且当前未启用时禁止开启开关（护栏 A）；已启用时始终允许关闭。
+  const proxyToggleDisabled = !systemProxy.enabled && !proxyConfigValid;
 
   function patchSystemProxy(patch: Partial<SystemProxyConfig>) {
     setSettings((prev) =>
@@ -97,6 +115,28 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
         systemProxy: { ...prev.system.systemProxy, ...patch },
       }),
     );
+  }
+
+  function commitProxyHostDraft() {
+    if (proxyHostDraft !== null) {
+      patchSystemProxy({ host: proxyHostDraft.trim() });
+      setProxyHostDraft(null);
+    }
+  }
+
+  function commitProxyPortDraft() {
+    if (proxyPortDraft !== null) {
+      const parsed = Number.parseInt(proxyPortDraft, 10);
+      patchSystemProxy({ port: Number.isNaN(parsed) ? 0 : parsed });
+      setProxyPortDraft(null);
+    }
+  }
+
+  function commitProxyUsernameDraft() {
+    if (proxyUsernameDraft !== null) {
+      patchSystemProxy({ username: proxyUsernameDraft.trim() });
+      setProxyUsernameDraft(null);
+    }
   }
 
   function commitProxyPasswordDraft() {
@@ -326,116 +366,113 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
           <AgentActivationSwitch
             checked={systemProxy.enabled}
             title={t("settings.systemProxyEnable")}
+            disabled={proxyToggleDisabled}
             onToggle={() => patchSystemProxy({ enabled: !systemProxy.enabled })}
           />
         </div>
         <p className="text-xs text-muted-foreground">{t("settings.systemProxyDesc")}</p>
         {systemProxyInvalid ? (
           <p className="text-xs text-destructive">{t("settings.systemProxyInvalid")}</p>
+        ) : proxyToggleDisabled ? (
+          <p className="text-xs text-muted-foreground">{t("settings.systemProxyEnableHint")}</p>
         ) : null}
-        {systemProxy.enabled ? (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5 sm:col-span-2">
-              <Label className="text-xs font-medium text-muted-foreground">
-                {t("settings.systemProxyType")}
-              </Label>
-              <div className="grid grid-cols-2 gap-2 rounded-xl border border-border/60 bg-background p-1">
-                {(["socks5", "http"] as SystemProxyType[]).map((type) => (
-                  <button
-                    key={type}
-                    type="button"
-                    className={`rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-                      systemProxy.type === type
-                        ? "bg-muted text-foreground shadow-sm"
-                        : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-                    }`}
-                    onClick={() => patchSystemProxy({ type })}
-                  >
-                    {type === "socks5" ? "SOCKS5" : "HTTP"}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label
-                htmlFor="system-proxy-host"
-                className="text-xs font-medium text-muted-foreground"
-              >
-                {t("settings.systemProxyHost")}
-              </Label>
-              <Input
-                id="system-proxy-host"
-                value={systemProxy.host}
-                placeholder="127.0.0.1"
-                onChange={(event) => patchSystemProxy({ host: event.currentTarget.value })}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label
-                htmlFor="system-proxy-port"
-                className="text-xs font-medium text-muted-foreground"
-              >
-                {t("settings.systemProxyPort")}
-              </Label>
-              <Input
-                id="system-proxy-port"
-                type="number"
-                min={1}
-                max={65535}
-                value={systemProxy.port > 0 ? systemProxy.port : ""}
-                placeholder={systemProxy.type === "socks5" ? "1080" : "7890"}
-                onChange={(event) => {
-                  const parsed = Number.parseInt(event.currentTarget.value, 10);
-                  patchSystemProxy({ port: Number.isNaN(parsed) ? 0 : parsed });
-                }}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label
-                htmlFor="system-proxy-username"
-                className="text-xs font-medium text-muted-foreground"
-              >
-                {t("settings.systemProxyUsername")}
-              </Label>
-              <Input
-                id="system-proxy-username"
-                value={systemProxy.username}
-                onChange={(event) => patchSystemProxy({ username: event.currentTarget.value })}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label
-                htmlFor="system-proxy-password"
-                className="text-xs font-medium text-muted-foreground"
-              >
-                {t("settings.systemProxyPassword")}
-              </Label>
-              <Input
-                id="system-proxy-password"
-                type="password"
-                value={proxyPasswordDraft ?? systemProxy.password}
-                onChange={(event) => setProxyPasswordDraft(event.currentTarget.value)}
-                onBlur={commitProxyPasswordDraft}
-              />
-              {systemProxy.passwordConfigured &&
-              !(proxyPasswordDraft ?? systemProxy.password).trim() ? (
-                <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                  <span>{t("settings.systemProxyPasswordConfigured")}</span>
-                  <button
-                    type="button"
-                    className="underline-offset-2 hover:text-foreground hover:underline"
-                    onClick={() => {
-                      setProxyPasswordDraft(null);
-                      patchSystemProxy({ password: "", passwordConfigured: false });
-                    }}
-                  >
-                    {t("settings.systemProxyPasswordClear")}
-                  </button>
-                </div>
-              ) : null}
-            </div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-12 lg:items-start">
+          <div className="space-y-1.5 sm:col-span-2 lg:col-span-2">
+            <Label className="text-xs font-medium text-muted-foreground">
+              {t("settings.systemProxyType")}
+            </Label>
+            <Select
+              value={systemProxy.type}
+              onValueChange={(value) => patchSystemProxy({ type: value as SystemProxyType })}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue>{systemProxy.type === "socks5" ? "SOCKS5" : "HTTP"}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="http">HTTP</SelectItem>
+                <SelectItem value="socks5">SOCKS5</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
-        ) : null}
+          <div className="space-y-1.5 lg:col-span-4">
+            <Label
+              htmlFor="system-proxy-host"
+              className="text-xs font-medium text-muted-foreground"
+            >
+              {t("settings.systemProxyHost")}
+            </Label>
+            <Input
+              id="system-proxy-host"
+              value={proxyHostDraft ?? systemProxy.host}
+              placeholder="127.0.0.1"
+              onChange={(event) => setProxyHostDraft(event.currentTarget.value)}
+              onBlur={commitProxyHostDraft}
+            />
+          </div>
+          <div className="space-y-1.5 lg:col-span-2">
+            <Label
+              htmlFor="system-proxy-port"
+              className="text-xs font-medium text-muted-foreground"
+            >
+              {t("settings.systemProxyPort")}
+            </Label>
+            <Input
+              id="system-proxy-port"
+              type="number"
+              min={1}
+              max={65535}
+              value={proxyPortDraft ?? (systemProxy.port > 0 ? String(systemProxy.port) : "")}
+              placeholder={systemProxy.type === "socks5" ? "1080" : "7890"}
+              onChange={(event) => setProxyPortDraft(event.currentTarget.value)}
+              onBlur={commitProxyPortDraft}
+            />
+          </div>
+          <div className="space-y-1.5 lg:col-span-2">
+            <Label
+              htmlFor="system-proxy-username"
+              className="text-xs font-medium text-muted-foreground"
+            >
+              {t("settings.systemProxyUsername")}
+            </Label>
+            <Input
+              id="system-proxy-username"
+              value={proxyUsernameDraft ?? systemProxy.username}
+              onChange={(event) => setProxyUsernameDraft(event.currentTarget.value)}
+              onBlur={commitProxyUsernameDraft}
+            />
+          </div>
+          <div className="space-y-1.5 lg:col-span-2">
+            <Label
+              htmlFor="system-proxy-password"
+              className="text-xs font-medium text-muted-foreground"
+            >
+              {t("settings.systemProxyPassword")}
+            </Label>
+            <Input
+              id="system-proxy-password"
+              type="password"
+              value={proxyPasswordDraft ?? systemProxy.password}
+              onChange={(event) => setProxyPasswordDraft(event.currentTarget.value)}
+              onBlur={commitProxyPasswordDraft}
+            />
+            {systemProxy.passwordConfigured &&
+            !(proxyPasswordDraft ?? systemProxy.password).trim() ? (
+              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <span>{t("settings.systemProxyPasswordConfigured")}</span>
+                <button
+                  type="button"
+                  className="underline-offset-2 hover:text-foreground hover:underline"
+                  onClick={() => {
+                    setProxyPasswordDraft(null);
+                    patchSystemProxy({ password: "", passwordConfigured: false });
+                  }}
+                >
+                  {t("settings.systemProxyPasswordClear")}
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
       </section>
 
       <section className="space-y-3 rounded-2xl border border-border/60 bg-card p-4">

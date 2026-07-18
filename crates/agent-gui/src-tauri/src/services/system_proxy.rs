@@ -126,7 +126,7 @@ fn parse_proxy_mode(raw: Option<&Value>) -> ProxyMode {
     };
     let mut config = match serde_json::from_value::<SystemProxyConfig>(raw.clone()) {
         Ok(config) => config,
-        Err(_) => return ProxyMode::Invalid("系统代理配置格式无效".to_string()),
+        Err(_) => return ProxyMode::Invalid("应用代理配置格式无效".to_string()),
     };
     if !config.enabled {
         return ProxyMode::Disabled;
@@ -139,7 +139,7 @@ fn parse_proxy_mode(raw: Option<&Value>) -> ProxyMode {
     ) || config.port == 0
         || !host_is_valid(&config.host)
     {
-        return ProxyMode::Invalid("系统代理已启用，但地址、端口或类型无效".to_string());
+        return ProxyMode::Invalid("应用代理已启用，但地址、端口或类型无效".to_string());
     }
     match build_proxy(&config) {
         Ok(_) => ProxyMode::Enabled(config),
@@ -200,7 +200,7 @@ pub fn shell_proxy_envs() -> Result<Vec<(String, String)>, String> {
 
 fn build_proxy(config: &SystemProxyConfig) -> Result<reqwest::Proxy, String> {
     reqwest::Proxy::all(config.proxy_url())
-        .map_err(|_| format!("系统代理地址无效：{}", config.display_target()))
+        .map_err(|_| format!("应用代理地址无效：{}", config.display_target()))
 }
 
 fn async_client_builder_for_mode(mode: &ProxyMode) -> Result<reqwest::ClientBuilder, String> {
@@ -239,7 +239,7 @@ pub fn cached_client() -> Result<reqwest::Client, String> {
     }
     let client = async_client_builder_for_mode(&snapshot.mode)?
         .build()
-        .map_err(|_| "创建系统代理 HTTP 客户端失败".to_string())?;
+        .map_err(|_| "创建应用代理 HTTP 客户端失败".to_string())?;
     let current_revision = current_snapshot().revision;
     if current_revision == snapshot.revision {
         *state()
