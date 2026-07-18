@@ -201,6 +201,20 @@ test("Cron workspace pin stays wired across GUI and WebUI", () => {
     // the explicit clear signal — dropping the key would keep a stale pin.
     assert.match(source, /workdir: type === "http" \? "" : workdir\.trim\(\)/);
     assert.match(source, /workspaceOptions: CronWorkspaceOption\[\]/);
+    // Windows pins may spell the same directory differently than the
+    // workspace list ("\" vs "/", drive-letter case): matching must be
+    // shape-insensitive and snap to the list entry's spelling.
+    assert.match(source, /function comparableWorkdirPath\(path: string\)/);
+    assert.match(source, /const isWindowsShape = \/\^\[A-Za-z\]:\/\.test\(normalized\)/);
+    assert.match(
+      source,
+      /findWorkspaceOptionByPath\(workspaceOptions, initialWorkdir\)\?\.path \?\? initialWorkdir/,
+    );
+    assert.match(
+      source,
+      /Boolean\(initialWorkdir && !findWorkspaceOptionByPath\(workspaceOptions, initialWorkdir\)\)/,
+    );
+    assert.match(source, /: findWorkspaceOptionByPath\(workspaceOptions, workdir\)/);
   }
   for (const source of [guiCronViewSource, webCronViewSource]) {
     assert.match(source, /\{task\.workdir \? \(/);

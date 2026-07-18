@@ -72,6 +72,27 @@ const FOLLOW_ACTIVE_WORKSPACE_VALUE = "__follow-active-workspace__";
  */
 const CUSTOM_WORKDIR_VALUE = "__custom-workdir__";
 
+/**
+ * Windows paths reach us in several spellings ("\\" vs "/", drive-letter
+ * case, trailing separators) depending on which picker produced them, so a
+ * pinned workspace path must match its workspace entry shape-insensitively.
+ * POSIX paths stay case-sensitive.
+ */
+function comparableWorkdirPath(path: string) {
+  const normalized = path.trim().replace(/\\/g, "/");
+  if (!normalized) return "";
+  const isWindowsShape = /^[A-Za-z]:/.test(normalized) || normalized.startsWith("//");
+  const comparable = isWindowsShape ? normalized.toLowerCase() : normalized;
+  if (comparable === "/" || /^[a-z]:\/$/.test(comparable)) return comparable;
+  return comparable.replace(/\/+$/, "");
+}
+
+function findWorkspaceOptionByPath(options: CronWorkspaceOption[], path: string) {
+  const target = comparableWorkdirPath(path);
+  if (!target) return null;
+  return options.find((option) => comparableWorkdirPath(option.path) === target) ?? null;
+}
+
 const CRON_REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 type CronReasoningLevel = (typeof CRON_REASONING_LEVELS)[number];
@@ -153,15 +174,20 @@ export function CronTaskModal({
     const initial = initialData?.reasoning ?? "";
     return isCronReasoningLevel(initial) ? initial : DEFAULT_CRON_REASONING;
   });
-  const [workdir, setWorkdir] = useState(initialData?.workdir ?? "");
+  // A Windows pin may spell the same directory differently than the
+  // workspace list ("\\" vs "/", drive-letter case); snap it to the list
+  // entry's exact spelling so the Select matches it by value.
+  const [workdir, setWorkdir] = useState(() => {
+    const initialWorkdir = initialData?.workdir ?? "";
+    if (!initialWorkdir) return "";
+    return findWorkspaceOptionByPath(workspaceOptions, initialWorkdir)?.path ?? initialWorkdir;
+  });
   // A pinned path outside the workspace list (e.g. set by the CronTaskManager
   // tool, or whose workspace was removed) opens in custom-path mode so the
   // user sees and can edit the raw path.
   const [customWorkdir, setCustomWorkdir] = useState(() => {
     const initialWorkdir = initialData?.workdir ?? "";
-    return Boolean(
-      initialWorkdir && !workspaceOptions.some((option) => option.path === initialWorkdir),
-    );
+    return Boolean(initialWorkdir && !findWorkspaceOptionByPath(workspaceOptions, initialWorkdir));
   });
   const [selectedModelValue, setSelectedModelValue] = useState(() =>
     initialData?.selectedModel
@@ -189,7 +215,7 @@ export function CronTaskModal({
 
   const selectedWorkspaceOption = customWorkdir
     ? null
-    : (workspaceOptions.find((option) => option.path === workdir) ?? null);
+    : findWorkspaceOptionByPath(workspaceOptions, workdir);
 
   const formReady =
     Boolean(name.trim()) &&

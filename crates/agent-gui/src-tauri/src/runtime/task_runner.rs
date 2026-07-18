@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::runtime::platform::expand_tilde_path;
+use crate::runtime::platform::{expand_tilde_path, strip_windows_verbatim_prefix};
 
 const DEFAULT_HTTP_TIMEOUT_MS: u64 = 10_000;
 
@@ -75,7 +75,11 @@ pub(crate) fn resolve_workdir(workdir: Option<String>) -> Result<PathBuf, String
     if !metadata.is_dir() {
         return Err("Hook 工作目录必须是目录".to_string());
     }
-    fs::canonicalize(base).map_err(|e| format!("解析 Hook 工作目录失败：{e}"))
+    // The resolved path is stringified into PromptRunRequest.workdir and used
+    // as a child-process cwd: keep it in classic Win32 form, not `\\?\`.
+    fs::canonicalize(base)
+        .map(strip_windows_verbatim_prefix)
+        .map_err(|e| format!("解析 Hook 工作目录失败：{e}"))
 }
 
 fn build_header_map(headers: &Option<BTreeMap<String, String>>) -> Result<HeaderMap, String> {

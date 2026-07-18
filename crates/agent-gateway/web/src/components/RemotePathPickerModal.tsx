@@ -11,21 +11,27 @@ import { createPortal } from "react-dom";
 import { useLocale } from "../i18n";
 import { useModalMotion } from "../lib/shared/modalMotion";
 import { AlertTriangle, File, FolderOpen, HardDrive, Home, Loader2, Plus, X } from "./icons";
+import type { RemoteFsRoot } from "./remotePathPickerPaths";
+import {
+  basenameFromPath,
+  findBestRootForPath,
+  findRouteChild,
+  joinChildPath,
+  normalizePathForCompare,
+  stripTrailingPathSeparators,
+} from "./remotePathPickerPaths";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
 // WebUI-only global component: browses paths on the paired desktop (GUI)
 // device over the gateway. Directory mode reuses the fs_roots/fs_list_dirs
 // commands; file mode lists files alongside directories via fs_list.
+// Path helpers live in remotePathPickerPaths.ts: the desktop may be Windows,
+// so they handle POSIX and Windows shapes regardless of browser platform.
 
 export type RemotePathPickerMode = "directory" | "file";
 
-type FsRoot = {
-  id: string;
-  path: string;
-  kind: "home" | "root" | "drive";
-  label: string;
-};
+type FsRoot = RemoteFsRoot;
 
 type FsRootsResponse = {
   roots: FsRoot[];
@@ -87,71 +93,8 @@ function toErrorMessage(err: unknown, fallback: string) {
   return text || fallback;
 }
 
-function stripTrailingPathSeparators(path: string) {
-  const trimmed = path.trim();
-  if (!trimmed) return "";
-  if (trimmed === "/" || /^[A-Za-z]:[\\/]?$/.test(trimmed)) return trimmed;
-  return trimmed.replace(/[\\/]+$/, "");
-}
-
-function normalizePathForCompare(path: string) {
-  const normalized = stripTrailingPathSeparators(path).replace(/\\/g, "/");
-  return /^[A-Za-z]:/.test(normalized) ? normalized.toLowerCase() : normalized;
-}
-
-function isSameOrDescendantPath(path: string, ancestor: string) {
-  const current = normalizePathForCompare(path);
-  const parent = normalizePathForCompare(ancestor);
-  if (!current || !parent) return false;
-  if (current === parent) return true;
-  if (parent === "/") return current.startsWith("/");
-  if (/^[a-z]:\/?$/.test(parent)) {
-    return current.startsWith(parent.endsWith("/") ? parent : `${parent}/`);
-  }
-  return current.startsWith(`${parent}/`);
-}
-
-function findBestRootForPath(path: string, roots: FsRoot[]) {
-  return (
-    roots
-      .filter((root) => root.path && isSameOrDescendantPath(path, root.path))
-      .sort(
-        (left, right) =>
-          normalizePathForCompare(right.path).length - normalizePathForCompare(left.path).length,
-      )[0] ?? null
-  );
-}
-
-function findRouteChild(targetPath: string, entries: ChildEntry[]) {
-  return (
-    entries
-      .filter((entry) => entry.path && isSameOrDescendantPath(targetPath, entry.path))
-      .sort(
-        (left, right) =>
-          normalizePathForCompare(right.path).length - normalizePathForCompare(left.path).length,
-      )[0] ?? null
-  );
-}
-
 function mergeTreeIndexes(current: TreeItemIndex[] | undefined, additions: TreeItemIndex[]) {
   return Array.from(new Set([...(current ?? []), ...additions]));
-}
-
-function basenameFromPath(path: string) {
-  const normalized = stripTrailingPathSeparators(path);
-  if (!normalized) return "";
-  const parts = normalized.split(/[\\/]+/).filter(Boolean);
-  return parts[parts.length - 1] ?? normalized;
-}
-
-function joinChildPath(parent: string, relative: string) {
-  const base = stripTrailingPathSeparators(parent);
-  const separator = base.includes("\\") ? "\\" : "/";
-  const child = relative.replace(/^[\\/]+/, "");
-  if (!base) return child;
-  if (base === "/" || /^[A-Za-z]:$/.test(base))
-    return `${base}${separator === "\\" && base !== "/" ? "\\" : "/"}${child}`.replace("//", "/");
-  return `${base}${separator}${child}`;
 }
 
 type RemotePathPickerModalProps = {
