@@ -1,3 +1,5 @@
+// build_endpoint / build_grpc_url 属 gRPC 回退路径的既有覆盖：v1 移除时一并删除。
+#[allow(deprecated)]
 use super::{
     build_chat_event_envelope, build_chat_runtime_snapshot_envelope, build_endpoint,
     build_gateway_runtime_status_envelope, build_grpc_url,
@@ -499,6 +501,7 @@ fn set_disconnected_status_resets_runtime_fields_for_new_config() {
         connected_since: Some(123),
         last_heartbeat: Some(456),
         last_error: Some("previous error".to_string()),
+        protocol: Some("v2".to_string()),
     };
 
     set_disconnected_status(
@@ -560,6 +563,7 @@ fn gateway_connection_nudge_detects_offline_and_stale_sessions() {
         connected_since: None,
         last_heartbeat: None,
         last_error: None,
+        protocol: None,
     };
     assert!(gateway_connection_needs_restart(&status, &config, 1_000));
 
@@ -593,12 +597,16 @@ fn gateway_reconnect_backoff_is_fast_after_a_stable_session_and_bounded_on_failu
 }
 
 #[test]
+// gRPC 回退路径的既有覆盖：v1 移除时与被测函数一并删除。
+#[allow(deprecated)]
 fn build_https_gateway_endpoint_initializes_tls_provider() {
     build_endpoint("https://agent.cnweb.org:443", Duration::from_secs(30))
         .expect("build https gateway endpoint");
 }
 
 #[test]
+// gRPC 回退路径的既有覆盖：v1 移除时与被测函数一并删除。
+#[allow(deprecated)]
 fn build_grpc_url_prefers_explicit_endpoint() {
     let config = RemoteSettingsPayload {
         enabled: true,

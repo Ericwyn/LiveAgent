@@ -1,8 +1,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures_util::SinkExt as _;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt as _;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 use uuid::Uuid;
 
 use crate::commands::settings::RemoteSettingsPayload;
@@ -15,9 +18,160 @@ use crate::runtime::terminal::{
     TerminalSshCreateResponse, TerminalStreamEventPayload, TerminalStreamSnapshotResponse,
 };
 
+use super::gateway_proto::v2;
 use super::*;
 
 impl GatewayController {
+    /// v2 终端数据面（/ws/v2/terminal，角色 AGENT）：PTY/注册表侧播种口与 gRPC 版完全一致；
+    /// 仅当主链路运行在 v2 上时由 connect_and_serve_ws 生成本任务，传输选择随主链路贯通。
+    pub(crate) fn spawn_terminal_stream_ws(
+        self: &Arc<Self>,
+        config: RemoteSettingsPayload,
+        stop_rx: watch::Receiver<bool>,
+    ) -> tauri::async_runtime::JoinHandle<()> {
+        let controller = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            controller.run_terminal_stream_ws(config, stop_rx).await;
+        })
+    }
+
+    /// v2 终端流重连主循环，骨架与 gRPC 版一致（同一组退避常量）。
+    pub(crate) async fn run_terminal_stream_ws(
+        self: Arc<Self>,
+        config: RemoteSettingsPayload,
+        mut stop_rx: watch::Receiver<bool>,
+    ) {
+        let mut reconnect_delay = GATEWAY_TERMINAL_STREAM_RECONNECT_MIN;
+
+        loop {
+            if *stop_rx.borrow() {
+                break;
+            }
+
+            let attempt_started = Instant::now();
+            let result = Arc::clone(&self)
+                .run_terminal_stream_ws_once(config.clone(), stop_rx.clone())
+                .await;
+            if *stop_rx.borrow() {
+                break;
+            }
+            self.set_terminal_stream_sender(None);
+
+            if attempt_started.elapsed() >= GATEWAY_TERMINAL_STREAM_STABLE_AFTER {
+                reconnect_delay = GATEWAY_TERMINAL_STREAM_RECONNECT_MIN;
+            }
+            match result {
+                Ok(()) => eprintln!("gateway terminal ws stream closed; reconnecting"),
+                Err(error) => {
+                    eprintln!("gateway terminal ws stream stopped: {error}; reconnecting")
+                }
+            }
+
+            let delay = reconnect_delay;
+            reconnect_delay =
+                std::cmp::min(reconnect_delay * 2, GATEWAY_TERMINAL_STREAM_RECONNECT_MAX);
+            tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+
+        self.set_terminal_stream_sender(None);
+    }
+
+    /// 单次 v2 终端流连接：hello ok=true 即就绪（v1 的合成 "gateway-ready" detach 握手帧不复存在），
+    /// 随后双向透传 TerminalStreamFrame；周期 WS Ping 取代 v1 的 detach 保活帧。
+    pub(crate) async fn run_terminal_stream_ws_once(
+        self: Arc<Self>,
+        config: RemoteSettingsPayload,
+        mut stop_rx: watch::Receiver<bool>,
+    ) -> Result<(), String> {
+        let ws_url = build_ws_url(&config.gateway_url, config.grpc_port, GATEWAY_WS_TERMINAL_PATH)?;
+        let hello = build_client_hello(
+            &config.token,
+            effective_agent_id(&config),
+            crate::app_version().to_string(),
+        );
+
+        let connect = connect_terminal_ws(&ws_url, hello);
+        tokio::pin!(connect);
+        let (mut ws, _server_hello) = tokio::select! {
+            changed = stop_rx.changed() => {
+                let _ = changed;
+                return Ok(());
+            }
+            result = &mut connect => {
+                result.map_err(|error| format!("gateway terminal ws connect failed: {error}"))?
+            }
+        };
+
+        let (terminal_tx, mut terminal_rx) = mpsc::channel::<proto::TerminalStreamFrame>(4096);
+        self.set_terminal_stream_sender(Some(terminal_tx.clone()));
+
+        let result = async {
+            let mut keepalive = tokio::time::interval(GATEWAY_TERMINAL_STREAM_KEEPALIVE_INTERVAL);
+            keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            keepalive.tick().await;
+            loop {
+                tokio::select! {
+                    changed = stop_rx.changed() => {
+                        if changed.is_err() || *stop_rx.borrow() {
+                            return Ok(());
+                        }
+                    }
+                    _ = keepalive.tick() => {
+                        ws.send(WsMessage::Ping(Vec::new().into()))
+                            .await
+                            .map_err(|error| format!("gateway terminal ws keepalive failed: {error}"))?;
+                    }
+                    frame = terminal_rx.recv() => {
+                        let Some(frame) = frame else {
+                            return Err("gateway terminal ws outbound channel closed".to_string());
+                        };
+                        let client_frame = v2::TerminalClientFrame {
+                            payload: Some(v2::terminal_client_frame::Payload::Frame(frame)),
+                        };
+                        ws.send(encode_ws_frame(&client_frame))
+                            .await
+                            .map_err(|error| format!("gateway terminal ws send failed: {error}"))?;
+                    }
+                    message = ws.next() => {
+                        match message {
+                            None => return Ok(()),
+                            Some(Err(error)) => {
+                                return Err(format!("gateway terminal ws receive failed: {error}"));
+                            }
+                            Some(Ok(WsMessage::Binary(data))) => {
+                                let server_frame: v2::TerminalServerFrame = decode_ws_frame(&data)?;
+                                if let Some(v2::terminal_server_frame::Payload::Frame(frame)) =
+                                    server_frame.payload
+                                {
+                                    if let Err(error) = self.handle_terminal_stream_frame(frame).await {
+                                        eprintln!("handle gateway terminal stream frame failed: {error}");
+                                    }
+                                }
+                            }
+                            Some(Ok(WsMessage::Close(_))) => return Ok(()),
+                            // Ping/Pong 由 tungstenite 自动处理。
+                            Some(Ok(_)) => {}
+                        }
+                    }
+                }
+            }
+        }
+        .await;
+
+        self.clear_terminal_stream_sender_if_current(&terminal_tx);
+        result
+    }
+
+    /// v1 gRPC 终端流入口，行为与迁移前逐字一致。
+    #[deprecated(note = "v1 gRPC 链路仅作旧网关回退，v1 移除时一并删除")]
+    #[allow(deprecated)] // 函数体即回退路径，成串调用同批弃用的 gRPC 辅助函数。
     pub(crate) fn spawn_terminal_stream(
         self: &Arc<Self>,
         client: proto::agent_gateway_client::AgentGatewayClient<tonic::transport::Channel>,
@@ -32,6 +186,8 @@ impl GatewayController {
         })
     }
 
+    #[deprecated(note = "v1 gRPC 链路仅作旧网关回退，v1 移除时一并删除")]
+    #[allow(deprecated)] // 函数体即回退路径，成串调用同批弃用的 gRPC 辅助函数。
     pub(crate) async fn run_terminal_stream(
         self: Arc<Self>,
         client: proto::agent_gateway_client::AgentGatewayClient<tonic::transport::Channel>,
@@ -78,6 +234,8 @@ impl GatewayController {
         self.set_terminal_stream_sender(None);
     }
 
+    #[deprecated(note = "v1 gRPC 链路仅作旧网关回退，v1 移除时一并删除")]
+    #[allow(deprecated)] // 函数体即回退路径，成串调用同批弃用的 gRPC 辅助函数。
     pub(crate) async fn run_terminal_stream_once(
         self: Arc<Self>,
         mut client: proto::agent_gateway_client::AgentGatewayClient<tonic::transport::Channel>,
@@ -842,7 +1000,11 @@ pub(crate) fn format_gateway_terminal_stream_rpc_error(
         return format!("gateway terminal stream {phase} failed: {message}");
     }
 
-    let endpoint = build_grpc_url(config).unwrap_or_else(|_| "invalid endpoint".to_string());
+    let endpoint = {
+        // gRPC 回退路径专用的错误提示。
+        #[allow(deprecated)]
+        build_grpc_url(config).unwrap_or_else(|_| "invalid endpoint".to_string())
+    };
     format!(
         "gateway terminal stream {phase} failed: {message}. \
          The gateway terminal stream requires a gRPC endpoint that supports HTTP/2 bidi streams; \

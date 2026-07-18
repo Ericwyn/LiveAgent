@@ -2,12 +2,14 @@ use std::future::Future;
 use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
+use futures_util::SinkExt as _;
 use reqwest::Url;
 use serde_json::Value;
 use tauri::Emitter;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{ClientTlsConfig, Endpoint};
 
@@ -15,7 +17,16 @@ use crate::commands::settings::RemoteSettingsPayload;
 use crate::runtime::terminal::TerminalEventPayload;
 use crate::services::gateway_bridge;
 
+use super::gateway_proto::v2;
 use super::*;
+
+/// v2 链路一次连接尝试的失败分类（模块内部）。
+enum WsServeError {
+    /// 握手层失败（旧网关无 /ws/v2/agent）：允许同一次尝试内回退 gRPC。
+    Handshake(String),
+    /// 鉴权拒绝或链路已建立后出错：不回退，按普通连接错误上抛；下次重连仍先试 v2。
+    Fatal(String),
+}
 
 struct AbortTaskOnDrop(tauri::async_runtime::JoinHandle<()>);
 
@@ -94,7 +105,203 @@ impl GatewayController {
         }
     }
 
+    /// 连接尝试入口：先试 v2；握手层失败（旧网关无 /ws/v2/agent，典型 404/非 101）时同一次尝试内
+    /// 回退 v1 gRPC，鉴权被拒不回退直接上抛；每次重连都重新从 v2 试起。
+    /// 回退会话最多持续 [`GATEWAY_WS_UPGRADE_RETRY_INTERVAL`] 便主动断开重试 v2——防瞬时抖动
+    /// 导致长驻 v1、污染"v1 流量归零"信号（重连亚秒级且会话层幂等对账，中断代价可忽略）。
     pub(crate) async fn connect_and_serve(
+        self: &Arc<Self>,
+        config: RemoteSettingsPayload,
+        config_rx: &mut watch::Receiver<RemoteSettingsPayload>,
+    ) -> Result<(), String> {
+        match self.connect_and_serve_ws(config.clone(), config_rx).await {
+            Ok(()) => Ok(()),
+            Err(WsServeError::Fatal(error)) => Err(error),
+            Err(WsServeError::Handshake(error)) => {
+                eprintln!("gateway v2 handshake failed: {error}; falling back to v1 gRPC");
+                #[allow(deprecated)]
+                {
+                    tokio::select! {
+                        result = self.connect_and_serve_grpc(config, config_rx) => result,
+                        _ = tokio::time::sleep(GATEWAY_WS_UPGRADE_RETRY_INTERVAL) => {
+                            eprintln!(
+                                "gateway v1 fallback session reached upgrade-retry window; \
+                                 reconnecting to retry v2"
+                            );
+                            Ok(())
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// v2 主链路：hello 握手（等价 Authenticate）后按 gRPC AgentConnect 完全相同的语义收发信封
+    /// （双通道合并、状态迁移、对账、分发），外加取代 h2 keepalive 的存活看门狗。
+    async fn connect_and_serve_ws(
+        self: &Arc<Self>,
+        config: RemoteSettingsPayload,
+        config_rx: &mut watch::Receiver<RemoteSettingsPayload>,
+    ) -> Result<(), WsServeError> {
+        let ws_url = build_ws_url(&config.gateway_url, config.grpc_port, GATEWAY_WS_AGENT_PATH)
+            .map_err(WsServeError::Handshake)?;
+        let hello = build_client_hello(
+            &config.token,
+            effective_agent_id(&config),
+            crate::app_version().to_string(),
+        );
+
+        let connect_result =
+            await_abortable_on_reconfigure(&config, config_rx, async move {
+                Ok(connect_agent_ws(&ws_url, hello).await)
+            })
+            .await
+            .map_err(WsServeError::Fatal)?;
+        let (mut ws, server_hello) = match connect_result {
+            None => return Ok(()),
+            Some(Ok(established)) => established,
+            Some(Err(WsHandshakeError::Handshake(error))) => {
+                return Err(WsServeError::Handshake(error))
+            }
+            Some(Err(WsHandshakeError::AuthRejected(error))) => {
+                return Err(WsServeError::Fatal(error))
+            }
+        };
+
+        let (outbound_tx, outbound_rx) = mpsc::channel::<proto::AgentEnvelope>(4096);
+        self.set_outbound_sender(Some(outbound_tx));
+        // 控制小通道：Pong 不排在数据信封之后（与 gRPC 路径同策略，下方公平合并进出站流）。
+        let (outbound_control_tx, outbound_control_rx) =
+            mpsc::channel::<proto::AgentEnvelope>(GATEWAY_OUTBOUND_CONTROL_QUEUE_DEPTH);
+        self.set_outbound_control_sender(Some(outbound_control_tx));
+        let (terminal_stop_tx, terminal_stop_rx) = watch::channel(false);
+        let terminal_task = self.spawn_terminal_stream_ws(config.clone(), terminal_stop_rx);
+
+        let serve_result = async {
+            let connected_at = now_unix_seconds();
+            self.publish_status(|status| {
+                status.online = true;
+                status.enabled = true;
+                status.configured = true;
+                status.gateway_url = config.gateway_url.clone();
+                status.agent_id = effective_agent_id(&config);
+                status.session_id = Some(server_hello.session_id.clone());
+                status.connected_since = Some(connected_at);
+                status.last_heartbeat = Some(connected_at);
+                status.last_error = None;
+                status.protocol = Some("v2".to_string());
+            });
+
+            let _reconcile_task = AbortTaskOnDrop(self.spawn_post_connect_reconciliation());
+
+            let mut outbound = ReceiverStream::new(outbound_control_rx)
+                .merge(ReceiverStream::new(outbound_rx));
+
+            // 存活看门狗（取代 h2 keepalive）：任何入站帧刷新计时；静默超 3×心跳周期发 WS Ping
+            // 探活，宽限期内仍无入站则判链路已死走重连。服务端 Ping 的 Pong 由 tungstenite 自动回。
+            let heartbeat_period = if server_hello.heartbeat_period_seconds > 0 {
+                Duration::from_secs(u64::from(server_hello.heartbeat_period_seconds))
+            } else {
+                GATEWAY_WS_DEFAULT_HEARTBEAT_PERIOD
+            };
+            let idle_timeout = heartbeat_period * 3;
+            let mut last_inbound = Instant::now();
+            let mut probe_deadline: Option<Instant> = None;
+
+            let receive_result = loop {
+                let watchdog_deadline = probe_deadline.unwrap_or(last_inbound + idle_timeout);
+                tokio::select! {
+                    changed = config_rx.changed() => {
+                        if changed.is_err() {
+                            break Ok(());
+                        }
+                        let next = config_rx.borrow().clone();
+                        if next != config {
+                            break Ok(());
+                        }
+                    }
+                    envelope = outbound.next() => {
+                        match envelope {
+                            None => break Err("gateway outbound channels closed".to_string()),
+                            Some(envelope) => {
+                                let frame = v2::AgentClientFrame {
+                                    payload: Some(v2::agent_client_frame::Payload::Envelope(envelope)),
+                                };
+                                if let Err(error) = ws.send(encode_ws_frame(&frame)).await {
+                                    break Err(format!("gateway ws send failed: {error}"));
+                                }
+                            }
+                        }
+                    }
+                    message = ws.next() => {
+                        match message {
+                            None => break Err("gateway ws stream closed".to_string()),
+                            Some(Err(error)) => break Err(format!("gateway ws receive failed: {error}")),
+                            Some(Ok(message)) => {
+                                last_inbound = Instant::now();
+                                probe_deadline = None;
+                                match message {
+                                    WsMessage::Binary(data) => {
+                                        let frame: v2::AgentServerFrame = match decode_ws_frame(&data) {
+                                            Ok(frame) => frame,
+                                            Err(error) => break Err(error),
+                                        };
+                                        // 重复 hello 或空帧：忽略（服务端同样宽容）。
+                                        if let Some(v2::agent_server_frame::Payload::Envelope(envelope)) = frame.payload {
+                                            self.touch_heartbeat();
+                                            if let Err(error) = self.handle_gateway_envelope(envelope).await {
+                                                break Err(error);
+                                            }
+                                        }
+                                    }
+                                    WsMessage::Close(frame) => {
+                                        break Err(match frame {
+                                            Some(frame) => format!(
+                                                "gateway ws closed (code {}): {}",
+                                                u16::from(frame.code),
+                                                frame.reason
+                                            ),
+                                            None => "gateway ws closed".to_string(),
+                                        });
+                                    }
+                                    // v2 链路不允许文本帧，视为协议错误。
+                                    WsMessage::Text(_) => {
+                                        break Err("gateway ws sent unexpected text frame".to_string());
+                                    }
+                                    // Ping/Pong 由 tungstenite 处理，此处仅刷新看门狗。
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(watchdog_deadline)) => {
+                        if probe_deadline.is_some() {
+                            break Err(format!(
+                                "gateway ws link stale: no inbound frames for {}s",
+                                idle_timeout.saturating_add(GATEWAY_WS_PROBE_GRACE).as_secs()
+                            ));
+                        }
+                        if let Err(error) = ws.send(WsMessage::Ping(Vec::new().into())).await {
+                            break Err(format!("gateway ws liveness ping failed: {error}"));
+                        }
+                        probe_deadline = Some(Instant::now() + GATEWAY_WS_PROBE_GRACE);
+                    }
+                }
+            };
+            receive_result
+        }
+        .await;
+
+        let _ = terminal_stop_tx.send(true);
+        terminal_task.abort();
+        self.set_terminal_stream_sender(None);
+        serve_result.map_err(WsServeError::Fatal)
+    }
+
+    /// v1 gRPC 主链路（Authenticate + AgentConnect），行为与迁移前逐字一致。
+    #[deprecated(note = "v1 gRPC 链路仅作旧网关回退，v1 移除时一并删除")]
+    #[allow(deprecated)] // 函数体即回退路径，成串调用同批弃用的 gRPC 辅助函数。
+    pub(crate) async fn connect_and_serve_grpc(
         self: &Arc<Self>,
         config: RemoteSettingsPayload,
         config_rx: &mut watch::Receiver<RemoteSettingsPayload>,
@@ -182,6 +389,7 @@ impl GatewayController {
                 status.connected_since = Some(connected_at);
                 status.last_heartbeat = Some(connected_at);
                 status.last_error = None;
+                status.protocol = Some("v1".to_string());
             });
 
             let _reconcile_task = AbortTaskOnDrop(self.spawn_post_connect_reconciliation());
@@ -492,6 +700,7 @@ pub(crate) fn build_error_response_envelope(
     }
 }
 
+#[deprecated(note = "v1 gRPC 链路仅作旧网关回退，v1 移除时一并删除")]
 pub(crate) fn build_grpc_url(config: &RemoteSettingsPayload) -> Result<String, String> {
     let grpc_endpoint = config.grpc_endpoint.trim();
     if !grpc_endpoint.is_empty() {
@@ -534,6 +743,7 @@ pub(crate) fn is_h2_protocol_error(message: &str) -> bool {
     normalized.contains("h2 protocol error") || normalized.contains("http2 error")
 }
 
+#[deprecated(note = "v1 gRPC 链路仅作旧网关回退，v1 移除时一并删除")]
 pub(crate) fn build_endpoint(
     grpc_url: &str,
     keepalive_interval: Duration,
@@ -573,6 +783,7 @@ pub(crate) fn ensure_rustls_crypto_provider() {
     });
 }
 
+#[deprecated(note = "v1 gRPC 链路仅作旧网关回退，v1 移除时一并删除")]
 pub(crate) fn insert_bearer_metadata(
     metadata: &mut tonic::metadata::MetadataMap,
     token: &str,
@@ -616,4 +827,5 @@ pub(crate) fn set_disconnected_status(
     status.connected_since = None;
     status.last_heartbeat = None;
     status.last_error = last_error;
+    status.protocol = None;
 }

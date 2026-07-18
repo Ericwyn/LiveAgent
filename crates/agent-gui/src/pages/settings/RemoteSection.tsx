@@ -137,6 +137,8 @@ type GatewayRuntimeStatus = {
   connectedSince?: number | null;
   lastHeartbeat?: number | null;
   lastError?: string | null;
+  /** 当前链路协议："v2"（WebSocket+Protobuf）或 "v1"（弃用的 gRPC 回退）。 */
+  protocol?: string | null;
 };
 
 function updateRemoteSettings(
@@ -313,8 +315,11 @@ export function RemoteSection(props: SettingsSectionProps) {
   const isConnected = Boolean(status.online);
   const grpcEndpoint = useMemo(() => buildGrpcEndpoint(settings.remote), [settings.remote]);
 
+  const connectedProtocol = status.protocol?.trim();
   const statusText = isConnected
-    ? t("settings.remoteConnected")
+    ? connectedProtocol
+      ? t("settings.remoteConnectedProtocol").replace("{protocol}", connectedProtocol)
+      : t("settings.remoteConnected")
     : settings.remote.enabled
       ? status.lastError?.trim() || t("settings.remoteDisconnected")
       : t("settings.remoteDisconnected");
