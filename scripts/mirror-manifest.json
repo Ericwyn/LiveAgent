@@ -76,6 +76,7 @@
     "lib/tools/systemToolOptions.ts",
     "lib/tools/builtinToolCatalog.ts",
     "lib/skills/builtin.ts",
+    "lib/skills/clawHub.ts",
     "lib/skills/index.ts",
     "lib/shared/id.ts",
     "pages/settings/SystemToolsSection.tsx",
