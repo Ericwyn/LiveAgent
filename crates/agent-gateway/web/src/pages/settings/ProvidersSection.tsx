@@ -308,7 +308,11 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
     editingModelContextWindow !== null && editingModelMaxOutputToken !== null;
 
   function saveInlineModelSettings() {
-    if (!editingModel || editingModelContextWindow === null || editingModelMaxOutputToken === null) {
+    if (
+      !editingModel ||
+      editingModelContextWindow === null ||
+      editingModelMaxOutputToken === null
+    ) {
       return;
     }
     const nextModel: ProviderModelConfig = {
@@ -509,10 +513,7 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
 
           <div className="settings-modal-body min-w-0 flex-1 overflow-y-auto px-6 py-5 max-[720px]:px-3.5 max-[720px]:pb-[calc(0.875rem+env(safe-area-inset-bottom))] max-[720px]:pt-3.5">
             {activePanel === "general" ? (
-              <section
-                key="general"
-                className="provider-panel-enter"
-              >
+              <section key="general" className="provider-panel-enter">
                 <div className="text-sm font-semibold">{t("settings.basicInformation")}</div>
 
                 <div className="mt-3 space-y-1.5">
@@ -852,10 +853,7 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
                 </div>
               </section>
             ) : activePanel === "network" ? (
-              <section
-                key="network"
-                className="provider-panel-enter"
-              >
+              <section key="network" className="provider-panel-enter">
                 <div className="text-sm font-semibold">{t("settings.providerDialogNetwork")}</div>
                 <div className="mt-3 flex items-center gap-3 rounded-xl border bg-card px-4 py-3">
                   <div className="min-w-0 flex-1 text-sm font-medium">
@@ -869,10 +867,7 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
                 </div>
               </section>
             ) : (
-              <section
-                key="headers"
-                className="provider-panel-enter"
-              >
+              <section key="headers" className="provider-panel-enter">
                 <div className="text-sm font-semibold">{t("settings.customHeaders")}</div>
 
                 <div className="mt-3 overflow-hidden rounded-xl border max-[720px]:border-0 max-[720px]:overflow-visible">
