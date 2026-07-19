@@ -408,9 +408,10 @@ function editorTextIsEmpty(editor: HTMLElement) {
 }
 
 /** Unlike editorTextIsEmpty, this doesn't trim — a leading/trailing space
- *  still counts as content so the placeholder hides as soon as the user types. */
+ *  still counts as content so the placeholder hides as soon as the user types.
+ *  Zero-width caret anchors are artifacts, not content, and are ignored. */
 function editorHasNoContent(editor: HTMLElement) {
-  return (editor.textContent || "").length === 0;
+  return removeCaretAnchors(editor.textContent || "").length === 0;
 }
 
 function editorRangeIsInsideRoot(root: HTMLElement, range: Range) {
@@ -934,6 +935,28 @@ function ensureCaretAnchorAfterChip(chip: HTMLElement): { textNode: Text; offset
   return { textNode, offset: anchor.caretOffset };
 }
 
+/** A text position right before the chip. Without a preceding text node the
+ *  caret would sit on a bare element offset, which browsers render at the
+ *  chip's inner edge — so create a zero-width anchor to host it instead. */
+function ensureCaretAnchorBeforeChip(chip: HTMLElement): { textNode: Text; offset: number } | null {
+  const parent = chip.parentNode;
+  if (!parent) return null;
+
+  const prev = chip.previousSibling;
+  if (prev?.nodeType === Node.TEXT_NODE) {
+    const textNode = prev as Text;
+    // An empty text node has no text box to carry the caret; seed it.
+    if (textNode.data.length === 0) {
+      textNode.data = CARET_ANCHOR_TEXT;
+    }
+    return { textNode, offset: textNode.data.length };
+  }
+
+  const textNode = document.createTextNode(CARET_ANCHOR_TEXT);
+  parent.insertBefore(textNode, chip);
+  return { textNode, offset: textNode.data.length };
+}
+
 function normalizeCaretAfterChip(root: HTMLElement) {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return false;
@@ -960,6 +983,15 @@ function normalizeCaretAfterChip(root: HTMLElement) {
     const childBefore = node.childNodes[offset - 1] ?? null;
     if (isComposerChipElement(childBefore)) {
       const anchor = ensureCaretAnchorAfterChip(childBefore);
+      if (!anchor) return false;
+      placeCaretInTextNode(anchor.textNode, anchor.offset);
+      return true;
+    }
+    // An element-position caret right before a chip renders at the chip's
+    // inner edge; move it into a real text position before the chip.
+    const childAfter = node.childNodes[offset] ?? null;
+    if (isComposerChipElement(childAfter)) {
+      const anchor = ensureCaretAnchorBeforeChip(childAfter);
       if (!anchor) return false;
       placeCaretInTextNode(anchor.textNode, anchor.offset);
       return true;
@@ -1460,14 +1492,137 @@ function deleteChipBeforeCursor(
     placeCaretInTextNode(nextCaretTextNode, 0);
   } else {
     const previousNode = chipIndex > 0 ? (parent.childNodes[chipIndex - 1] ?? null) : null;
+    const followingNode = parent.childNodes[chipIndex] ?? null;
     if (previousNode?.nodeType === Node.TEXT_NODE) {
       const previousTextNode = previousNode as Text;
       placeCaretInTextNode(previousTextNode, previousTextNode.data.length);
+    } else if (isComposerChipElement(previousNode)) {
+      const anchor = ensureCaretAnchorAfterChip(previousNode);
+      if (anchor) {
+        placeCaretInTextNode(anchor.textNode, anchor.offset);
+      }
+    } else if (isComposerChipElement(followingNode)) {
+      const anchor = ensureCaretAnchorBeforeChip(followingNode);
+      if (anchor) {
+        placeCaretInTextNode(anchor.textNode, anchor.offset);
+      }
     } else {
       placeCaretInNode(parent, Math.min(chipIndex, parent.childNodes.length));
     }
   }
 
+  return true;
+}
+
+function placeCaretBeforeChip(chip: HTMLElement) {
+  const prev = chip.previousSibling;
+  if (isComposerChipElement(prev)) {
+    // Adjacent chips: rest at the canonical anchor after the previous one.
+    const anchor = ensureCaretAnchorAfterChip(prev);
+    if (!anchor) return false;
+    placeCaretInTextNode(anchor.textNode, anchor.offset);
+    return true;
+  }
+  const anchor = ensureCaretAnchorBeforeChip(chip);
+  if (!anchor) return false;
+  placeCaretInTextNode(anchor.textNode, anchor.offset);
+  return true;
+}
+
+function placeCaretAfterChip(chip: HTMLElement) {
+  const anchor = ensureCaretAnchorAfterChip(chip);
+  if (!anchor) return false;
+  placeCaretInTextNode(anchor.textNode, anchor.offset);
+  return true;
+}
+
+/** Check if the content right after the cursor is a mention chip, return it if so. */
+function chipAfterCursor(root: HTMLElement): HTMLElement | null {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
+
+  const { startContainer: node, startOffset: offset } = sel.getRangeAt(0);
+  if (!root.contains(node)) return null;
+
+  if (node.nodeType === Node.TEXT_NODE) {
+    const textNode = node as Text;
+    const rest = textNode.data.slice(offset);
+    if (removeCaretAnchors(rest).length === 0 && isComposerChipElement(textNode.nextSibling)) {
+      return textNode.nextSibling;
+    }
+    return null;
+  }
+
+  if (node === root || (node.nodeType === Node.ELEMENT_NODE && root.contains(node))) {
+    const childAfter = (node as HTMLElement).childNodes[offset] ?? null;
+    if (isComposerChipElement(childAfter)) {
+      return childAfter;
+    }
+  }
+
+  return null;
+}
+
+/** Move a caret that ended up inside a non-editable chip back outside it. */
+function ejectCaretFromChip(root: HTMLElement, side: "before" | "after") {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return false;
+
+  const node = sel.getRangeAt(0).startContainer;
+  if (!root.contains(node)) return false;
+
+  const chip = closestComposerChipFromNode(root, node);
+  if (!chip) return false;
+  return side === "before" ? placeCaretBeforeChip(chip) : placeCaretAfterChip(chip);
+}
+
+/**
+ * ←/→ treat a chip plus its caret anchor as one atomic unit: the caret only
+ * ever rests right before the chip or at the anchor after it. The browser's
+ * default one-character move would land between chip and anchor, where the
+ * keyup normalisation snaps it straight back (the caret would never cross).
+ */
+function stepCaretOverChip(root: HTMLElement, direction: "left" | "right") {
+  if (ejectCaretFromChip(root, direction === "left" ? "before" : "after")) {
+    return true;
+  }
+  if (direction === "left") {
+    const target = chipBeforeCursor(root);
+    return target ? placeCaretBeforeChip(target.chip) : false;
+  }
+  const chip = chipAfterCursor(root);
+  return chip ? placeCaretAfterChip(chip) : false;
+}
+
+/** Forward-delete twin of deleteChipBeforeCursor: remove the chip right
+ *  after the cursor together with its caret anchor, mirroring how Backspace
+ *  treats chip + anchor as one atomic unit (native forward delete would
+ *  drop only the chip element and leave its anchor space behind). */
+function deleteChipAfterCursor(
+  root: HTMLElement,
+  largePastes: Map<string, MentionComposerLargePaste>,
+) {
+  const chip = chipAfterCursor(root);
+  if (!chip) return false;
+
+  const largePasteId = chip.getAttribute(LARGE_PASTE_TAG_ATTR);
+  if (largePasteId) {
+    largePastes.delete(largePasteId);
+  }
+
+  const next = chip.nextSibling;
+  if (next?.nodeType === Node.TEXT_NODE) {
+    const nextTextNode = next as Text;
+    nextTextNode.data = stripLeadingCaretAnchorText(nextTextNode.data);
+    if (nextTextNode.data.length === 0) {
+      nextTextNode.remove();
+    }
+  }
+
+  chip.remove();
+  // The collapsed caret stayed where it was; it may now sit on a bare
+  // element offset right next to another chip — re-anchor it.
+  normalizeCaretAfterChip(root);
   return true;
 }
 
@@ -2717,7 +2872,9 @@ export const MentionComposer = memo(
       resetPromptHistoryRecall();
       closeComposerContextMenu();
       const el = editorRef.current;
-      if (el) {
+      // Mutating the composing text node (or moving the selection) mid-IME
+      // cancels the composition; compositionEnd re-runs the anchor cleanup.
+      if (el && !isComposingRef.current) {
         removeStaleCaretAnchorsAroundSelection(el);
         normalizeCaretAfterChip(el);
       }
@@ -2737,6 +2894,12 @@ export const MentionComposer = memo(
     const handleKeyUp = useCallback(
       (e: KeyboardEvent<HTMLDivElement>) => {
         if (disabled || isComposingRef.current || isImeKeyboardEvent(e)) return;
+        const el = editorRef.current;
+        // Arrow moves must never leave the caret inside a non-editable chip
+        // (WebKit can drop it there); eject toward the travel direction.
+        if (el && e.key.startsWith("Arrow")) {
+          ejectCaretFromChip(el, e.key === "ArrowLeft" ? "before" : "after");
+        }
         if (
           e.key === "ArrowDown" ||
           e.key === "ArrowUp" ||
@@ -2744,9 +2907,14 @@ export const MentionComposer = memo(
           e.key === "Enter" ||
           e.key === "Escape"
         ) {
+          // ↑/↓ move the caret by x-position and can land on chip-boundary
+          // dead zones just like clicks do; keep them anchor-normalised.
+          if (el && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+            removeStaleCaretAnchorsAroundSelection(el);
+            normalizeCaretAfterChip(el);
+          }
           return;
         }
-        const el = editorRef.current;
         if (el) {
           removeStaleCaretAnchorsAroundSelection(el);
           normalizeCaretAfterChip(el);
@@ -2759,7 +2927,9 @@ export const MentionComposer = memo(
     const handleMouseUp = useCallback(() => {
       const el = editorRef.current;
       if (!el) return;
-      if (normalizeCaretAfterChip(el)) {
+      // WebKit can drop a click's caret inside the non-editable chip itself.
+      const ejected = ejectCaretFromChip(el, "after");
+      if (normalizeCaretAfterChip(el) || ejected) {
         refreshMention();
       }
     }, [refreshMention]);
@@ -2999,10 +3169,40 @@ export const MentionComposer = memo(
           }
         }
 
+        // ←/→ next to a mention chip: step over the whole chip. The default
+        // single-character move would land inside the caret-anchor dead zone
+        // and get snapped right back — or, in WebKit, inside the chip itself.
+        if (
+          (e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+          !e.shiftKey &&
+          !e.altKey &&
+          !e.ctrlKey &&
+          !e.metaKey
+        ) {
+          const el = editorRef.current;
+          if (el && stepCaretOverChip(el, e.key === "ArrowLeft" ? "left" : "right")) {
+            e.preventDefault();
+            scheduleComposerSelectionScroll(el);
+            return;
+          }
+        }
+
         // Backspace: delete mention chip if cursor is right after one
         if (e.key === "Backspace") {
           const el = editorRef.current;
           if (el && deleteChipBeforeCursor(el, largePastesRef.current)) {
+            e.preventDefault();
+            resetPromptHistoryRecall();
+            refreshEmptyState();
+            refreshMention();
+            return;
+          }
+        }
+
+        // Delete: forward-delete the chip right after the cursor as one unit
+        if (e.key === "Delete") {
+          const el = editorRef.current;
+          if (el && deleteChipAfterCursor(el, largePastesRef.current)) {
             e.preventDefault();
             resetPromptHistoryRecall();
             refreshEmptyState();
