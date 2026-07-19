@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -12,13 +13,15 @@ import { createPortal } from "react-dom";
 import { ChevronDown, Copy } from "../../../components/icons";
 import { ScrollArea } from "../../../components/ui/scroll-area";
 import { useLocale } from "../../../i18n";
+import { buildFloorEntries } from "../../../lib/chat-floor-nav/floorModel";
 import { BOTTOM_REATTACH_ZONE_PX } from "../../../lib/chat-scroll/scrollFollowCore";
 import { useScrollFollow } from "../../../lib/chat-scroll/useScrollFollow";
 import { useMenuExitPresence } from "../../../lib/shared/menuMotion";
 import { cn } from "../../../lib/shared/utils";
 import { ChatEmptyState } from "./ChatEmptyState";
+import { FloorNavRail } from "./FloorNavRail";
 import { RowInteractionProvider, useRowInteractionStore } from "./rowInteraction";
-import { TranscriptList } from "./TranscriptList";
+import { TranscriptList, type TranscriptNavHandle } from "./TranscriptList";
 import { HistorySwitchLoadingOverlay } from "./TranscriptLoadingStates";
 import type { ChatTranscriptProps } from "./transcriptTypes";
 import {
@@ -83,6 +86,24 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
     trackKeys: true,
     config: { reattachZonePx: BOTTOM_REATTACH_ZONE_PX },
   });
+
+  // 楼层导航：从时间线派生用户消息楼层；当前楼层由 TranscriptList 上报。
+  // 不在此处按 conversationId 重置——TranscriptList 按会话重挂载后其挂载
+  // effect 会先于本组件的 effect 执行并上报新会话锚点，这里再置 null 会把
+  // 刚上报的值清掉且被子组件的去重永久抑制。行 key 含 segmentId，跨会话
+  // 不会误匹配，等待子组件上报即可。
+  const floors = useMemo(() => buildFloorEntries(historyItems), [historyItems]);
+  const [activeFloorKey, setActiveFloorKey] = useState<string | null>(null);
+  const transcriptNavRef = useRef<TranscriptNavHandle | null>(null);
+  const handleFloorJump = useCallback(
+    (rowKey: string) => {
+      // 粘底跟随激活时程序化滚动会被立即拽回底部——先按「跳入历史」语义解除
+      // 跟随，再执行跳转。
+      scrollFollowHandle.breakFollow();
+      transcriptNavRef.current?.scrollToRowKey(rowKey);
+    },
+    [scrollFollowHandle],
+  );
 
   // Run-scoped state reaches row action bars through this store instead of
   // row props, so settled rows stay memo-stable across run start/settle.
@@ -238,6 +259,8 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
                 usageContextWindow={usageContextWindow}
                 workspaceRoot={workspaceRoot}
                 gitClient={gitClient}
+                navRef={transcriptNavRef}
+                onAnchorUserRowChange={setActiveFloorKey}
                 onResendFromEdit={onResendFromEdit}
                 onBranchConversation={onBranchConversation}
                 onFirstLayoutSettled={handleFirstLayoutSettled}
@@ -248,6 +271,15 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
           <div style={{ height: transcriptBottomReservePx }} />
         </div>
       </ScrollArea>
+      {!showNoModelsState && !showStartChatState && !isTranscriptSettling ? (
+        <FloorNavRail
+          conversationId={conversationId}
+          floors={floors}
+          activeRowKey={activeFloorKey}
+          bottomReservePx={transcriptBottomReservePx}
+          onJump={handleFloorJump}
+        />
+      ) : null}
       {!following ? (
         <button
           type="button"

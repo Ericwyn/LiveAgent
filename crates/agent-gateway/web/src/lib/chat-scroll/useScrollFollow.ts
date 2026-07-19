@@ -58,6 +58,11 @@ export type ScrollFollowHandle = {
   // (the jump button); programmatic pins (conversation switch, run start)
   // stay instant via stickToBottom.
   jumpToBottom: () => void;
+  // Detach follow mode for a programmatic jump into history (floor
+  // navigation, search results): reuses the historyKey semantics so the
+  // engine treats it exactly like a user-initiated jump away from the
+  // bottom, instead of re-pinning over the new scroll position.
+  breakFollow: () => void;
   isFollowing: () => boolean;
 };
 
@@ -379,13 +384,24 @@ export function useScrollFollow(args: UseScrollFollowArgs): {
     viewport,
   ]);
 
+  const breakFollow = useCallback(() => {
+    cancelJumpAnimation();
+    // 与键盘 historyKey 路径同构：溢出与否取实测值（无溢出时 reducer 不解除
+    // 跟随，避免「视觉在底部却被搁浅为 off」），时间基与其余事件一致用 Date.now()。
+    const el = boundViewportRef.current;
+    const hasOverflow =
+      el !== null && el.scrollHeight - el.clientHeight > SCROLLABLE_OVERFLOW_MIN_PX;
+    dispatch({ type: "historyKey", hasOverflow, now: Date.now() });
+  }, [cancelJumpAnimation, dispatch]);
+
   const handle = useMemo<ScrollFollowHandle>(
     () => ({
       stickToBottom,
       jumpToBottom,
+      breakFollow,
       isFollowing: () => stateRef.current.following,
     }),
-    [jumpToBottom, stickToBottom],
+    [breakFollow, jumpToBottom, stickToBottom],
   );
 
   return { handle, following };
