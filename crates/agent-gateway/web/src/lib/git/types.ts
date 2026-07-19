@@ -143,6 +143,22 @@ export type GitRepositoryDiscovery = {
   repositories: GitDiscoveredRepository[];
 };
 
+export function gitDiscoveredRepositoryLabel(repo: GitDiscoveredRepository): string {
+  return repo.isWorkspaceRoot ? repo.name : repo.relativePath || repo.name;
+}
+
+export function selectedGitRepositoryLabel(
+  repositories: GitDiscoveredRepository[],
+  selectedRoot: string,
+): string {
+  const selected = repositories.find((repo) =>
+    selectedRoot === ""
+      ? repo.isWorkspaceRoot
+      : !repo.isWorkspaceRoot && repo.root === selectedRoot,
+  );
+  return selected ? gitDiscoveredRepositoryLabel(selected) : "";
+}
+
 export type GitClient = {
   status(workdir: string): Promise<GitRepositoryState>;
   discoverRepositories?(workdir: string): Promise<GitRepositoryDiscovery>;

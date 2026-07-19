@@ -10,14 +10,18 @@
 import { useEffect, useId } from "react";
 import { createPortal } from "react-dom";
 import { useLocale } from "../../../i18n";
+import { gitDiscoveredRepositoryLabel, selectedGitRepositoryLabel } from "../../../lib/git/types";
 import { cn } from "../../../lib/shared/utils";
 import {
   AlertTriangle,
   BrushCleaning,
+  Check,
   CheckCircle2,
+  ChevronDown,
   Cloud,
   Download,
   Eye,
+  Folder,
   GitBranch,
   History,
   Loader2,
@@ -29,6 +33,13 @@ import {
   XCircle,
 } from "../../icons";
 import { Button } from "../../ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "../../ui/dropdown-menu";
 import { Input } from "../../ui/input";
 import { useRightDockToolContext } from "../RightDockContext";
 import {
@@ -429,20 +440,51 @@ export function GitReviewToolbar(props: {
             {state.head || t("projectTools.gitReviewTitle")}
           </div>
           {repositories.length > 1 ? (
-            <select
-              value={selectedRepoRoot}
-              onChange={(event) => selectRepository(event.target.value)}
-              disabled={operationBusy}
-              className="mt-0.5 block w-full max-w-full cursor-pointer truncate rounded border border-border bg-background px-1 py-px text-[calc(11px*var(--zone-font-scale,1))] text-muted-foreground outline-none transition-colors hover:text-foreground focus:border-ring"
-              title={t("projectTools.gitReview.repositoryPicker")}
-              aria-label={t("projectTools.gitReview.repositoryPicker")}
-            >
-              {repositories.map((repo) => (
-                <option key={repo.root} value={repo.isWorkspaceRoot ? "" : repo.root}>
-                  {repo.isWorkspaceRoot ? repo.name : repo.relativePath || repo.name}
-                </option>
-              ))}
-            </select>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                disabled={operationBusy}
+                className="mt-0.5 inline-flex min-w-0 max-w-full items-center gap-1 rounded-md border border-border/60 bg-muted/40 py-px pl-1 pr-1.5 text-[calc(11px*var(--zone-font-scale,1))] font-medium text-muted-foreground outline-hidden transition-colors hover:border-border hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+                title={t("projectTools.gitReview.repositoryPicker")}
+                aria-label={t("projectTools.gitReview.repositoryPicker")}
+              >
+                <Folder className="h-3 w-3 shrink-0 opacity-70" />
+                <span className="min-w-0 truncate">
+                  {selectedGitRepositoryLabel(repositories, selectedRepoRoot) ||
+                    state.repoRoot ||
+                    t("projectTools.gitReview.noRepository")}
+                </span>
+                <ChevronDown className="h-3 w-3 shrink-0 opacity-60" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-56">
+                <DropdownMenuLabel className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  {t("projectTools.gitReview.repositoryPicker")}
+                </DropdownMenuLabel>
+                {repositories.map((repo) => {
+                  const value = repo.isWorkspaceRoot ? "" : repo.root;
+                  const selected = value === selectedRepoRoot;
+                  return (
+                    <DropdownMenuItem
+                      key={repo.root}
+                      disabled={operationBusy}
+                      onSelect={() => {
+                        if (!selected) selectRepository(value);
+                      }}
+                      className="gap-2 text-xs"
+                      title={repo.root}
+                    >
+                      {selected ? (
+                        <Check className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      )}
+                      <span className="min-w-0 flex-1 truncate">
+                        {gitDiscoveredRepositoryLabel(repo)}
+                      </span>
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
           ) : (
             <div className="truncate text-[calc(11px*var(--zone-font-scale,1))] text-muted-foreground">
               {state.repoRoot || disabledMessage || t("projectTools.gitReview.noRepository")}

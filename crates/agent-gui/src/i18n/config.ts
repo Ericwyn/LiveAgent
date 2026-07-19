@@ -623,6 +623,8 @@ export const translations: Record<Locale, Record<string, string>> = {
     "git.branchSelector.create": "创建",
     "git.branchSelector.createNewBranch": "创建新分支",
     "git.branchSelector.initRepository": "初始化仓库",
+    "git.branchSelector.switchRepository": "切换仓库",
+    "git.branchSelector.repositoryLabel": "仓库",
     "git.branchSelector.initRepositoryTitle": "初始化 Git 仓库",
     "git.branchSelector.initRepositoryDescription":
       "在当前目录创建 .git，并写入可选的本地 Git 用户信息。",
@@ -2537,6 +2539,8 @@ export const translations: Record<Locale, Record<string, string>> = {
     "git.branchSelector.create": "Create",
     "git.branchSelector.createNewBranch": "Create New Branch",
     "git.branchSelector.initRepository": "Initialize Repository",
+    "git.branchSelector.switchRepository": "Switch repository",
+    "git.branchSelector.repositoryLabel": "Repository",
     "git.branchSelector.initRepositoryTitle": "Initialize Git Repository",
     "git.branchSelector.initRepositoryDescription":
       "Create .git in the current directory and optionally save local Git user details.",
