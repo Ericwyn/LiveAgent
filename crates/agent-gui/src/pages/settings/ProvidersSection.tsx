@@ -355,14 +355,23 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
     });
   }
 
+  const editingModelContextWindow = editingModel
+    ? parsePositiveInteger(editingModel.contextWindow)
+    : null;
+  const editingModelMaxOutputToken = editingModel
+    ? parsePositiveInteger(editingModel.maxOutputToken)
+    : null;
+  const canSaveEditingModel =
+    editingModelContextWindow !== null && editingModelMaxOutputToken !== null;
+
   function saveInlineModelSettings() {
-    if (!editingModel) return;
+    if (!editingModel || editingModelContextWindow === null || editingModelMaxOutputToken === null) {
+      return;
+    }
     const nextModel: ProviderModelConfig = {
       ...editingModel.model,
-      contextWindow:
-        parsePositiveInteger(editingModel.contextWindow) ?? editingModel.model.contextWindow,
-      maxOutputToken:
-        parsePositiveInteger(editingModel.maxOutputToken) ?? editingModel.model.maxOutputToken,
+      contextWindow: editingModelContextWindow,
+      maxOutputToken: editingModelMaxOutputToken,
       capabilities: editingModel.capabilities,
     };
     setModels((prev) => prev.map((item) => (item.id === nextModel.id ? nextModel : item)));
@@ -555,7 +564,7 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
             {activePanel === "general" ? (
               <section
                 key="general"
-                className="animate-in fade-in-0 slide-in-from-bottom-1 duration-[180ms] motion-reduce:animate-none"
+                className="provider-panel-enter"
               >
                 <div className="text-sm font-semibold">{t("settings.basicInformation")}</div>
 
@@ -790,6 +799,13 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
                                     <Label>{t("settings.contextWindow")}</Label>
                                     <Input
                                       inputMode="numeric"
+                                      aria-invalid={
+                                        editingModelContextWindow === null ? true : undefined
+                                      }
+                                      className={cn(
+                                        editingModelContextWindow === null &&
+                                          "ring-1 ring-inset ring-destructive focus-visible:ring-destructive",
+                                      )}
                                       value={editingModel.contextWindow}
                                       onChange={(event) =>
                                         setEditingModel((prev) =>
@@ -807,6 +823,13 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
                                     <Label>{t("settings.maxOutputToken")}</Label>
                                     <Input
                                       inputMode="numeric"
+                                      aria-invalid={
+                                        editingModelMaxOutputToken === null ? true : undefined
+                                      }
+                                      className={cn(
+                                        editingModelMaxOutputToken === null &&
+                                          "ring-1 ring-inset ring-destructive focus-visible:ring-destructive",
+                                      )}
                                       value={editingModel.maxOutputToken}
                                       onChange={(event) =>
                                         setEditingModel((prev) =>
@@ -845,6 +868,12 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
                                   })}
                                 </div>
 
+                                {!canSaveEditingModel ? (
+                                  <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                                    {t("settings.positiveIntegerRequired")}
+                                  </div>
+                                ) : null}
+
                                 <div className="mt-3 flex justify-end gap-2">
                                   <Button
                                     type="button"
@@ -854,7 +883,12 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
                                   >
                                     {t("settings.cancel")}
                                   </Button>
-                                  <Button type="button" size="sm" onClick={saveInlineModelSettings}>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    disabled={!canSaveEditingModel}
+                                    onClick={saveInlineModelSettings}
+                                  >
                                     {t("settings.save")}
                                   </Button>
                                 </div>
@@ -870,7 +904,7 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
             ) : activePanel === "network" ? (
               <section
                 key="network"
-                className="animate-in fade-in-0 slide-in-from-bottom-1 duration-[180ms] motion-reduce:animate-none"
+                className="provider-panel-enter"
               >
                 <div className="text-sm font-semibold">{t("settings.providerDialogNetwork")}</div>
                 <div className="mt-3 flex items-center gap-3 rounded-xl border bg-card px-4 py-3">
@@ -887,7 +921,7 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
             ) : (
               <section
                 key="headers"
-                className="animate-in fade-in-0 slide-in-from-bottom-1 duration-[180ms] motion-reduce:animate-none"
+                className="provider-panel-enter"
               >
                 <div className="text-sm font-semibold">{t("settings.customHeaders")}</div>
 
