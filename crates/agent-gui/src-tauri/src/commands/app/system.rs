@@ -1099,6 +1099,30 @@ pub async fn system_pick_folder(initial_workdir: Option<String>) -> Result<Optio
 }
 
 #[tauri::command(rename_all = "snake_case")]
+pub async fn system_pick_file(
+    initial_workdir: Option<String>,
+    filter_name: Option<String>,
+    extensions: Option<Vec<String>>,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = FileDialog::new();
+        if let Some(initial_dir) = resolve_pick_folder_initial_dir(initial_workdir) {
+            dialog = dialog.set_directory(initial_dir);
+        }
+        if let Some(extensions) = extensions.filter(|list| !list.is_empty()) {
+            let extension_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+            dialog = dialog.add_filter(filter_name.as_deref().unwrap_or("Files"), &extension_refs);
+        }
+
+        Ok(dialog
+            .pick_file()
+            .map(|path| path.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|e| format!("system_pick_file join 失败：{e}"))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn system_create_project_folder(
     parent: String,
     name: String,

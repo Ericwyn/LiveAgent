@@ -537,6 +537,16 @@ export async function scanExternalMcpServers(): Promise<ExternalMcpToolScan[]> {
   return response.externalMcp ?? [];
 }
 
+/** 解析用户手选的本地 MCP 配置文件（mcpServers JSON 或 Codex config.toml） */
+export async function scanMcpConfigFile(path: string): Promise<ExternalMcpToolScan> {
+  const response = await manageSkill({ action: "scan_mcp_file", path });
+  const scan = response.externalMcp?.[0];
+  if (!scan) {
+    throw new Error("SkillsManager scan_mcp_file did not return a scan result");
+  }
+  return scan;
+}
+
 export async function startSkillInstallJob(
   params: Record<string, unknown>,
 ): Promise<SkillInstallJobSnapshot> {
