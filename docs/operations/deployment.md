@@ -122,7 +122,7 @@ Keychain 中必须是带私钥的 `Developer ID Application` identity。若 macO
 | macOS Intel | `macos-15-intel` | `LiveAgent-vX.Y.Z-macOS-x64.dmg`，以及 updater 使用的 `.app.tar.gz` / `.sig`。 |
 | macOS Apple Silicon | `macos-14` | `LiveAgent-vX.Y.Z-macOS-aarch64.dmg`，以及 updater 使用的 `.app.tar.gz` / `.sig`。 |
 | Windows x64 | `windows-latest` | `LiveAgent-vX.Y.Z-Windows-x64.msi`、`LiveAgent-vX.Y.Z-Windows-x64-Setup.exe`，以及 updater 使用的 `.zip` / `.sig`。 |
-| Linux x64 | `ubuntu-latest` | `LiveAgent-vX.Y.Z-Linux-x86_64.AppImage`、`.deb`、`.rpm`，以及 updater 使用的 `.tar.gz` / `.sig`。 |
+| Linux x64 | `ubuntu-22.04` | `LiveAgent-vX.Y.Z-Linux-x86_64.AppImage`、`.deb`、`.rpm`，以及 updater 使用的 `.tar.gz` / `.sig`。Linux 构建固定在 Ubuntu 22.04，以保持对 GLIBC 2.35 及以上环境的兼容。 |
 
 发布 job 会在上传平台产物后生成并上传 `latest.json`。桌面端「设置 -> 关于」会根据用户是否允许预发布，从 GitHub Releases 中筛选带 `latest.json` 的正式 / 预发布版本；未允许预发布时只检查正式 Release。
 

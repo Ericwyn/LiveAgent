@@ -236,7 +236,7 @@ jobs:
 
   linux:
     name: Linux x64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: release-metadata
     env:
       LIVEAGENT_APP_VERSION: ${{ needs.release-metadata.outputs.app_version }}
@@ -293,6 +293,20 @@ jobs:
           LIVEAGENT_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
           LIVEAGENT_UPDATE_REPOSITORY: ${{ github.repository }}
         run: pnpm tauri build --config src-tauri/tauri.linux.release.conf.json --config "$LIVEAGENT_TAURI_VERSION_CONFIG" --target x86_64-unknown-linux-gnu --bundles appimage deb rpm
+
+      - name: Verify Ubuntu 22.04 GLIBC baseline
+        working-directory: crates/agent-gui
+        run: |
+          set -euo pipefail
+          binary_path="$(find src-tauri/target target -type f -name liveagent -path '*/release/*' ! -path '*bundle*' -print -quit 2>/dev/null || true)"
+          test -n "$binary_path"
+          required_glibc_versions="$(readelf --version-info "$binary_path" | rg -o 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu)"
+          highest_required_glibc="$(printf '%s\n' "$required_glibc_versions" | tail -n 1)"
+          echo "Highest required GLIBC version: $highest_required_glibc"
+          if [ "$(printf '%s\n' "$highest_required_glibc" 'GLIBC_2.35' | sort -V | tail -n 1)" != 'GLIBC_2.35' ]; then
+            echo "The Linux binary requires a newer GLIBC than Ubuntu 22.04 provides."
+            exit 1
+          fi
 
       - name: Stage Linux artifacts
         run: |
