@@ -44,6 +44,8 @@ fn main() {
         .build_server(false)
         // v1 gRPC 服务已随 v1 协议移除，proto 只含消息；桌面端仅消费消息类型。
         .build_client(false)
+        // Ubuntu 22.04 的 protoc 仍要求显式开启 proto3 optional 支持。
+        .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(&[proto_v1, proto_v2], &[gateway_root])
         .expect("compile gateway protos");
 

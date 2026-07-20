@@ -1,0 +1,108 @@
+name: Linux Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_version:
+        description: Optional application version for the build, for example 1.1.4-ubuntu22
+        required: false
+        default: 0.0.0-dev
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 22.19.0
+
+jobs:
+  linux:
+    name: Linux x64
+    runs-on: ubuntu-22.04
+    env:
+      LIVEAGENT_APP_VERSION: ${{ inputs.app_version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10.32.1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            protobuf-compiler \
+            rpm \
+            wget
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/agent-gui/src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: crates/agent-gui
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare build version config
+        working-directory: crates/agent-gui
+        run: |
+          node --input-type=module -e '
+            import { writeFileSync } from "node:fs";
+            writeFileSync(
+              "src-tauri/tauri.manual.version.conf.json",
+              `${JSON.stringify(
+                {
+                  version: process.env.LIVEAGENT_APP_VERSION,
+                  bundle: { createUpdaterArtifacts: false },
+                },
+                null,
+                2,
+              )}\n`,
+            );
+          '
+
+      - name: Build Linux bundles
+        working-directory: crates/agent-gui
+        run: pnpm tauri build --config src-tauri/tauri.linux.release.conf.json --config src-tauri/tauri.manual.version.conf.json --target x86_64-unknown-linux-gnu --bundles appimage deb rpm
+
+      - name: Verify Ubuntu 22.04 GLIBC baseline
+        working-directory: crates/agent-gui
+        run: |
+          set -euo pipefail
+          binary_path="$(find ../../target src-tauri/target target -type f -name liveagent -path '*/release/*' ! -path '*bundle*' -print -quit 2>/dev/null || true)"
+          test -n "$binary_path"
+          required_glibc_versions="$(readelf --version-info "$binary_path" | rg -o 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu)"
+          highest_required_glibc="$(printf '%s\n' "$required_glibc_versions" | tail -n 1)"
+          echo "Highest required GLIBC version: $highest_required_glibc"
+          if [ "$(printf '%s\n' "$highest_required_glibc" 'GLIBC_2.35' | sort -V | tail -n 1)" != 'GLIBC_2.35' ]; then
+            echo "The Linux binary requires a newer GLIBC than Ubuntu 22.04 provides."
+            exit 1
+          fi
+
+      - name: Upload Linux bundles
+        uses: actions/upload-artifact@v7
+        with:
+          name: liveagent-linux-x64-${{ inputs.app_version }}
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
+            crates/agent-gui/src-tauri/target/release/bundle/appimage/*.AppImage
+            crates/agent-gui/src-tauri/target/release/bundle/deb/*.deb
+            crates/agent-gui/src-tauri/target/release/bundle/rpm/*.rpm
+          if-no-files-found: error
